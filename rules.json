@@ -1,65 +1,59 @@
 {
-  "watchlist": ["BTCUSDT"],
-  "default_timeframe": "1",
+  "watchlist": ["NVDA", "AAPL", "MSFT", "META", "AMZN", "GOOGL", "SPY"],
+  "default_timeframe": "30S",
 
   "strategy": {
-    "name": "10-Second Momentum Scalper",
+    "name": "Mag-7 + SPY VWAP/Delta Bias",
     "sources": [
-      "Price momentum — buy if last close > previous close (green candle)",
-      "RSI filter — only trade when RSI is not at an extreme (30–70 range)"
+      "VWAP — price above/below as directional anchor",
+      "Volume Delta — buy/sell pressure confirmation on current 30s bar"
     ],
     "primary_timeframes": [
-      "1-minute (signal source)",
-      "10-second execution loop"
+      "30-second bars (signal + execution)"
     ]
   },
 
   "indicators": {
-    "rsi_14": "Momentum filter. Only trade when RSI is between 30–70 (avoid extremes).",
-    "price_momentum": "Compare last close vs previous close. Up = long signal. Down = short signal."
+    "vwap": "Intraday directional anchor. Price above = bullish context, below = bearish context.",
+    "volume_delta": "Net buy/sell pressure on current bar. Positive = buyers in control, negative = sellers. Near-zero = no conviction."
   },
 
   "bias_criteria": {
     "bullish": [
-      "Last 1-min candle closed higher than the one before it",
-      "RSI is between 30 and 70"
+      "Price is above VWAP",
+      "Volume Delta is positive (buyers absorbing offers)"
     ],
     "bearish": [
-      "Last 1-min candle closed lower than the one before it",
-      "RSI is between 30 and 70"
+      "Price is below VWAP",
+      "Volume Delta is negative (sellers hitting bids)"
+    ],
+    "divergence_warning_bearish": [
+      "Price is above VWAP but Volume Delta is negative",
+      "Interpretation: price extended above VWAP but sellers stepping in — possible fade or reversal setup"
+    ],
+    "divergence_warning_bullish": [
+      "Price is below VWAP but Volume Delta is positive",
+      "Interpretation: price below VWAP but buyers absorbing — possible mean-reversion long setup"
     ],
     "neutral": [
-      "RSI is above 70 (overbought — skip)",
-      "RSI is below 30 (oversold — skip)",
-      "Candle close change is less than 0.05% (chop — skip)"
+      "Volume Delta is near zero (less than 50 contracts/shares absolute)",
+      "No clear conviction from buyers or sellers — wait for delta to develop"
     ]
   },
 
-  "entry_rules": {
-    "long": [
-      "Last close > previous close by at least 0.05%",
-      "RSI between 30 and 70",
-      "Enter market buy immediately"
-    ],
-    "short": [
-      "Last close < previous close by at least 0.05%",
-      "RSI between 30 and 70",
-      "Enter market sell immediately"
-    ]
+  "delta_thresholds": {
+    "near_zero": "Absolute delta < 50 — treat as neutral",
+    "strong": "Absolute delta > 500 — high conviction directional bar",
+    "extreme": "Absolute delta > 2000 — institutional-size flow, trade with trend"
   },
 
-  "exit_rules": [
-    "Exit automatically after 10 seconds (next loop tick closes previous position)",
-    "No manual exit management — pure time-based scalp"
+  "bias_rules": [
+    "Check VWAP position first — it sets the directional context",
+    "Check Volume Delta second — it confirms or contradicts the VWAP bias",
+    "Divergence warnings are higher-priority signals than clean bullish/bearish — flag them explicitly",
+    "If delta is near zero, mark bias as neutral regardless of VWAP position",
+    "SPY bias should be noted separately as the macro backdrop for all individual names"
   ],
 
-  "risk_rules": [
-    "Fixed trade size: 1% of portfolio per trade",
-    "Maximum trade size: $3.00",
-    "Maximum 6 trades per 60-second run",
-    "No stop loss — exit is time-based at next tick",
-    "For demo purposes only — minimum BitGet order size may apply"
-  ],
-
-  "notes": "Demo strategy for YouTube video. Runs 6 trades over 60 seconds, one every 10 seconds. Signal is simple price momentum on 1-min candles with RSI sanity check."
+  "notes": "Intraday scalping setup for Mag-7 equities + SPY on 30-second bars. VWAP resets daily. Volume Delta reflects current bar only — not cumulative. Run morning_brief at session open after first 5-10 minutes of price discovery."
 }

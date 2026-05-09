@@ -9,6 +9,35 @@ discovery-log.json
 .env
 .env.*
 !.env.example
+.webull_token
+.webull_consumer_token
 
 # Install-time symlink created by the one-shot setup
 AGENTS.md
+
+# Runtime state — process-local
+logs/
+paper-ledger.json
+portfolio-theta.json
+voice-queue.json
+daily-bias.json
+options-flow.json
+account-tier.json
+moc-signal.json
+moo-signal.json
+moc-data.json
+hank_stats.json
+session-log-*.jsonl
+session-status-*.txt
+session-monitor-output.txt
+overnight-news.json
+mag6-state.json
+spy-levels.json
+qqq-levels.json
+iwm-levels.json
+briefing.json
+subscribers.json
+subscribers_backup.json
+paper-ledger-backup-*.json
+fvg-state-*.json
+sweep-state-*.json
