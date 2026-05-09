@@ -270,6 +270,80 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, { success: false, msg: 'use Electron main process for tv-launch' });
   }
 
+  // ─── FVG / sweep state surfacing ─────────────────────────
+  // Reads the per-instrument state files written by the monitor scanners.
+  // Caller filters/buckets here so the frontend doesn't reimplement the
+  // unfilled/tested/filled split or the cooldown math.
+  const SUPPORTED_INSTRUMENTS = ['SPY', 'QQQ', 'IWM'];
+  const SWEEP_COOLDOWN_MS     = 15 * 60_000;
+  const SWEEP_RECENT_WINDOW_S = 30 * 60;
+
+  if (req.method === 'GET' && url.startsWith('/api/fvg/')) {
+    const inst = url.slice('/api/fvg/'.length).toUpperCase();
+    if (!SUPPORTED_INSTRUMENTS.includes(inst)) return sendError(res, 400, 'unknown instrument');
+    const state = readJson(`fvg-state-${inst}.json`) || { gaps: [], lastScan: 0 };
+    const gaps  = Array.isArray(state.gaps) ? state.gaps : [];
+    const active = gaps.filter(g => (g.status === 'unfilled' || g.status === 'tested') && !g.firedAt);
+    const recent = gaps.filter(g => g.status === 'filled' || g.status === 'invalidated' || g.firedAt).slice(-20);
+    return sendJson(res, {
+      instrument: inst,
+      active, recent,
+      counts: { active: active.length, recent: recent.length, total: gaps.length },
+      lastScan: state.lastScan ?? 0,
+    });
+  }
+
+  if (req.method === 'GET' && url.startsWith('/api/sweep/')) {
+    const inst = url.slice('/api/sweep/'.length).toUpperCase();
+    if (!SUPPORTED_INSTRUMENTS.includes(inst)) return sendError(res, 400, 'unknown instrument');
+    const state  = readJson(`sweep-state-${inst}.json`) || { sweeps: [], cooldowns: {}, lastScan: 0 };
+    const sweeps = Array.isArray(state.sweeps) ? state.sweeps : [];
+    const cutoff = Math.floor((Date.now() - SWEEP_RECENT_WINDOW_S * 1000) / 1000);
+    const recent = sweeps.filter(s => s.time >= cutoff);
+
+    const now = Date.now();
+    const activeCooldowns = [];
+    for (const [key, lastFiredMs] of Object.entries(state.cooldowns || {})) {
+      const elapsedMs = now - lastFiredMs;
+      if (elapsedMs < SWEEP_COOLDOWN_MS) {
+        activeCooldowns.push({ key, lastFired: lastFiredMs, remainingMs: SWEEP_COOLDOWN_MS - elapsedMs });
+      }
+    }
+    return sendJson(res, {
+      instrument: inst,
+      recent,
+      cooldowns: activeCooldowns,
+      counts: { recent: recent.length, totalCooldowns: activeCooldowns.length, totalSweeps: sweeps.length },
+      lastScan: state.lastScan ?? 0,
+    });
+  }
+
+  if (req.method === 'GET' && url === '/api/triggers') {
+    const out = {};
+    const cutoff = Math.floor((Date.now() - SWEEP_RECENT_WINDOW_S * 1000) / 1000);
+    for (const inst of SUPPORTED_INSTRUMENTS) {
+      const fvg   = readJson(`fvg-state-${inst}.json`)   || { gaps: [], lastScan: 0 };
+      const sweep = readJson(`sweep-state-${inst}.json`) || { sweeps: [], cooldowns: {}, lastScan: 0 };
+      const gaps  = Array.isArray(fvg.gaps) ? fvg.gaps : [];
+      const swArr = Array.isArray(sweep.sweeps) ? sweep.sweeps : [];
+      const active = gaps.filter(g => (g.status === 'unfilled' || g.status === 'tested') && !g.firedAt);
+      const recentSweeps = swArr.filter(s => s.time >= cutoff);
+      out[inst] = {
+        fvg: {
+          activeCount: active.length,
+          latest:      active[active.length - 1] ?? null,
+          lastScan:    fvg.lastScan ?? 0,
+        },
+        sweep: {
+          recentCount: recentSweeps.length,
+          latest:      recentSweeps[recentSweeps.length - 1] ?? null,
+          lastScan:    sweep.lastScan ?? 0,
+        },
+      };
+    }
+    return sendJson(res, out);
+  }
+
   sendError(res, 404, 'Not found');
 });
 
@@ -278,4 +352,5 @@ server.listen(PORT, () => {
   console.log(`  Endpoints: /api/ledger /api/levels /api/signals /api/bias /api/theta`);
   console.log(`             /api/options-flow /api/voice-queue /api/journal/{gates,signals,alerts,all}`);
   console.log(`             /api/webull/{status,refresh,consumer-token,clear-consumer}`);
+  console.log(`             /api/fvg/{SPY,QQQ,IWM}  /api/sweep/{SPY,QQQ,IWM}  /api/triggers`);
 });
