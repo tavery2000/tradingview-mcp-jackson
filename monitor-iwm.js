@@ -33,6 +33,9 @@ import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
 import { applyMultipliers, readDailyBiasRegime, gate1H } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
+import { buildDrawJS }    from './chartDraws.js';
+import { loadFVGState }   from './fvg.js';
+import { loadSweepState } from './sweep.js';
 
 // Paper trading — degrades gracefully if unavailable
 let sendOrder = null, closePosition = null, orderGate = null, sessionReset = null, printScorecard = null;
@@ -365,12 +368,29 @@ async function readAndDrawPane(isEtf = false) {
   const levels = (price != null && bars?.length)
     ? detectLevels(bars, price, vwap, upperBand, lowerBand, isEtf)
     : { support: [], resistance: [] };
-  const allLevels = [...levels.support, ...levels.resistance];
-  if (allLevels.length > 0 && bars?.length) {
-    const lastTime = bars[bars.length-1]?.time ?? Math.floor(Date.now()/1000);
-    try { await evalOn(JS_DRAW_LEVELS(lastTime, allLevels)); } catch {}
-  }
+  // Chart drawing moved to poll() — see drawChartAnnotations() so the
+  // call layers FVG/S-D/sweeps/displacement on top of levels in one shot.
   return { price, vwap, delta, vrrs, vrrsSector, vrrsChangeRate, tick, levels, bars };
+}
+
+async function drawChartAnnotations(levels) {
+  if (!barCache) return;
+  try {
+    const [bars5M, bars1H, bars4H] = await Promise.all([
+      barCache.get('5'), barCache.get('60'), barCache.get('240'),
+    ]);
+    if (!bars5M || !bars5M.length) return;
+    const fvgState   = loadFVGState('IWM');
+    const sweepState = loadSweepState('IWM');
+    const allLevels  = [...(levels?.support ?? []), ...(levels?.resistance ?? [])];
+    const { js } = buildDrawJS({
+      instrument: 'IWM', bars5M, bars1H, bars4H,
+      levels: allLevels, fvgState, sweepState,
+    });
+    if (js) await evalOn(js);
+  } catch (e) {
+    jError('chart-draw', e.message, { instrument: 'IWM' });
+  }
 }
 
 async function buildPaneMap() {
@@ -1079,6 +1099,9 @@ async function poll() {
   // FVG + sweep scanners — state persists in fvg-state-IWM.json / sweep-state-IWM.json
   const triggers = await scanTriggers('IWM', barCache, etf?.levels);
   const { fvgSig, sweepSig } = runEntryEngines('IWM', triggers);
+
+  // Chart annotations: layered draw runs after scanners so FVG state is fresh.
+  await drawChartAnnotations(etf?.levels);
 
   const summary   = buildSummary(etf);
   const ema9      = computeEMA9(etf?.bars);
