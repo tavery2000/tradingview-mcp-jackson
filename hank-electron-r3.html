@@ -518,6 +518,112 @@ body {
   margin: 8px 8px 0 8px;
 }
 
+/* HANK LIVE ANALYSIS panel inside the FUTURES analysis sidebar */
+.fut-ana-block { border-bottom: 1px solid #111; flex-shrink: 0; }
+.fut-ana-header {
+  padding: 10px 14px;
+  display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid #111;
+}
+.fa-title { color: var(--green); font-size: 13px; letter-spacing: 2px; flex-shrink: 0; }
+.fa-time  { color: #aaaaaa; font-size: 11px; margin-left: auto; }
+.fut-ana-tabs { display: flex; gap: 4px; }
+.fa-tab {
+  background: #0a0a12; border: 1px solid #1a1a2a; color: #888;
+  font-family: var(--mono); font-size: 11px; padding: 3px 10px;
+  cursor: pointer; letter-spacing: 1px;
+}
+.fa-tab.active { background: #050f07; border-color: #1a3a1a; color: var(--green); }
+.fut-ana-body { padding: 10px 14px; max-height: 200px; overflow-y: auto; }
+.fa-entry {
+  background: #0a0a12; border-left: 2px solid #1a3a1a;
+  padding: 7px 10px; margin-bottom: 8px;
+}
+.fa-entry-hdr {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: #555; margin-bottom: 4px; letter-spacing: 1px;
+}
+.fa-entry-text { font-size: 12px; color: #cccccc; line-height: 1.55; }
+
+/* MANUAL TRADING section — full width, between fut-layout and bottom bar */
+.fut-manual {
+  background: var(--bg2); border: 1px solid #0e0e1e;
+  border-bottom: none; margin: 0 8px; flex-shrink: 0;
+}
+.fut-manual-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px; cursor: pointer; user-select: none;
+  background: var(--bg3); border-bottom: 1px solid #0e0e1e;
+}
+.fmh-title { color: #aaaaaa; font-size: 13px; letter-spacing: 2px; }
+.fmh-toggle { color: #666; font-size: 13px; }
+.fut-manual-body { padding: 12px 14px; display: grid; gap: 10px; }
+.fut-manual.collapsed .fut-manual-body { display: none; }
+.fut-manual.collapsed .fmh-toggle::before { content: '▸ '; }
+.fut-manual:not(.collapsed) .fmh-toggle::before { content: '▾ '; }
+
+.fm-form {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(110px, 1fr)) auto;
+  gap: 8px; align-items: end;
+}
+.fm-fld { display: flex; flex-direction: column; gap: 3px; }
+.fm-lbl { font-size: 10px; color: #777; letter-spacing: 1px; }
+.fm-input, .fm-select {
+  background: var(--bg3); border: 1px solid #1a1a2a; color: #ccc;
+  font-family: var(--mono); font-size: 13px; padding: 6px 8px;
+  outline: none;
+}
+.fm-btngrp { display: flex; gap: 4px; }
+.fm-btn {
+  background: #0a0a12; border: 1px solid #1a1a2a; color: #888;
+  font-family: var(--mono); font-size: 11px; padding: 6px 10px;
+  cursor: pointer; letter-spacing: 1px; flex: 1;
+}
+.fm-btn.long.active   { background: #050f07; border-color: var(--green); color: var(--green); }
+.fm-btn.short.active  { background: #0f0505; border-color: var(--red);   color: var(--red);   }
+.fm-btn.es.active     { background: #050a0f; border-color: var(--blue);  color: var(--blue);  }
+.fm-btn.nq.active     { background: #050a0f; border-color: var(--blue);  color: var(--blue);  }
+.fm-place {
+  background: #050f07; border: 1px solid var(--green);
+  color: var(--green); font-family: var(--mono); font-size: 13px;
+  padding: 8px 16px; cursor: pointer; letter-spacing: 1px;
+  white-space: nowrap;
+}
+.fm-place:disabled { opacity: 0.4; cursor: not-allowed; }
+.fm-positions { margin-top: 4px; }
+.fm-pos-row {
+  display: grid;
+  grid-template-columns: 70px 60px 50px 90px 90px 90px 80px;
+  gap: 8px; padding: 6px 8px; align-items: center;
+  font-size: 12px; border-bottom: 1px dotted #111;
+}
+.fm-pos-row.hdr { color: #555; font-size: 10px; letter-spacing: 1px; border-bottom: 1px solid #1a1a2a; }
+.fm-pos-empty { color: #444; font-style: italic; padding: 10px; text-align: center; font-size: 12px; }
+.fm-close-btn {
+  background: #1a0505; border: 1px solid #3a1010; color: var(--red);
+  font-family: var(--mono); font-size: 10px; padding: 4px 8px;
+  cursor: pointer; letter-spacing: 1px;
+}
+
+/* FUTURES bottom bar — same shape as auto-bottom but with ARM/HALT */
+.fut-bottom {
+  background: #080810; border-top: 2px solid #0e0e1e;
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 16px; height: 44px; flex-shrink: 0; overflow-x: auto;
+}
+.fb-arm {
+  background: #0a0a12; border: 1px solid #1a1a2a; color: #aaaaaa;
+  font-family: var(--mono); font-size: 12px; padding: 7px 14px;
+  cursor: pointer; letter-spacing: 1px;
+}
+.fb-arm.armed { color: var(--green); border-color: var(--green); }
+.fb-halt {
+  background: #1a0505; border: 1px solid #3a1010; color: var(--red);
+  font-family: var(--mono); font-size: 12px; padding: 7px 14px;
+  cursor: pointer; letter-spacing: 1px;
+}
+
 .inst-col {
   background: var(--bg2);
   border: 1px solid #0e0e1e;
@@ -1878,6 +1984,36 @@ button:disabled { opacity: 0.4; cursor: default; }
         </div>
       </div>
 
+      <!-- HANK LIVE ANALYSIS — per-instrument timestamped feed -->
+      <div class="fut-ana-block">
+        <div class="fut-ana-header">
+          <span class="fa-title">⬡ HANK LIVE ANALYSIS</span>
+          <div class="fut-ana-tabs">
+            <button class="fa-tab active" data-fa-inst="ES" onclick="setFutAnaTab(this,'ES')">ES</button>
+            <button class="fa-tab"        data-fa-inst="NQ" onclick="setFutAnaTab(this,'NQ')">NQ</button>
+          </div>
+          <span class="fa-time" id="fut-ana-time">30s update</span>
+        </div>
+        <div class="fut-ana-body" id="futAnaBody">
+          <div class="fa-entry" data-inst="ES">
+            <div class="fa-entry-hdr"><span>ES · placeholder</span><span>—</span></div>
+            <div class="fa-entry-text">Awaiting live wiring (2026-05-18). Once monitor-es.js streams, this lane shows: price action commentary, distance from PDH/PDL/ON, key 5M structural events (VWAP reclaim, SH breakout), and what to watch on the next 30s poll.</div>
+          </div>
+          <div class="fa-entry" data-inst="ES">
+            <div class="fa-entry-hdr"><span>ES · sample</span><span>14:32:15 ET</span></div>
+            <div class="fa-entry-text">Format example: "ES 5847 · holding above PDC 5840 · VWAP $5,843 ↑ · delta +1.8K · watching 5860 PDH break — if rejected, look for PUT setup on 5M close back below VWAP."</div>
+          </div>
+          <div class="fa-entry" data-inst="NQ" style="display:none;">
+            <div class="fa-entry-hdr"><span>NQ · placeholder</span><span>—</span></div>
+            <div class="fa-entry-text">Awaiting live wiring (2026-05-18). NQ analysis lane will mirror ES with NQ-specific levels (PDH/PDL/ON) and structural events, plus relative-strength commentary vs ES.</div>
+          </div>
+          <div class="fa-entry" data-inst="NQ" style="display:none;">
+            <div class="fa-entry-hdr"><span>NQ · sample</span><span>14:32:15 ET</span></div>
+            <div class="fa-entry-text">Format example: "NQ 21,235 · weak vs ES (NQ -0.3%, ES +0.1%) · below VWAP 21,242 · delta -340 · fade risk on any push to 21,300 PDH — watching for SH breakdown 5M."</div>
+          </div>
+        </div>
+      </div>
+
       <!-- ENGINE SIGNAL LANE — same shape as AUTONOMOUS -->
       <div class="engine-lane">
         <div class="el-title">ENGINES</div>
@@ -1908,20 +2044,121 @@ button:disabled { opacity: 0.4; cursor: default; }
         </div>
       </div>
 
-      <!-- OPEN POSITIONS -->
+      <!-- OPEN POSITIONS (autonomous) -->
       <div style="padding:10px 14px;border-bottom:1px solid #111;flex-shrink:0;">
         <div style="font-size:12px;color:#888;letter-spacing:2px;margin-bottom:7px;">OPEN POSITIONS</div>
         <div id="futPosCards"><div style="color:#444;font-style:italic;font-size:12px;">No open futures positions</div></div>
       </div>
 
-      <div class="ac-body" id="fut-feed">
-        <div class="ac-para" style="color:#666;font-style:italic;">
-          Live thesis appears here once monitor-es.js / monitor-nq.js are wired (target 2026-05-18).
+      <!-- AUTO-TRADE STATUS (mirrors AUTONOMOUS but ARM/HALT live in bottom bar) -->
+      <div style="padding:10px 14px;flex-shrink:0;background:var(--bg3);">
+        <div style="font-size:12px;color:#333;letter-spacing:2px;margin-bottom:7px;">AUTO-TRADE FILTERS</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:6px;">
+          <select class="fm-select" id="fut-auto-conf">
+            <option>HIGH conf only</option>
+            <option>MEDIUM+</option>
+          </select>
+          <select class="fm-select" id="fut-auto-syms">
+            <option>ES + NQ</option>
+            <option>ES only</option>
+            <option>NQ only</option>
+          </select>
+        </div>
+        <div style="font-size:11px;color:#555;text-align:center;letter-spacing:1px;" id="fut-auto-status">
+          OFF · ARM in bottom bar to enable
         </div>
       </div>
     </div>
 
   </div><!-- end fut-layout -->
+
+  <!-- ── MANUAL TRADING — full-width, collapsible ──────────── -->
+  <div class="fut-manual collapsed" id="futManual">
+    <div class="fut-manual-header" onclick="toggleFutManual()">
+      <span class="fmh-title">MANUAL TRADING</span>
+      <span class="fmh-toggle"></span>
+    </div>
+    <div class="fut-manual-body">
+      <div class="fm-form">
+        <div class="fm-fld">
+          <span class="fm-lbl">INSTRUMENT</span>
+          <div class="fm-btngrp">
+            <button class="fm-btn es active" data-fm-inst="ES" onclick="setFmInst(this,'ES')">ES</button>
+            <button class="fm-btn nq"        data-fm-inst="NQ" onclick="setFmInst(this,'NQ')">NQ</button>
+          </div>
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">DIRECTION</span>
+          <div class="fm-btngrp">
+            <button class="fm-btn long active" data-fm-dir="LONG" onclick="setFmDir(this,'LONG')">LONG</button>
+            <button class="fm-btn short"        data-fm-dir="SHORT" onclick="setFmDir(this,'SHORT')">SHORT</button>
+          </div>
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">QTY</span>
+          <select class="fm-select" id="fm-qty">
+            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+            <option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
+          </select>
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">ORDER TYPE</span>
+          <select class="fm-select" id="fm-type" onchange="onFmTypeChange()">
+            <option>MARKET</option>
+            <option>LIMIT</option>
+          </select>
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">ENTRY</span>
+          <input class="fm-input" id="fm-entry" type="text" placeholder="market" disabled>
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">STOP</span>
+          <input class="fm-input" id="fm-stop" type="text" placeholder="5,830.00">
+        </div>
+        <div class="fm-fld">
+          <span class="fm-lbl">TARGET</span>
+          <input class="fm-input" id="fm-target" type="text" placeholder="5,870.00">
+        </div>
+        <button class="fm-place" id="fm-place-btn" disabled onclick="fmPlaceOrder()">▶ PLACE ORDER</button>
+      </div>
+
+      <div class="fm-positions">
+        <div style="font-size:11px;color:#555;letter-spacing:2px;margin-bottom:6px;">OPEN MANUAL POSITIONS</div>
+        <div class="fm-pos-row hdr">
+          <span>SYMBOL</span><span>SIDE</span><span>QTY</span><span>ENTRY</span>
+          <span>CURRENT</span><span>P&amp;L</span><span></span>
+        </div>
+        <div id="fmPositions">
+          <div class="fm-pos-empty">No open manual positions — PLACE ORDER disabled until 2026-05-18 live wiring.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BOTTOM BAR — stats + ARM/HALT ─────────────────────── -->
+  <div class="fut-bottom">
+    <div class="master-sig ms-wait" id="fb-master" style="font-size:16px;padding:5px 12px;margin-bottom:0;">— PLACEHOLDER —</div>
+    <div class="bottom-stat">
+      <span class="bs-lbl">BALANCE</span>
+      <span class="bs-val" id="fb-bal">$25,000.00</span>
+    </div>
+    <div class="bottom-stat">
+      <span class="bs-lbl">P&amp;L</span>
+      <span class="bs-val" id="fb-pnl">$0.00</span>
+    </div>
+    <div class="bottom-stat">
+      <span class="bs-lbl">OPEN</span>
+      <span class="bs-val" id="fb-open">0 / 4</span>
+    </div>
+    <div class="bottom-stat">
+      <span class="bs-lbl">SESSION</span>
+      <span class="bs-val" style="color:var(--blue);" id="fb-sess">PRE-LAUNCH</span>
+    </div>
+    <span style="color:#1a1a30;font-size:18px;">│</span>
+    <button class="fb-arm" id="fbArmBtn" onclick="toggleFutAutoArm()">⬡ ARM AUTO-TRADE</button>
+    <button class="fb-halt" onclick="haltFutAll()">⚠ HALT</button>
+  </div>
 
 </div><!-- end tab-futures -->
 
@@ -3260,6 +3497,82 @@ function haltAll() {
   const st  = document.getElementById('auto-status-mini');
   if (btn) { btn.textContent = '⬡ ARM AUTO-TRADE'; btn.style.color = ''; }
   if (st) st.textContent = 'HALTED';
+}
+
+// ── FUTURES TAB controls ──────────────────────────────────────
+// HANK LIVE ANALYSIS — instrument selector. Filters .fa-entry rows by data-inst.
+function setFutAnaTab(el, inst) {
+  if (el) {
+    el.parentElement.querySelectorAll('.fa-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+  }
+  document.querySelectorAll('#futAnaBody .fa-entry').forEach(e => {
+    e.style.display = (e.dataset.inst === inst) ? '' : 'none';
+  });
+}
+
+// MANUAL TRADING — collapse/expand + form state
+function toggleFutManual() {
+  const m = document.getElementById('futManual');
+  if (m) m.classList.toggle('collapsed');
+}
+function setFmInst(el, inst) {
+  el.parentElement.querySelectorAll('.fm-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  // Update entry placeholder to reflect typical price range for the instrument
+  const entry = document.getElementById('fm-entry');
+  const stop  = document.getElementById('fm-stop');
+  const tgt   = document.getElementById('fm-target');
+  if (inst === 'ES') {
+    if (entry) entry.placeholder = 'market';
+    if (stop)  stop.placeholder  = '5,830.00';
+    if (tgt)   tgt.placeholder   = '5,870.00';
+  } else {
+    if (entry) entry.placeholder = 'market';
+    if (stop)  stop.placeholder  = '21,150.00';
+    if (tgt)   tgt.placeholder   = '21,300.00';
+  }
+}
+function setFmDir(el, dir) {
+  el.parentElement.querySelectorAll('.fm-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+function onFmTypeChange() {
+  const t = document.getElementById('fm-type');
+  const e = document.getElementById('fm-entry');
+  if (!t || !e) return;
+  if (t.value === 'MARKET') { e.disabled = true;  e.value = ''; e.placeholder = 'market'; }
+  else                       { e.disabled = false; e.placeholder = '5,847.50'; }
+}
+function fmPlaceOrder() {
+  // Disabled until 2026-05-18 live wiring. The button is hardware-disabled
+  // in HTML but this stub catches any future programmatic enabling so we
+  // get a clear "still pre-launch" message instead of a silent failure.
+  alert('Manual futures execution goes live 2026-05-18.\nWire monitor-es.js / monitor-nq.js + futures broker route Sunday 2026-05-11.');
+}
+
+// FUTURES auto-trade arm/halt — separate state from equities autoArmed
+let futAutoArmed = false;
+function toggleFutAutoArm() {
+  futAutoArmed = !futAutoArmed;
+  const btn = document.getElementById('fbArmBtn');
+  const st  = document.getElementById('fut-auto-status');
+  if (futAutoArmed) {
+    if (btn) { btn.textContent = '⬡ ARMED — CLICK TO DISARM'; btn.classList.add('armed'); }
+    if (st)  { st.textContent  = 'ARMED · Monitoring ES + NQ for HIGH conf signals'; st.style.color = 'var(--green)'; }
+  } else {
+    if (btn) { btn.textContent = '⬡ ARM AUTO-TRADE'; btn.classList.remove('armed'); }
+    if (st)  { st.textContent  = 'OFF · ARM in bottom bar to enable'; st.style.color = ''; }
+  }
+}
+function haltFutAll() {
+  futAutoArmed = false;
+  const btn = document.getElementById('fbArmBtn');
+  const st  = document.getElementById('fut-auto-status');
+  if (btn) { btn.textContent = '⬡ ARM AUTO-TRADE'; btn.classList.remove('armed'); }
+  if (st)  { st.textContent  = 'HALTED — ARM to resume'; st.style.color = 'var(--red)'; }
+  // Future: when monitor-es.js / monitor-nq.js wire in, also signal them
+  // via /api/halt-futures or equivalent so ARM state persists across reload.
 }
 
 // ── SERVICES ──────────────────────────────────────────────────
