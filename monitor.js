@@ -2522,6 +2522,14 @@ let _biasEvaluatedAt = 0; // ET minutes — last bias evaluation
 
 async function poll() {
   if (!isMarketHours()) {
+    // Off-hours: still run FVG scanners against cached 5M bars so the
+    // dashboard panels show the last session's gaps. Sweep needs live
+    // levels (HOD/LOD/etc) so it skips. Trading paths stay gated.
+    for (const inst of ['SPY', 'QQQ', 'IWM']) {
+      if (barCache[inst]) {
+        try { await scanTriggers(inst, barCache[inst], null); } catch {}
+      }
+    }
     printOutsideHours();
     return;
   }
