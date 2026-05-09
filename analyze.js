@@ -78,6 +78,33 @@ export function atr(bars, period = 14) {
   return a;
 }
 
+// Displacement detection — large-body candles indicating strong directional
+// commitment. Returns the most recent N (default 5) closed bars where:
+//   body >= 1.5 × ATR(period)  AND  body / total range >= 0.7  (full-body)
+// Each entry: { time, type ('BULL'|'BEAR'), high, low, open, close }.
+// Drawn as arrow markers on the chart (issue 4).
+export function detectDisplacement(barsIn, period = 14, recentN = 5) {
+  const bars = closedBars(barsIn);
+  if (!bars || bars.length < period + 1) return [];
+  const a = atr(bars, period);
+  if (!a || !Number.isFinite(a) || a <= 0) return [];
+  const tail = bars.slice(-recentN);
+  const out = [];
+  for (const b of tail) {
+    const body  = Math.abs(b.close - b.open);
+    const range = b.high - b.low;
+    if (body < 1.5 * a) continue;
+    if (range > 0 && body / range < 0.7) continue;
+    out.push({
+      time: b.time,
+      type: b.close > b.open ? 'BULL' : 'BEAR',
+      high: b.high, low: b.low, open: b.open, close: b.close,
+      bodyAtr: body / a,
+    });
+  }
+  return out;
+}
+
 // Pivot-based swing detection. n bars on each side → strict.
 export function swingPoints(bars, n = 3) {
   const highs = [], lows = [];
@@ -121,6 +148,8 @@ export function analyze4H(barsIn) {
     fromHigh:  null,          // % below 4H high of the lookback
     fromLow:   null,          // % above 4H low of the lookback
     consecutive: { up: 0, down: 0 },
+    swingHighs: [],            // recent 4H swings as { price, time }
+    swingLows:  [],
   };
   if (bars.length < 6) return out;
 
@@ -151,6 +180,8 @@ export function analyze4H(barsIn) {
 
   // Direction: price vs EMA21 + structural higher-highs/lower-lows
   const swings = swingPoints(bars, 3);
+  out.swingHighs = swings.highs.slice(-3).map(s => ({ price: s.price, time: s.time }));
+  out.swingLows  = swings.lows.slice(-3).map(s => ({ price: s.price, time: s.time }));
   const recentHighs = swings.highs.slice(-3).map(s => s.price);
   const recentLows  = swings.lows.slice(-3).map(s => s.price);
   const HH = recentHighs.length >= 2 && recentHighs.every((v, i, a) => i === 0 || v > a[i - 1]);

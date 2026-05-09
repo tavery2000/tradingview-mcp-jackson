@@ -37,6 +37,9 @@ import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
 import { applyMultipliers, readDailyBiasRegime, gate1H } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
+import { buildDrawJS } from './chartDraws.js';
+import { loadFVGState }   from './fvg.js';
+import { loadSweepState } from './sweep.js';
 
 // L2 order book — imported from l2.js (starts its own MQTT connection)
 // Degrades gracefully if l2.js unavailable — returns null from getL2Signal()
@@ -363,6 +366,32 @@ const JS_PANE_LIST = `
   return result;
 })()`;
 
+// Layered chart drawing — replaces the legacy single-purpose JS_DRAW_LEVELS.
+// Pulls 5M/1H/4H bars from the cache, loads FVG/sweep state, runs swing
+// detection, and emits one CDP eval that clears the chart and redraws:
+// levels + FVG zones + 1H/4H supply/demand + active sweeps + displacement.
+async function drawChartAnnotations(instrument, client, levels) {
+  if (!client || !barCache[instrument]) return;
+  try {
+    const [bars5M, bars1H, bars4H] = await Promise.all([
+      barCache[instrument].get('5'),
+      barCache[instrument].get('60'),
+      barCache[instrument].get('240'),
+    ]);
+    if (!bars5M || !bars5M.length) return;
+    const fvgState   = loadFVGState(instrument);
+    const sweepState = loadSweepState(instrument);
+    const allLevels  = [...(levels?.support ?? []), ...(levels?.resistance ?? [])];
+    const { js } = buildDrawJS({
+      instrument, bars5M, bars1H, bars4H,
+      levels: allLevels, fvgState, sweepState,
+    });
+    if (js) await evalOn(client, js);
+  } catch (e) {
+    jError('chart-draw', e.message, { instrument });
+  }
+}
+
 function JS_DRAW_LEVELS(lastBarTime, levels) {
   const api   = `window.TradingViewApi._activeChartWidgetWV.value()`;
   const draws = levels.map(l => {
@@ -556,11 +585,9 @@ async function readAndDrawPane(client, isSpy = false) {
     ? detectLevels(bars, price, vwap, upperBand, lowerBand, isSpy)
     : { support: [], resistance: [] };
 
-  const allLevels = [...levels.support, ...levels.resistance];
-  if (allLevels.length > 0 && bars?.length) {
-    const lastTime = bars[bars.length - 1]?.time ?? Math.floor(Date.now() / 1000);
-    try { await evalOn(client, JS_DRAW_LEVELS(lastTime, allLevels)); } catch (e) {}
-  }
+  // Note: chart drawing moved to poll() so we can layer FVG zones, supply/
+  // demand, sweeps, and displacement arrows on top of levels in one CDP
+  // round-trip. See drawChartAnnotations() below.
 
   return { price, vwap, delta, vrrs, vrrsSector, vrrsChangeRate, tick, levels, bars };
 }
@@ -2525,9 +2552,23 @@ async function poll() {
     // Off-hours: still run FVG scanners against cached 5M bars so the
     // dashboard panels show the last session's gaps. Sweep needs live
     // levels (HOD/LOD/etc) so it skips. Trading paths stay gated.
+    // Chart drawings also redraw each cycle — they don't need live data,
+    // just the cached bars + state files. Levels are pulled from the
+    // pre-market calc rather than the live read.
+    const offHourLevels = global.preMarketLevels ? {
+      support:    [
+        { price: global.preMarketLevels.pdLow,   label: 'PDL',  type: 'support'    },
+        { price: global.preMarketLevels.pdClose, label: 'PDC',  type: 'support'    },
+      ].filter(l => Number.isFinite(l.price)),
+      resistance: [
+        { price: global.preMarketLevels.pdHigh,  label: 'PDH',  type: 'resistance' },
+      ].filter(l => Number.isFinite(l.price)),
+    } : { support: [], resistance: [] };
+    const clientForInst = { SPY: spyClient, QQQ: qqqClient, IWM: iwmClient };
     for (const inst of ['SPY', 'QQQ', 'IWM']) {
       if (barCache[inst]) {
         try { await scanTriggers(inst, barCache[inst], null); } catch {}
+        try { await drawChartAnnotations(inst, clientForInst[inst], offHourLevels); } catch {}
       }
     }
     printOutsideHours();
@@ -2587,6 +2628,10 @@ async function poll() {
   const spyTriggers = await scanTriggers('SPY', barCache.SPY, spy.levels);
   const { fvgSig: spyFvgSig, sweepSig: spySweepSig } = runEntryEngines('SPY', spyTriggers);
 
+  // Chart annotations: layered draw for levels + FVG + S/D + sweeps + arrows.
+  // Runs after the scanners so the FVG state file is fresh.
+  await drawChartAnnotations('SPY', spyClient, spy.levels);
+
   // ── Swing Engine update ───────────────────────────────────────────────────
   const spyEma9      = computeEMA9fromBars(spy.bars);
   spy.ema9           = spyEma9;  // attach so trendEngine/fadeEngine can use it
@@ -2637,6 +2682,8 @@ async function poll() {
     const qqqTriggers = await scanTriggers('QQQ', barCache.QQQ, qqq.levels);
     ({ fvgSig: qqqFvgSig, sweepSig: qqqSweepSig } = runEntryEngines('QQQ', qqqTriggers));
 
+    await drawChartAnnotations('QQQ', qqqClient, qqq.levels);
+
     const qqqEma9 = computeEMA9fromBars(qqq?.bars);
     qqqSwingState = QqqSwingEngine.update(qqq?.price, qqq?.vwap, qqqEma9, qqq?.bars);
 
@@ -2684,6 +2731,8 @@ async function poll() {
     // FVG + sweep scanners for IWM
     const iwmTriggers = await scanTriggers('IWM', barCache.IWM, iwm.levels);
     ({ fvgSig: iwmFvgSig, sweepSig: iwmSweepSig } = runEntryEngines('IWM', iwmTriggers));
+
+    await drawChartAnnotations('IWM', iwmClient, iwm.levels);
 
     const iwmEma9 = computeEMA9fromBars(iwm?.bars);
     iwmSwingState = IwmSwingEngine.update(iwm?.price, iwm?.vwap, iwmEma9, iwm?.bars);
