@@ -205,6 +205,29 @@ body {
 .el-act.bear { color: var(--red); }
 .el-act.idle { color: #444; }
 
+/* Trigger panels — FVG and sweep state per instrument */
+.tp-block { padding: 10px 14px; border-bottom: 1px solid #111; font-size: 13px; }
+.tp-title { color: #888; letter-spacing: 2px; margin-bottom: 6px; font-size: 12px;
+            display: flex; justify-content: space-between; align-items: baseline; }
+.tp-meta  { color: #555; font-size: 11px; letter-spacing: 1px; }
+.tp-row   { display: grid; grid-template-columns: 44px 60px 110px 1fr;
+            gap: 6px; padding: 3px 0; border-bottom: 1px dotted #111;
+            align-items: center; font-size: 12px; }
+.tp-inst  { color: #aaa; letter-spacing: 1px; font-weight: bold; }
+.tp-tag   { font-weight: bold; }
+.tp-tag.bull { color: var(--green); }
+.tp-tag.bear { color: var(--red); }
+.tp-tag.idle { color: #444; font-weight: normal; }
+.tp-px    { color: #ccc; font-family: var(--mono); }
+.tp-msg   { color: #666; font-size: 11px; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+.tp-msg.warn { color: var(--yellow); }
+.tp-msg.fresh { color: var(--green); }
+.tp-msg.cool  { color: #888; }
+.tp-status.unfilled { color: var(--yellow); }
+.tp-status.tested   { color: var(--blue); }
+.tp-status.filled   { color: #555; }
+
 /* Per-position card with greeks */
 .pos-card {
   background: #0a0a14;
@@ -1569,6 +1592,26 @@ button:disabled { opacity: 0.4; cursor: default; }
           <div class="el-row"><span class="el-eng">STRUCTURE</span> <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">no signal yet</span></div>
           <div class="el-row"><span class="el-eng">MOC</span>       <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">no signal yet</span></div>
           <div class="el-row"><span class="el-eng">FLOW</span>      <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">no chain data</span></div>
+        </div>
+      </div>
+
+      <!-- FVG ZONES — per instrument, latest active gap or '—' if none -->
+      <div class="tp-block">
+        <div class="tp-title"><span>FVG ZONES</span><span class="tp-meta" id="fvgMeta">—</span></div>
+        <div id="fvgPanel">
+          <div class="tp-row"><span class="tp-inst">SPY</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
+          <div class="tp-row"><span class="tp-inst">QQQ</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
+          <div class="tp-row"><span class="tp-inst">IWM</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
+        </div>
+      </div>
+
+      <!-- SWEEPS — per instrument, latest sweep + cooldown state -->
+      <div class="tp-block">
+        <div class="tp-title"><span>SWEEPS</span><span class="tp-meta" id="sweepMeta">—</span></div>
+        <div id="sweepPanel">
+          <div class="tp-row"><span class="tp-inst">SPY</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
+          <div class="tp-row"><span class="tp-inst">QQQ</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
+          <div class="tp-row"><span class="tp-inst">IWM</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">scanning…</span></div>
         </div>
       </div>
 
@@ -3589,7 +3632,70 @@ function pollAll() {
   pollLedger(); pollBias(); pollTheta(); pollFlow();
   pollVoice(); pollGates(); pollAlerts(); pollSignals(); pollLevels();
   pollTier();
+  pollTriggers();
   loadWebullStatus();
+}
+
+// ─── FVG + sweep panels ──────────────────────────────────
+// Backed by /api/triggers (rolled up SPY/QQQ/IWM). Renders one row per
+// instrument in each panel: latest active FVG and latest recent sweep.
+async function pollTriggers() {
+  const j = await fetchJsonSafe('/api/triggers');
+  if (!j) return;
+
+  const fvgPanel   = document.getElementById('fvgPanel');
+  const sweepPanel = document.getElementById('sweepPanel');
+  const fvgMeta    = document.getElementById('fvgMeta');
+  const sweepMeta  = document.getElementById('sweepMeta');
+  if (!fvgPanel || !sweepPanel) return;
+
+  const instruments = ['SPY', 'QQQ', 'IWM'];
+  let totalFvgActive = 0, totalSweepRecent = 0;
+
+  fvgPanel.innerHTML = instruments.map(inst => {
+    const x = j[inst]?.fvg;
+    if (!x || !x.activeCount) {
+      return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">no active gaps</span></div>`;
+    }
+    totalFvgActive += x.activeCount;
+    const g = x.latest;
+    if (!g) {
+      return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">${x.activeCount} active</span></div>`;
+    }
+    const tagCls = g.type === 'BULL' ? 'bull' : 'bear';
+    const tagTxt = g.type === 'BULL' ? '▲BULL' : '▼BEAR';
+    const range  = `$${(g.bottom ?? 0).toFixed(2)}–$${(g.top ?? 0).toFixed(2)}`;
+    const sizeAtr = g.sizeAtr != null ? `${g.sizeAtr.toFixed(1)}× ATR` : '';
+    const status = g.status || '—';
+    const moreCnt = x.activeCount > 1 ? ` (+${x.activeCount - 1} more)` : '';
+    const msg = `${sizeAtr} · <span class="tp-status ${status}">${status}</span>${moreCnt}`;
+    return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag ${tagCls}">${tagTxt}</span><span class="tp-px">${range}</span><span class="tp-msg">${msg}</span></div>`;
+  }).join('');
+
+  sweepPanel.innerHTML = instruments.map(inst => {
+    const x = j[inst]?.sweep;
+    if (!x || !x.recentCount) {
+      return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">no recent sweeps</span></div>`;
+    }
+    totalSweepRecent += x.recentCount;
+    const s = x.latest;
+    if (!s) {
+      return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg">${x.recentCount} recent</span></div>`;
+    }
+    const tagCls = s.signal === 'CALLS' ? 'bull' : 'bear';
+    const tagTxt = s.signal || '—';
+    const lvl = s.level ? `${s.level.label} $${s.level.price.toFixed(2)}` : '';
+    const ageS = Math.max(0, Math.floor(Date.now() / 1000) - (s.time ?? 0));
+    const ageStr = ageS < 60 ? `${ageS}s ago` : `${Math.floor(ageS/60)}m ago`;
+    const pen = s.wickPenetration != null ? `pen ${s.wickPenetration.toFixed(2)}` : '';
+    const fired = s.firedAt ? '<span class="tp-msg cool">· fired</span>' : '';
+    const moreCnt = x.recentCount > 1 ? ` (+${x.recentCount - 1} more)` : '';
+    const msg = `${pen} · ${ageStr}${moreCnt}${fired}`;
+    return `<div class="tp-row"><span class="tp-inst">${inst}</span><span class="tp-tag ${tagCls}">${tagTxt}</span><span class="tp-px">${lvl}</span><span class="tp-msg fresh">${msg}</span></div>`;
+  }).join('');
+
+  if (fvgMeta)   fvgMeta.textContent   = `${totalFvgActive} active`;
+  if (sweepMeta) sweepMeta.textContent = `${totalSweepRecent} in last 30m`;
 }
 
 // ─── Journal tab ─────────────────────────────────────────
