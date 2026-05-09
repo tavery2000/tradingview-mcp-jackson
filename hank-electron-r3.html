@@ -482,6 +482,42 @@ body {
   min-height: 0;
 }
 
+/* FUTURES tab: ES + NQ side-by-side + analysis sidebar */
+.fut-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr 320px;
+  gap: 8px;
+  padding: 8px;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+.fut-spec {
+  padding: 10px 14px;
+  border-bottom: 1px solid #0e0e1e;
+  font-size: 12px;
+  color: #888;
+  flex-shrink: 0;
+}
+.fut-spec-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px;
+  padding: 2px 0;
+}
+.fut-spec-k { color: #555; letter-spacing: 1px; }
+.fut-spec-v { color: #ccc; font-family: var(--mono); }
+.fut-banner {
+  padding: 8px 14px;
+  background: #0a0a14;
+  color: var(--yellow);
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-align: center;
+  border: 1px solid #2a2a14;
+  margin: 8px 8px 0 8px;
+}
+
 .inst-col {
   background: var(--bg2);
   border: 1px solid #0e0e1e;
@@ -1329,6 +1365,9 @@ button:disabled { opacity: 0.4; cursor: default; }
     <div class="nav-tab active" data-tab="auto" onclick="switchTab('auto',this)">
       <span class="nav-icon">⬡</span> AUTONOMOUS
     </div>
+    <div class="nav-tab" data-tab="futures" onclick="switchTab('futures',this)">
+      <span class="nav-icon">◆</span> FUTURES
+    </div>
     <div class="nav-tab" data-tab="monitor" onclick="switchTab('monitor',this)">
       <span class="nav-icon">◈</span> MONITOR
     </div>
@@ -1678,6 +1717,213 @@ button:disabled { opacity: 0.4; cursor: default; }
   </div>
 
 </div><!-- end tab-auto -->
+
+<!-- ══════════════════ TAB 2: FUTURES ═══════════════════════ -->
+<div class="tab-panel" id="tab-futures">
+
+  <!-- GO-LIVE BANNER -->
+  <div class="fut-banner">⚠ FUTURES TRADING GOES LIVE 2026-05-18 — placeholder data until live wiring on Sunday</div>
+
+  <!-- INFOBAR -->
+  <div class="infobar">
+    <span><span class="ib-lbl">ES </span><span id="fut-es-px" class="ib-val">5,847.50</span></span>
+    <span><span class="ib-lbl">NQ </span><span id="fut-nq-px" class="ib-val">21,234.75</span></span>
+    <span><span class="ib-lbl">Day Mode </span><span id="fut-bias" class="ib-val">—</span></span>
+    <span style="color:#1a1a30;font-size:20px;">│</span>
+    <span><span class="ib-lbl">Front </span><span id="fut-front" class="ib-val">ESH26 / NQH26</span></span>
+    <span><span class="ib-lbl">DTE </span><span id="fut-dte" class="ib-val">42d</span></span>
+    <span style="color:#1a1a30;font-size:20px;">│</span>
+    <span><span class="ib-lbl">Account </span><span class="ib-good" id="fut-bal">$25,000.00</span></span>
+    <span><span class="ib-lbl">P&amp;L </span><span id="fut-pnl" class="ib-val">$0.00</span></span>
+  </div>
+
+  <!-- ES + NQ + ANALYSIS SIDEBAR -->
+  <div class="fut-layout">
+
+    <!-- ── ES COLUMN ───────────────────────────────────────── -->
+    <div class="inst-col" id="es-col">
+      <div class="sig-card">
+        <div class="sc-sym">ES</div>
+        <div class="sc-price" id="es-price" style="color:#888;">5,847.50</div>
+        <div class="sc-action sca-wait">⚠ AWAITING SIGNAL</div>
+        <div class="sc-conf">
+          <span class="conf-wk">—</span>
+          <span style="font-size:13px;color:#555;">live data Sunday</span>
+        </div>
+        <div class="sc-reason">Placeholder — engines will fire once monitor.js is wired to ES tab on TradingView.</div>
+      </div>
+
+      <div class="mkt-state">
+        <div class="mkt-row"><span class="mkt-k">PRICE</span><span class="mkt-v neu" id="es-mkt-price">5,847.50</span></div>
+        <div class="mkt-row"><span class="mkt-k">VWAP</span><span class="mkt-v neu" id="es-mkt-vwap">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">9EMA</span><span class="mkt-v neu" id="es-mkt-ema">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">DELTA</span><span class="mkt-v neu" id="es-mkt-delta">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">RESIST</span><span class="mkt-v neg" id="es-mkt-res">5,860.00</span></div>
+        <div class="mkt-row"><span class="mkt-k">SUPPORT</span><span class="mkt-v pos" id="es-mkt-sup">5,830.00</span></div>
+        <div class="mkt-row"><span class="mkt-k">VOL</span><span class="mkt-v neu" id="es-vol">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">STRUCTURE</span><span class="mkt-v" id="es-struct" style="color:#888;">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">SOURCE</span><span class="mkt-v" style="color:#aaaaaa;font-size:13px;">monitor-es.js (pending)</span></div>
+      </div>
+
+      <!-- CONTRACT SPECS -->
+      <div class="fut-spec">
+        <div style="color:#aaaaaa;font-size:13px;letter-spacing:2px;margin-bottom:6px;">CONTRACT</div>
+        <div class="fut-spec-row"><span class="fut-spec-k">SYMBOL</span><span class="fut-spec-v">ESH26 (Mar 2026)</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">TICK</span><span class="fut-spec-v">0.25 = $12.50</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">MULT</span><span class="fut-spec-v">$50 / pt</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">DAY MARGIN</span><span class="fut-spec-v">$14,500</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">INIT MARGIN</span><span class="fut-spec-v">$20,000</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">SESSION</span><span class="fut-spec-v">RTH 09:30–16:15 ET</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">EXPIRY</span><span class="fut-spec-v">2026-03-20 (3rd Fri)</span></div>
+      </div>
+
+      <!-- OPTIONS MINI CHAIN -->
+      <div class="opt-mini">
+        <div class="opt-mini-title">
+          <span style="color:#aaaaaa;font-size:13px;letter-spacing:2px;">OPTIONS</span>
+          <div class="opt-mini-tabs">
+            <button class="om-tab active">0DTE</button>
+            <button class="om-tab">1DTE</button>
+            <button class="om-tab">WK</button>
+            <span class="om-refresh">⟳ —</span>
+          </div>
+        </div>
+        <table class="om-table">
+          <thead><tr><th>STRIKE</th><th>MID</th><th>Δ</th></tr></thead>
+          <tbody id="es-opt-rows">
+            <tr><td>5,825</td><td>—</td><td>—</td></tr>
+            <tr><td>5,840</td><td>—</td><td>—</td></tr>
+            <tr class="om-hank-pick"><td><span style="color:#1a3a1a;font-size:11px;">⬡</span> 5,850</td><td>—</td><td>—</td></tr>
+            <tr><td>5,860</td><td>—</td><td>—</td></tr>
+            <tr><td>5,875</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+        <button class="om-exec-btn" disabled style="opacity:0.5;cursor:not-allowed;">
+          ▶ EXECUTE — disabled (live Sunday)
+        </button>
+      </div>
+    </div>
+
+    <!-- ── NQ COLUMN ───────────────────────────────────────── -->
+    <div class="inst-col" id="nq-col">
+      <div class="sig-card">
+        <div class="sc-sym">NQ</div>
+        <div class="sc-price" id="nq-price" style="color:#888;">21,234.75</div>
+        <div class="sc-action sca-wait">⚠ AWAITING SIGNAL</div>
+        <div class="sc-conf">
+          <span class="conf-wk">—</span>
+          <span style="font-size:13px;color:#555;">live data Sunday</span>
+        </div>
+        <div class="sc-reason">Placeholder — engines will fire once monitor.js is wired to NQ tab on TradingView.</div>
+      </div>
+
+      <div class="mkt-state">
+        <div class="mkt-row"><span class="mkt-k">PRICE</span><span class="mkt-v neu" id="nq-mkt-price">21,234.75</span></div>
+        <div class="mkt-row"><span class="mkt-k">VWAP</span><span class="mkt-v neu" id="nq-mkt-vwap">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">9EMA</span><span class="mkt-v neu" id="nq-mkt-ema">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">DELTA</span><span class="mkt-v neu" id="nq-mkt-delta">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">RESIST</span><span class="mkt-v neg" id="nq-mkt-res">21,300.00</span></div>
+        <div class="mkt-row"><span class="mkt-k">SUPPORT</span><span class="mkt-v pos" id="nq-mkt-sup">21,150.00</span></div>
+        <div class="mkt-row"><span class="mkt-k">VOL</span><span class="mkt-v neu" id="nq-vol">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">STRUCTURE</span><span class="mkt-v" id="nq-struct" style="color:#888;">—</span></div>
+        <div class="mkt-row"><span class="mkt-k">SOURCE</span><span class="mkt-v" style="color:#aaaaaa;font-size:13px;">monitor-nq.js (pending)</span></div>
+      </div>
+
+      <!-- CONTRACT SPECS -->
+      <div class="fut-spec">
+        <div style="color:#aaaaaa;font-size:13px;letter-spacing:2px;margin-bottom:6px;">CONTRACT</div>
+        <div class="fut-spec-row"><span class="fut-spec-k">SYMBOL</span><span class="fut-spec-v">NQH26 (Mar 2026)</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">TICK</span><span class="fut-spec-v">0.25 = $5.00</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">MULT</span><span class="fut-spec-v">$20 / pt</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">DAY MARGIN</span><span class="fut-spec-v">$22,000</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">INIT MARGIN</span><span class="fut-spec-v">$25,000</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">SESSION</span><span class="fut-spec-v">RTH 09:30–16:15 ET</span></div>
+        <div class="fut-spec-row"><span class="fut-spec-k">EXPIRY</span><span class="fut-spec-v">2026-03-20 (3rd Fri)</span></div>
+      </div>
+
+      <!-- OPTIONS MINI CHAIN -->
+      <div class="opt-mini">
+        <div class="opt-mini-title">
+          <span style="color:#aaaaaa;font-size:13px;letter-spacing:2px;">OPTIONS</span>
+          <div class="opt-mini-tabs">
+            <button class="om-tab active">0DTE</button>
+            <button class="om-tab">1DTE</button>
+            <button class="om-tab">WK</button>
+            <span class="om-refresh">⟳ —</span>
+          </div>
+        </div>
+        <table class="om-table">
+          <thead><tr><th>STRIKE</th><th>MID</th><th>Δ</th></tr></thead>
+          <tbody id="nq-opt-rows">
+            <tr><td>21,150</td><td>—</td><td>—</td></tr>
+            <tr><td>21,200</td><td>—</td><td>—</td></tr>
+            <tr class="om-hank-pick"><td><span style="color:#1a3a1a;font-size:11px;">⬡</span> 21,250</td><td>—</td><td>—</td></tr>
+            <tr><td>21,300</td><td>—</td><td>—</td></tr>
+            <tr><td>21,350</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+        <button class="om-exec-btn" disabled style="opacity:0.5;cursor:not-allowed;">
+          ▶ EXECUTE — disabled (live Sunday)
+        </button>
+      </div>
+    </div>
+
+    <!-- ── ANALYSIS SIDEBAR (engines + FVG + sweep) ────────── -->
+    <div class="analysis-col">
+      <div style="padding:12px 14px;border-bottom:1px solid #111;flex-shrink:0;">
+        <div style="font-size:13px;color:#555;letter-spacing:2px;margin-bottom:7px;">FUTURES MASTER</div>
+        <div class="master-sig ms-wait" id="fut-master">— PLACEHOLDER —</div>
+        <div style="font-size:13px;color:#aaa;line-height:1.7;" id="fut-thesis">
+          ES + NQ engines come online 2026-05-18. Placeholder values until then.
+        </div>
+      </div>
+
+      <!-- ENGINE SIGNAL LANE — same shape as AUTONOMOUS -->
+      <div class="engine-lane">
+        <div class="el-title">ENGINES</div>
+        <div id="futEngineLane">
+          <div class="el-row"><span class="el-eng">TREND</span>     <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">live Sunday</span></div>
+          <div class="el-row"><span class="el-eng">FADE</span>      <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">live Sunday</span></div>
+          <div class="el-row"><span class="el-eng">STRUCTURE</span> <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">live Sunday</span></div>
+          <div class="el-row"><span class="el-eng">MOC</span>       <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">live Sunday</span></div>
+          <div class="el-row"><span class="el-eng">FLOW</span>      <span class="el-act idle">—</span><span class="el-conf"></span><span class="el-msg">live Sunday</span></div>
+        </div>
+      </div>
+
+      <!-- FVG ZONES — ES + NQ -->
+      <div class="tp-block">
+        <div class="tp-title"><span>FVG ZONES</span><span class="tp-meta" id="futFvgMeta">—</span></div>
+        <div id="futFvgPanel">
+          <div class="tp-row"><span class="tp-inst">ES</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">scanner not wired</span></div>
+          <div class="tp-row"><span class="tp-inst">NQ</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">scanner not wired</span></div>
+        </div>
+      </div>
+
+      <!-- SWEEPS — ES + NQ -->
+      <div class="tp-block">
+        <div class="tp-title"><span>SWEEPS</span><span class="tp-meta" id="futSweepMeta">—</span></div>
+        <div id="futSweepPanel">
+          <div class="tp-row"><span class="tp-inst">ES</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">scanner not wired</span></div>
+          <div class="tp-row"><span class="tp-inst">NQ</span><span class="tp-tag idle">—</span><span class="tp-px"></span><span class="tp-msg cool">scanner not wired</span></div>
+        </div>
+      </div>
+
+      <!-- OPEN POSITIONS -->
+      <div style="padding:10px 14px;border-bottom:1px solid #111;flex-shrink:0;">
+        <div style="font-size:12px;color:#888;letter-spacing:2px;margin-bottom:7px;">OPEN POSITIONS</div>
+        <div id="futPosCards"><div style="color:#444;font-style:italic;font-size:12px;">No open futures positions</div></div>
+      </div>
+
+      <div class="ac-body" id="fut-feed">
+        <div class="ac-para" style="color:#666;font-style:italic;">
+          Live thesis appears here once monitor-es.js / monitor-nq.js are wired (target 2026-05-18).
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end fut-layout -->
+
+</div><!-- end tab-futures -->
 
 <!-- ══════════════════ TAB 2: MONITOR ═══════════════════════ -->
 <div class="tab-panel" id="tab-monitor">
@@ -2710,7 +2956,7 @@ function switchTab(id, el) {
   const panel = document.getElementById('tab-' + id);
   if (panel) panel.classList.add('active');
   if (el) el.classList.add('active');
-  const labels = { auto: '◈ AUTONOMOUS', monitor: '◈ MONITOR', intel: '◉ INTELLIGENCE', journal: '≡ JOURNAL', pnl: '$ P&L', trade: '▲ TRADE', settings: '⚙ SETTINGS' };
+  const labels = { auto: '◈ AUTONOMOUS', futures: '◆ FUTURES', monitor: '◈ MONITOR', intel: '◉ INTELLIGENCE', journal: '≡ JOURNAL', pnl: '$ P&L', trade: '▲ TRADE', settings: '⚙ SETTINGS' };
   const sc = document.getElementById('tb-screen');
   if (sc) sc.textContent = labels[id] || id.toUpperCase();
   if (id === 'trade') loadHankSignal();
