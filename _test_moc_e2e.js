@@ -1,6 +1,6 @@
 // End-to-end test for the MOC ledger fix.
 //
-// Drives moc.js's attemptEntry() and hardExit() with synthetic inputs.
+// Drives moc-engine.js's attemptEntry() and hardExit() with synthetic inputs.
 // Verifies:
 //   - paper-ledger.json after run is a structured object (not bare array)
 //   - paper-ledger.json contains the new MOC trade with engine='MOC' and
@@ -117,34 +117,35 @@ try {
     : 0;
 
   // ─── Drive the lifecycle ──────────────────────────────
-  // Import attemptEntry / hardExit. moc.js gates main() so the import alone
-  // doesn't start the engine. We have to populate moc.js's module-scope
-  // `live`, `cachedMoc`, `snapshot` state via the ws/snapshot helpers it
-  // exposes — but those are not exported. Easiest: drive the flow by setting
-  // the state file moc.js reads + injecting via a minimal module patch.
+  // Import attemptEntry / hardExit. moc-engine.js gates main() so the import
+  // alone doesn't start the engine. We have to populate moc-engine.js's
+  // module-scope `live`, `cachedMoc`, `snapshot` state via the ws/snapshot
+  // helpers it exposes — but those are not exported. Easiest: drive the flow
+  // by setting the state file moc-engine.js reads + injecting via a minimal
+  // module patch.
 
   // The `cachedMoc` and `live.spyPrice` are set inside tick() → readMocData()
   // and tryLoadSpyLevels(). Since tick() requires the time clock to be in
   // the MOC window (15:51-15:58 ET), and we don't want to wait for that,
   // we drive attemptEntry() directly with manual state injection.
   //
-  // moc.js exposes attemptEntry, hardExit, mocOrderToConsensus, buildOrder.
+  // moc-engine.js exposes attemptEntry, hardExit, mocOrderToConsensus, buildOrder.
   // attemptEntry reads cachedMoc + live + snapshot (module-scope). We can't
   // set those without exporting setters. Workaround: invoke buildOrder
   // ourselves with synthetic strike + conviction, then call sendOrder
   // through paperTrading.js the same way attemptEntry does.
 
-  const moc = await import('./moc.js');
+  const moc = await import('./moc-engine.js');
   const pt  = await import('./paperTrading.js');
 
-  // Build a synthetic order representing what moc.js would have built at 15:51
+  // Build a synthetic order representing what moc-engine.js would have built at 15:51
   const syntheticStrike = {
     underlying: 'XSP', optionType: 'CALL', strike: 740,
     expiry: etDate(), estimatedPremium: 0.25, deltaEst: 0.15,
   };
   const syntheticConviction = { score: 4, factors: [] };
   const syntheticOrder = moc.buildOrder(syntheticStrike, 'CALLS', syntheticConviction, 5);
-  // buildOrder reads moc.js's module-scope `live` + `snapshot` which won't
+  // buildOrder reads moc-engine.js's module-scope `live` + `snapshot` which won't
   // be populated since main() didn't run. The order will have null entrySpy
   // fields — fine, tests just verify the routing.
 
@@ -180,7 +181,7 @@ try {
   assert('trades[0].tag has NO_EXIT_PRICE',     t0?.tag?.includes('NO_EXIT_PRICE'));
 
   // ─── Drive exit ──────────────────────────────────────
-  // hardExit reads moc.js's module-scope `activeOrder` which is null since
+  // hardExit reads moc-engine.js's module-scope `activeOrder` which is null since
   // attemptEntry wasn't called. We call closePosition directly to verify
   // the exit-side journal/ledger work, mirroring what hardExit would do.
   console.log(`\n--- Driving closePosition for requestId=${requestId} ---`);
