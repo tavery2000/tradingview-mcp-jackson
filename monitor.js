@@ -386,7 +386,10 @@ async function drawChartAnnotations(instrument, client, levels) {
       instrument, bars5M, bars1H, bars4H,
       levels: allLevels, fvgState, sweepState,
     });
-    if (js) await evalOn(client, js);
+    // awaitPromise:true so the async IIFE finishes (all createShape Promises
+    // resolved + IDs persisted on window) before this call returns. Prevents
+    // the next poll from racing this cycle's shape creation.
+    if (js) await client.Runtime.evaluate({ expression: js, returnByValue: true, awaitPromise: true });
   } catch (e) {
     jError('chart-draw', e.message, { instrument });
   }

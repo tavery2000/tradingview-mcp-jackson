@@ -375,7 +375,7 @@ async function readAndDrawPane(isEtf = false) {
 
 // Layered chart drawing — same pattern as monitor.js but single-instrument scope.
 async function drawChartAnnotations(levels) {
-  if (!barCache) return;
+  if (!barCache || !client) return;
   try {
     const [bars5M, bars1H, bars4H] = await Promise.all([
       barCache.get('5'), barCache.get('60'), barCache.get('240'),
@@ -388,7 +388,8 @@ async function drawChartAnnotations(levels) {
       instrument: 'QQQ', bars5M, bars1H, bars4H,
       levels: allLevels, fvgState, sweepState,
     });
-    if (js) await evalOn(js);
+    // awaitPromise:true: see chartDraws.js for rationale.
+    if (js) await client.Runtime.evaluate({ expression: js, returnByValue: true, awaitPromise: true });
   } catch (e) {
     jError('chart-draw', e.message, { instrument: 'QQQ' });
   }
