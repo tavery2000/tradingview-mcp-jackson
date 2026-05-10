@@ -74,16 +74,17 @@ const DISPLACEMENT_RECENT_N = 5;
 // ─── Helpers ────────────────────────────────────────────
 const esc = s => String(s ?? '').replace(/['\\]/g, '');
 
-// Single-point shape (horizontal line, arrow, etc.)
+// Single-point shape (horizontal line, arrow, etc.) — awaits the Promise
+// that createShape returns so we can capture the EntityId string.
 function shapeAt(time, price, shape, overrides) {
   const o = JSON.stringify(overrides);
-  return `  try { api.createShape({ time: ${time}, price: ${price.toFixed(6)} }, { shape: '${shape}', overrides: ${o} }); } catch(e) {}`;
+  return `  try { var id = await api.createShape({ time: ${time}, price: ${price.toFixed(6)} }, { shape: '${shape}', overrides: ${o} }); if (id) ours.push(id); } catch(e) {}`;
 }
 
 // Two-point shape (rectangle, trend line) — top-left, bottom-right
 function rectShape(t1, p1, t2, p2, overrides) {
   const o = JSON.stringify(overrides);
-  return `  try { api.createMultipointShape([{ time: ${t1}, price: ${p1.toFixed(6)} }, { time: ${t2}, price: ${p2.toFixed(6)} }], { shape: 'rectangle', overrides: ${o} }); } catch(e) {}`;
+  return `  try { var id = await api.createMultipointShape([{ time: ${t1}, price: ${p1.toFixed(6)} }, { time: ${t2}, price: ${p2.toFixed(6)} }], { shape: 'rectangle', overrides: ${o} }); if (id) ours.push(id); } catch(e) {}`;
 }
 
 // Look-forward time buffer past the latest bar so zones extend to the right
@@ -224,16 +225,62 @@ export function buildDrawJS(opts) {
 
   counts.total = lines.length;
 
-  // Wrap everything in one IIFE: clear shapes once, then redraw.
+  // Async IIFE per draw cycle. Each shape-create call resolves to the
+  // EntityId string; we collect them as we go and persist on window for
+  // the next cycle's removal pass.
+  //
+  //   1. Remove ONLY the shape IDs we created last cycle (kept on
+  //      window.__hankShapes_<INSTR>). Manual drawings stay put.
+  //   2. await every createShape — capture the resolved EntityId.
+  //   3. Persist the new ID list on window for the next removal pass.
+  //
+  // CALLER MUST USE awaitPromise: true on the CDP eval, otherwise consecutive
+  // polls can race and leak shapes (cycle N+1 reads window before cycle N
+  // finished writing it).
+  //
+  // Caveat: if TradingView's autosave restores our shapes on reload,
+  // window.__hankShapes_<INSTR> resets to empty and the restored shapes
+  // are treated as "manual" (no longer cleared). One-time leak per reload.
   const apiPath = 'window.TradingViewApi._activeChartWidgetWV.value()';
+  const stateKey = `__hankShapes_${(instrument || 'DEFAULT').toUpperCase()}`;
   const js = `
-(function() {
+(async function() {
   var api;
-  try { api = ${apiPath}; api.removeAllShapes(); } catch(e) { return; }
+  try { api = ${apiPath}; } catch(e) { return { error: 'no api' }; }
+  // 1. Remove our previous shapes (no-op if first run or after page reload)
+  try {
+    var prev = window['${stateKey}'] || [];
+    for (var i = 0; i < prev.length; i++) {
+      try { api.removeEntity(prev[i]); } catch(e) {}
+    }
+  } catch(e) {}
+  // 2. Create new shapes — each call awaited so we capture the EntityId
+  var ours = [];
 ${lines.join('\n')}
+  // 3. Persist for next cycle
+  window['${stateKey}'] = ours;
+  return { drew: ours.length };
 })()`;
 
-  return { js, counts };
+  return { js, counts, stateKey };
+}
+
+// Clear all of HANK's shapes for an instrument without touching manual
+// drawings. Called explicitly (e.g., from a dashboard "clear" button) or
+// at shutdown. Returns a JS payload string for evalOn.
+export function clearOursJS(instrument) {
+  const apiPath = 'window.TradingViewApi._activeChartWidgetWV.value()';
+  const stateKey = `__hankShapes_${(instrument || 'DEFAULT').toUpperCase()}`;
+  return `
+(function() {
+  try {
+    var api = ${apiPath};
+    var prev = window['${stateKey}'] || [];
+    for (var i = 0; i < prev.length; i++) { try { api.removeEntity(prev[i]); } catch(e) {} }
+    window['${stateKey}'] = [];
+    return { cleared: prev.length };
+  } catch(e) { return { error: e.message }; }
+})()`;
 }
 
 export { COLOR, SWEEP_DISPLAY_MS, DISPLACEMENT_RECENT_N };
