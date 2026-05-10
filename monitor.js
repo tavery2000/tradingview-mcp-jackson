@@ -2903,39 +2903,9 @@ async function poll() {
     writeFileSync(join(__dirname, 'mag6-state.json'), JSON.stringify(mag6State, null, 2));
   } catch { /* non-fatal */ }
 
-  // qqq-levels.json — QQQ pre-market levels for future briefing expansion
-  if (qqqClient && qqq?.price) {
-    try {
-      writeFileSync(join(__dirname, 'qqq-levels.json'), JSON.stringify({
-        pdHigh:    global.qqqPreMarketLevels?.pdHigh    ?? null,
-        pdLow:     global.qqqPreMarketLevels?.pdLow     ?? null,
-        pdClose:   global.qqqPreMarketLevels?.pdClose   ?? null,
-        todayOpen: global.qqqPreMarketLevels?.todayOpen ?? null,
-        current:   qqq.price,
-        vwap:      qqq.vwap,
-        bias:      qqq.bias,
-        ts:        Date.now(),
-        time:      getETString(),
-      }, null, 2));
-    } catch { /* non-fatal */ }
-  }
-
-  // iwm-levels.json — IWM pre-market levels for future briefing expansion
-  if (iwmClient && iwm?.price) {
-    try {
-      writeFileSync(join(__dirname, 'iwm-levels.json'), JSON.stringify({
-        pdHigh:    global.iwmPreMarketLevels?.pdHigh    ?? null,
-        pdLow:     global.iwmPreMarketLevels?.pdLow     ?? null,
-        pdClose:   global.iwmPreMarketLevels?.pdClose   ?? null,
-        todayOpen: global.iwmPreMarketLevels?.todayOpen ?? null,
-        current:   iwm.price,
-        vwap:      iwm.vwap,
-        bias:      iwm.bias,
-        ts:        Date.now(),
-        time:      getETString(),
-      }, null, 2));
-    } catch { /* non-fatal */ }
-  }
+  // qqq-levels.json + iwm-levels.json writes removed in Task 3 (May 9 audit § 2.4).
+  // monitor-qqq.js and monitor-iwm.js are now the sole writers for their own
+  // levels files — no race, fresher todayOpen (those monitors refresh at 09:31).
 
   // Refresh news bias once per poll cycle — used by executeScalpSignal gating
   refreshNewsBias();
