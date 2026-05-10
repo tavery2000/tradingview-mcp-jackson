@@ -1,5 +1,5 @@
 // Unit test for mocOrderToConsensus — verifies field-by-field mapping
-// from moc.js's order shape to paperTrading.sendOrder's consensus shape.
+// from moc-engine.js's order shape to paperTrading.sendOrder's consensus shape.
 //
 // Asserts:
 //   - signal/engine/instrument/strike/contracts pass through correctly
@@ -10,7 +10,7 @@
 //   - works for both CALLS (BUY) and PUTS (SELL) directions
 //
 // Run: node _test_moc_route.js   (no arguments)
-import { mocOrderToConsensus, buildOrder } from './moc.js';
+import { mocOrderToConsensus, buildOrder } from './moc-engine.js';
 
 const tests = [];
 function assert(name, cond, detail) {
@@ -71,7 +71,7 @@ assert('null conviction → 0',      c4.finalConfidence === 0);
 
 // ─── Test 5: buildOrder still produces the legacy shape ──
 // (kept for forensic continuity; the test ensures we didn't accidentally
-//  break the legacy moc.js path while routing).
+//  break the legacy moc-engine.js path while routing).
 const live = { spyPrice: 5840, spyDelta: 1500 };
 const strike = { underlying: 'XSP', optionType: 'CALL', strike: 5847.5,
                  expiry: '2026-05-09', estimatedPremium: 0.25, deltaEst: 0.15 };

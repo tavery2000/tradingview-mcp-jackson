@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * moc.js — MOC (Market-On-Close) Engine v2
+ * moc-engine.js — MOC (Market-On-Close) Engine v2
  *
  * Latency-aware MOC engine. Financial Juice MOC data arrives ~60s after the
  * actual 15:50 NYSE publication. HANK treats this as CONFIRMATION, not lead.
@@ -27,11 +27,11 @@
  *   - Conviction collapsed?   → early exit
  *
  * Data:
- *   moc-data.json  written by news.js when FJ MOC alert fires
+ *   moc-data.json  written by moo-moc.js when FJ MOC alert fires
  *   wsServer :8765 monitor.js SIGNAL+TICK (spyPrice, spyDelta, spyVwap, spyBias, spyLevels)
  *   paper-ledger.json  paperTrading.js order log
  *
- * Usage: node moc.js   (Window 3, alongside monitor.js + news.js)
+ * Usage: node moc-engine.js   (Window 6, alongside monitor.js + moo-moc.js)
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'fs';
@@ -335,14 +335,14 @@ export function buildOrder(strike, direction, conviction, contracts) {
   };
 }
 
-// Map a moc.js-style `order` to the `consensus` object paperTrading.sendOrder
-// expects. paperTrading.js owns the ledger I/O — moc.js stops touching the file
+// Map a moc-engine.js-style `order` to the `consensus` object paperTrading.sendOrder
+// expects. paperTrading.js owns the ledger I/O — moc-engine.js stops touching the file
 // directly. See ledger-fix-plan.md for the full mapping rationale.
 //
 // Tag carries 'NO_EXIT_PRICE' so consumers (ASK HANK pnl, tier rolling-100 stats)
 // can filter MOC trades out of P&L aggregates until live exit-chain pricing
 // lands. Today closePosition() will compute $0 P&L for these trades because
-// moc.js doesn't yet track live option premium at exit.
+// moc-engine.js doesn't yet track live option premium at exit.
 export function mocOrderToConsensus(order, expectedDir, conviction) {
   const score = conviction?.score ?? 0;
   return {
@@ -546,7 +546,7 @@ export function hardExit(reason = '15:59 ET scheduled') {
   if (rescoreTimer) { clearInterval(rescoreTimer); rescoreTimer = null; }
 
   if (activeOrder?.requestId) {
-    // Exit price degraded: moc.js doesn't yet pull live option premium at exit,
+    // Exit price degraded: moc-engine.js doesn't yet pull live option premium at exit,
     // so closePosition computes $0 P&L for MOC trades. The 'NO_EXIT_PRICE' tag
     // attached at entry lets downstream consumers filter accordingly.
     const exitPrice  = activeOrder.fillPrice ?? 0;
@@ -609,7 +609,7 @@ export async function attemptEntry() {
   if (order) {
     // Route through paperTrading.sendOrder() — single writer, structured
     // ledger schema, automatic jEntry journaling. Ledger lock is held inside
-    // paperTrading; moc.js no longer writes paper-ledger.json directly.
+    // paperTrading; moc-engine.js no longer writes paper-ledger.json directly.
     const consensus = mocOrderToConsensus(order, expectedDir, conviction);
     const requestId = orderGate.createRequest({ signal: consensus.signal, engine: 'MOC' });
     let trade = null;
@@ -790,7 +790,7 @@ async function main() {
   });
 }
 
-// Run main() only when invoked directly (`node moc.js`) — not when imported
+// Run main() only when invoked directly (`node moc-engine.js`) — not when imported
 // (e.g. by the e2e test which drives attemptEntry / hardExit explicitly).
 const isMain = (() => {
   try {
