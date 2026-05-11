@@ -1036,6 +1036,12 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
       console.log(`  [OPTIONS] IWM strike selection error: ${e.message}`);
     }
   }
+  // ATR-based fallback when chain quote unavailable (Webull chain API_DISABLED).
+  // Mirrors executeSwingEntry pattern; without this, chart-engine signals hit
+  // PRICE_TOO_LOW=0 because entryPrice comes empty under API_DISABLED.
+  if ((!entryPrice || entryPrice <= 0.05) && underlyingPrice > 0) {
+    entryPrice = parseFloat((underlyingPrice * 0.005 * 0.4).toFixed(2));
+  }
   if (entryPrice <= 0.05) { jGateBlock(sigEngine, 'IWM', dir, 'PRICE_TOO_LOW', { entryPrice, macro4H }); return; }
 
   // Global cap: 3 when Mag-6 ≥ 4 bull (strong trend), 2 otherwise; max 1 IWM

@@ -2431,7 +2431,13 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
   // Options pricing — ATR estimate (Webull chain API_DISABLED, pending scope grant)
   const priceMap = { SPY: _spyPrice, QQQ: _qqqPrice, IWM: _iwmPrice };
   const underlyingPrice = priceMap[instrument] ?? 0;
-  let estimatedPrice = lastQuote?.mid ?? lastQuote?.ask ?? 0;
+  let estimatedPrice = lastQuote?.mid ?? lastQuote?.ask;
+  // ATR-based fallback when chain quote is unavailable (mirrors executeSwingEntry pattern).
+  // Without this, every chart-engine signal was hitting PRICE_TOO_LOW=0 all day.
+  if ((!estimatedPrice || estimatedPrice <= 0.05) && underlyingPrice > 0) {
+    const atrEst = underlyingPrice * 0.005;
+    estimatedPrice = parseFloat((atrEst * 0.4).toFixed(2));
+  }
   let liveStrike = null, liveExpiry = null;
   if (selectContract && underlyingPrice > 0) {
     const contract = selectContract(instrument, underlyingPrice, direction);
