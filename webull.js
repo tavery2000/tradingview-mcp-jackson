@@ -843,7 +843,9 @@ function selectContract(symbol, price, direction, atr = null) {
   const etDateStr = now.toLocaleDateString('en-US', { timeZone:'America/New_York' });
   const [mo, d, y] = etDateStr.split('/');
   const todayStr  = `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}`;
-  const dayOfWeek = new Date(todayStr).getDay();
+  // §DTE fix 2026-05-11: numeric-args Date constructor uses local TZ, avoiding the
+  // UTC-midnight parsing trap that made today (a weekday) read as Sunday in ET.
+  const dayOfWeek = new Date(+y, +mo - 1, +d).getDay();
 
   // All three instruments expire every weekday — SPY now Mon-Fri daily
   const allWeekdays = [1, 2, 3, 4, 5];
@@ -859,7 +861,10 @@ function selectContract(symbol, price, direction, atr = null) {
 
   function nextTradingExpiry(daysAhead) {
     for (let i = daysAhead; i <= daysAhead + 4; i++) {
-      const next = new Date(todayStr);
+      // §DTE fix 2026-05-11: numeric-args constructor uses local TZ; mirrors the
+      // line-846 fix. Self-corrects today via the toLocaleDateString round-trip
+      // below but is fragile if that round-trip is ever removed.
+      const next = new Date(+y, +mo - 1, +d);
       next.setDate(next.getDate() + i);
       const dow = next.getDay();
       if (dow === 0 || dow === 6) continue; // skip weekends
