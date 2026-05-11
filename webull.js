@@ -20,9 +20,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ───────────────────────────────────────────────
 
-const IS_TEST   = process.argv.includes('--test');
-const UAT_HOST  = 'us-openapi-alb.uat.webullbroker.com';
-const HOST      = IS_TEST ? UAT_HOST : 'api.webull.com';
+// Prod-only as of 2026-05-11. The --test flag still triggers a connection
+// test below, but routing always goes to api.webull.com. UAT path removed:
+// app credentials were registered on the production developer portal,
+// never on UAT, so /openapi/account/list returned 401 UNAUTHORIZED. See
+// webull-401-investigation-2026-05-11.md for the full audit.
+const HOST      = 'api.webull.com';
 const MQTT_HOST = 'api.webull.com';  // data-api.webull.com (52.20.72.130) is blocked — use CloudFront host
 const BASE_URL  = `https://${HOST}`;
 
@@ -1154,7 +1157,7 @@ if(process.argv.includes('--test')) {
 
   console.log(`  App Key:  ${CONFIG.appKey.slice(0,8)}...`);
   console.log(`  App ID:   ${CONFIG.appId}`);
-  console.log(`  Endpoint: ${HOST}${IS_TEST ? ' (UAT — key must be registered on UAT portal)' : ' (production)'}\n`);
+  console.log(`  Endpoint: ${HOST} (production)\n`);
 
   // Test signature generation
   console.log('  Step 1: Testing signature generation...');
