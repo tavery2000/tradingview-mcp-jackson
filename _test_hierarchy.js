@@ -18,6 +18,7 @@
 
 import {
   HIERARCHY_V2,
+  PINE_PRIMARY,
   CHART_ENGINE_SET,
   computeBoosterAdj,
   computeSpyBoosters,
@@ -33,8 +34,12 @@ function assert(name, cond, detail) {
 }
 function approx(a, b, eps = 0.001) { return Math.abs(a - b) < eps; }
 
-// ─── 1. HIERARCHY_V2 + chart engine set ────────────────────────────────────
+// ─── 1. HIERARCHY_V2 + PINE_PRIMARY + chart engine set ─────────────────────
 assert('HIERARCHY_V2 default ON',           HIERARCHY_V2 === true);
+assert('PINE_PRIMARY default ON',           PINE_PRIMARY === true);
+assert('PINE_PRIMARY is boolean',           typeof PINE_PRIMARY === 'boolean');
+assert('PINE_PRIMARY env override works (truthy by default)',
+  process.env.PINE_PRIMARY === 'false' ? PINE_PRIMARY === false : PINE_PRIMARY === true);
 assert('CHART_ENGINE_SET has STRUCTURE',    CHART_ENGINE_SET.has('STRUCTURE'));
 assert('CHART_ENGINE_SET has FVG',          CHART_ENGINE_SET.has('FVG'));
 assert('CHART_ENGINE_SET has SWEEP',        CHART_ENGINE_SET.has('SWEEP'));
