@@ -36,10 +36,12 @@ import { createBarCache } from './bars.js';
 import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
 import {
-  applyMultipliers, readDailyBiasRegime, gate1H,
+  // Path 2 simplification 2026-05-11: gate1H / gateMacro4H / gateVwap /
+  // computeBoosterAdj / computeSpyBoosters dropped — chart engines fire
+  // through basic gates + tier sizing only. Helpers remain exported from
+  // signalConfidence.js if we need to put any of them back.
+  applyMultipliers, readDailyBiasRegime,
   HIERARCHY_V2, CHART_ENGINE_SET,
-  computeBoosterAdj, computeSpyBoosters,
-  gateMacro4H, gateVwap,
 } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS } from './chartDraws.js';
@@ -1246,7 +1248,9 @@ function printSummary(rows, spy, bulls, bears, spySummary, isChop, swingState, s
   printPaperPanel(line);
 
   // ── TREND ENGINE ──────────────────────────────────────────────────────────
-  if (trendSig) {
+  // Path 2 simplification 2026-05-11: silenced under HIERARCHY_V2 so the
+  // console reflects only what actually dispatches (chart engines).
+  if (trendSig && !HIERARCHY_V2) {
     const sc = trendSig.action.includes('CALLS')?C.green:trendSig.action.includes('PUTS')?C.red:trendSig.action.includes('CHOP')?C.yellow:C.gray;
     const cc = ['HIGH','SPY+W3 OVERRIDE','TICK-EXTREME','SPY-FIRST'].includes(trendSig.confidence)?C.green:['MEDIUM','WEAK','W3-EARLY'].includes(trendSig.confidence)?C.yellow:C.gray;
     console.log(line);
@@ -2381,22 +2385,9 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     jGateBlock(sigEngine, instrument, sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
     return;
   }
-  // §18 — Direction conflict suppression. If opposite-direction fired on this
-  // instrument within DIRECTION_CONFLICT_MS, block. First-fired-wins, prevents
-  // whipsaw between FADE/STRUCTURE engines on indecisive tape.
-  if (HIERARCHY_V2 && sigDir !== 'WAIT' && _lastFire[instrument]?.dir && _lastFire[instrument].dir !== sigDir) {
-    const elapsed = Date.now() - _lastFire[instrument].ms;
-    if (elapsed < DIRECTION_CONFLICT_MS) {
-      jGateBlock(sigEngine, instrument, sigDir, 'DIRECTION_CONFLICT', {
-        previousDir: _lastFire[instrument].dir,
-        currentDir:  sigDir,
-        elapsedSec:  Math.floor(elapsed / 1000),
-        windowSec:   Math.floor(DIRECTION_CONFLICT_MS / 1000),
-        macro4H,
-      });
-      return;
-    }
-  }
+  // §18 — Direction conflict gate stripped 2026-05-11 (Path 2 simplification).
+  // Trackers (_lastFire / DIRECTION_CONFLICT_MS) preserved at module scope so
+  // the gate can be restored without retracing the data flow.
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
     jGateBlock(sigEngine, instrument, sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H });
     return;
@@ -2417,22 +2408,10 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     }
   }
 
-  // Session gate — pre/after-hours blocked; MIDDAY chop-filtered but not blanket blocked
+  // Session gate — pre/after-hours blocked. MIDDAY_CHOP stripped 2026-05-11
+  // (Path 2 simplification): reliable chart-engine signals should not be
+  // suppressed by a midday-chop heuristic.
   if (!getSession().trade) { jGateBlock(sigEngine, instrument, sigDir, 'SESSION_NO_TRADE', { session: getSession().name, macro4H }); return; }
-  // MIDDAY_CHOP — under hierarchy v2 only blocks when the chart signal is
-  // weak (confidence !== 'HIGH'). Loosened per § E.3a so a clear chart HIGH
-  // can still fire through midday chop. Legacy path (HIERARCHY_V2 off) keeps
-  // the original gate.
-  if (getSession().name === 'MIDDAY' && _isChop) {
-    const chopBlock = HIERARCHY_V2
-      ? (_w3Score < 3 && signal.confidence !== 'HIGH')
-      : (_w3Score < 3);
-    if (chopBlock) {
-      console.log(`  [MIDDAY CHOP] ${instrument} skipped — confirmed chop, W3 ${_w3Score}/5`);
-      jGateBlock(sigEngine, instrument, sigDir, 'MIDDAY_CHOP', { w3Score: _w3Score, confidence: signal.confidence, macro4H });
-      return;
-    }
-  }
 
   // Daily-bias gate — block midday entries on CHOPPY/COILED unless STRUCTURE HIGH
   const _bias = _getDailyBias ? _getDailyBias() : null;
@@ -2545,71 +2524,13 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     } catch {}
   }
 
-  // 1H positional gate — block counter-structure trades, adjust base for
-  // chasing/pullback context. Then stack the string confidence into a numeric
-  // finalConfidence using the 4H macro direction and today's bias regime.
-  // paperTrading reads finalConfidence to size the position via tier.getPositionSize.
-  // (macro4H is already computed at function top so every GATE_BLOCK can include it.)
+  // Path 2 simplification 2026-05-11: gate1H, gateMacro4H, gateVwap, and the
+  // SPY booster stack were stripped here. Reliable Pine chart-engine signals
+  // (STRUCTURE/FVG/SWEEP/FADE) now flow straight from basic-gate pass to tier
+  // sizing. macro4H is still recorded on the journal entry below for logging.
   const marketBias = readDailyBiasRegime();
-  let ana1H = null;
-  if (barCache[instrument]) {
-    try {
-      const bars1H = await barCache[instrument].get('60');
-      if (bars1H && bars1H.length) ana1H = analyze1H(bars1H, underlyingPrice);
-    } catch {}
-  }
 
-  const gate = gate1H(boostedSignal, ana1H, marketBias);
-  if (gate.block) {
-    jGateBlock(sigEngine, instrument, direction, gate.reason, {
-      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange, macro4H,
-    });
-    return;
-  }
-
-  // MACRO4H BLOCK — chart-first hierarchy v2 promotes counter-direction
-  // from 0.6× dampener to a hard block. FADE is exempted in the gate
-  // helper itself (counter-trend by design). Per-instrument macro4H (each
-  // monitor computes its own from its 240-min bars).
-  const macro4HGate = gateMacro4H(boostedSignal, { macro4H });
-  if (macro4HGate.block) {
-    jGateBlock(sigEngine, instrument, direction, macro4HGate.reason, {
-      macro4H, signalEngine: sigEngine,
-    });
-    return;
-  }
-
-  // VWAP wrong-side gate — unified ±0.15% tolerance, FADE exempt.
-  // Pulls current price + vwap from the per-instrument analysis already
-  // computed for this poll cycle.
-  const _vwapMap = { SPY: _spyVwap, QQQ: _qqqVwap, IWM: _iwmVwap };
-  const vwapGate = gateVwap(boostedSignal, underlyingPrice, _vwapMap[instrument]);
-  if (vwapGate.block) {
-    jGateBlock(sigEngine, instrument, direction, vwapGate.reason, {
-      price: underlyingPrice, vwap: _vwapMap[instrument], macro4H,
-    });
-    return;
-  }
-
-  // Boosters — consensus inputs (Mag-6, W3, TICK, delta, vol) feed numeric
-  // bonus to baseConfidence, capped at +0.15. Threaded through ctx.baseAdjust
-  // alongside the gate1H pullback bonus. Only computed under HIERARCHY_V2;
-  // legacy path keeps the unchanged baseAdjust.
-  let boosterAdj = 0;
-  if (HIERARCHY_V2 && instrument === 'SPY') {
-    const consensus = {
-      bulls: _spyBulls, bears: _spyBears, w3Score: _w3Score,
-      tick: _spyTick, delta: _spyDelta, volPct: _spyVolPct,
-      price: underlyingPrice, vwap: _vwapMap.SPY,
-    };
-    const b = computeSpyBoosters(consensus, direction);
-    boosterAdj = computeBoosterAdj(b);
-  }
-
-  const stack = applyMultipliers(boostedSignal, {
-    macro4H, marketBias,
-    baseAdjust: (gate.baseAdjust ?? 0) + boosterAdj,
-  });
+  const stack = applyMultipliers(boostedSignal, { macro4H, marketBias });
 
   const consensus = {
     signal:     direction,
@@ -2617,9 +2538,6 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     confidence: boostedSignal.confidence,
     finalConfidence: stack.finalConfidence,
     multipliers: stack.breakdown,
-    gate1H:     { reason: gate.reason, baseAdjust: gate.baseAdjust,
-                  structurePattern: ana1H?.structurePattern ?? null,
-                  pctOfRange:       ana1H?.pctOfRange       ?? null },
     instrument,
     strike:     liveStrike,
     expiry:     liveExpiry,
@@ -2633,8 +2551,8 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
   const fill  = await sendOrder(consensus, reqId, lastQuote);
 
   if (!fill.vetoed) {
-    // §18 — record successful fire for direction conflict suppression
-    if (HIERARCHY_V2 && _lastFire[instrument]) {
+    // §18 tracker still updated so the gate can be restored without code changes.
+    if (_lastFire[instrument]) {
       _lastFire[instrument] = { ms: Date.now(), dir: direction };
     }
     lastScalpOrder[instrument] = now;
@@ -3083,20 +3001,11 @@ async function poll() {
   // ── Alert + scalp order logic ─────────────────────────────────────────────
   const now = Date.now();
 
-  // Fire on trendSig when actionable — under HIERARCHY_V2, trendSig is a
-  // confidence input only (consumed via computeSpyBoosters); the dispatch
-  // path is gated off so only chart engines (STRUCTURE/FVG/SWEEP/FADE)
-  // can fire orders. Alerts still fire so the visual remains intact.
-  if (trendSig && isTradingHours()) {
-    const dir = trendSig.action.includes('CALLS') ? 'CALLS' : trendSig.action.includes('PUTS') ? 'PUTS' : null;
-    if (dir && (lastAlert !== dir || now - lastAlertTime > COOLDOWN)) {
-      fireAlert(dir, trendSig.reason);
-      lastAlert = dir; lastAlertTime = now;
-    }
-    if (!HIERARCHY_V2) {
-      await executeScalpSignal('SPY', trendSig, getL2Signal('SPY'), _spyVolumePct);
-    }
-  }
+  // trendSig dispatch + alert removed 2026-05-11 (Path 2 simplification).
+  // Under HIERARCHY_V2 the TREND consensus signal is dead context here —
+  // no order dispatch, no console alert. Pine chart engines are the brain.
+  // (trendSig is still computed upstream so the printSummary trend panel
+  // and the WS broadcast can read it; the dispatch + alert sites are gone.)
 
   // Fire on fadeSig with cooldown — structural signals but still gated
   if (fadeSig && isTradingHours()) {
