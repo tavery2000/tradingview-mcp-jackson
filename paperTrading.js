@@ -1118,7 +1118,7 @@ function _classifyTag(signal, ctx) {
 function _gradeProcess(trade, exitReason) {
   const conf = trade.confidence ?? '';
   const goodEntry = ['HIGH', 'MEDIUM', 'SPY-FIRST', 'TICK-EXTREME', 'SPY+W3 OVERRIDE'].includes(conf);
-  const ruleExit  = ['TARGET_2X', 'STOP_0.5X', 'EOD_CLOSE', 'TIME_STOP',
+  const ruleExit  = ['TARGET_2X', 'TARGET_1.5X', 'STOP_0.5X', 'EOD_CLOSE', 'TIME_STOP',
                      'TREND_EXIT', 'VWAP_EXIT', 'TARGET', 'STOP'].includes(exitReason);
   const win = (trade.pnl ?? 0) > 0;
 
@@ -1270,7 +1270,7 @@ async function _processLiveTick(instrument, data, session, w3Score) {
     let exitPrice  = parseFloat(estOption.toFixed(4));
 
     if      (isEOD)            { exitReason = 'EOD_CLOSE'; }
-    else if (pnlRatio >= 2.0)  { exitReason = 'TARGET_2X'; exitPrice = parseFloat((pos.optionEntry * 2).toFixed(4)); }
+    else if (pnlRatio >= 1.5)  { exitReason = 'TARGET_1.5X'; exitPrice = parseFloat((pos.optionEntry * 1.5).toFixed(4)); }
     else if (pnlRatio <= 0.5)  { exitReason = 'STOP_0.5X'; exitPrice = parseFloat((pos.optionEntry * 0.5).toFixed(4)); }
     else if (holdMins >= 90)   { exitReason = 'TIME_STOP'; }
     else if (vwapExit)         { exitReason = 'VWAP_EXIT'; }
