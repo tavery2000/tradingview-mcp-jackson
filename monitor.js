@@ -35,7 +35,12 @@ import { jPoll, jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { createBarCache } from './bars.js';
 import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
-import { applyMultipliers, readDailyBiasRegime, gate1H } from './signalConfidence.js';
+import {
+  applyMultipliers, readDailyBiasRegime, gate1H,
+  HIERARCHY_V2, CHART_ENGINE_SET,
+  computeBoosterAdj, computeSpyBoosters,
+  gateMacro4H, gateVwap,
+} from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS } from './chartDraws.js';
 import { loadFVGState }   from './fvg.js';
@@ -931,6 +936,14 @@ let _isChop    = false; // updated each poll — MIDDAY chop filter
 let _spyPrice  = 0;     // underlying prices for Webull contract selection in executeScalpSignal
 let _qqqPrice  = 0;
 let _iwmPrice  = 0;
+// HIERARCHY_V2 booster + gate context — set each poll() before dispatch
+let _spyVwap   = 0;
+let _qqqVwap   = 0;
+let _iwmVwap   = 0;
+let _spyBulls  = 0;     // Mag-6 bull count (0–6)
+let _spyBears  = 0;     // Mag-6 bear count (0–6)
+let _spyTick   = 0;     // $TICK
+let _spyDelta  = 0;     // SPY volume delta
 
 function refreshNewsBias() {
   try {
@@ -2344,10 +2357,26 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
   const sigEngine = signal?.engine ?? 'TREND';
   const sigDir    = signal?.action?.includes('CALLS') ? 'CALLS' : signal?.action?.includes('PUTS') ? 'PUTS' : 'WAIT';
 
-  if (!sendOrder || !orderGate) { jGateBlock(sigEngine, instrument, sigDir, 'TRADE_DISABLED'); return; }
-  if (!isTradingHours())        { jGateBlock(sigEngine, instrument, sigDir, 'OUT_OF_HOURS');   return; }
+  // HIERARCHY_V2: compute macro4H up-front so every GATE_BLOCK record can
+  // include it. Per-instrument bars; failure → 'UNKNOWN' (non-blocking).
+  let macro4H = 'UNKNOWN';
+  if (barCache[instrument]) {
+    try {
+      const bars4H = await barCache[instrument].get('240');
+      if (bars4H && bars4H.length) macro4H = analyze4H(bars4H).direction;
+    } catch {}
+  }
+
+  if (!sendOrder || !orderGate) { jGateBlock(sigEngine, instrument, sigDir, 'TRADE_DISABLED', { macro4H }); return; }
+  if (!isTradingHours())        { jGateBlock(sigEngine, instrument, sigDir, 'OUT_OF_HOURS',   { macro4H }); return; }
+  // Chart-first hierarchy v2: only STRUCTURE/FVG/SWEEP/FADE may dispatch.
+  // TREND consensus signals are downgraded to confidence inputs (boosters).
+  if (HIERARCHY_V2 && !CHART_ENGINE_SET.has(sigEngine)) {
+    jGateBlock(sigEngine, instrument, sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
+    return;
+  }
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
-    jGateBlock(sigEngine, instrument, sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence });
+    jGateBlock(sigEngine, instrument, sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H });
     return;
   }
 
@@ -2361,31 +2390,40 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
       (sigEngine === 'STRUCTURE' && signal.confidence === 'HIGH') ||
       (sigEngine === 'SWEEP'     && (signal.confidence === 'HIGH' || signal.confidence === 'MEDIUM'));
     if (!openRangeExempt) {
-      jGateBlock(sigEngine, instrument, sigDir, 'OPEN_RANGE_OBSERVATION', { etMins: _etMins });
+      jGateBlock(sigEngine, instrument, sigDir, 'OPEN_RANGE_OBSERVATION', { etMins: _etMins, macro4H });
       return;
     }
   }
 
   // Session gate — pre/after-hours blocked; MIDDAY chop-filtered but not blanket blocked
-  if (!getSession().trade) { jGateBlock(sigEngine, instrument, sigDir, 'SESSION_NO_TRADE', { session: getSession().name }); return; }
-  if (getSession().name === 'MIDDAY' && _isChop && _w3Score < 3) {
-    console.log(`  [MIDDAY CHOP] ${instrument} skipped — confirmed chop, W3 ${_w3Score}/5`);
-    jGateBlock(sigEngine, instrument, sigDir, 'MIDDAY_CHOP', { w3Score: _w3Score });
-    return;
+  if (!getSession().trade) { jGateBlock(sigEngine, instrument, sigDir, 'SESSION_NO_TRADE', { session: getSession().name, macro4H }); return; }
+  // MIDDAY_CHOP — under hierarchy v2 only blocks when the chart signal is
+  // weak (confidence !== 'HIGH'). Loosened per § E.3a so a clear chart HIGH
+  // can still fire through midday chop. Legacy path (HIERARCHY_V2 off) keeps
+  // the original gate.
+  if (getSession().name === 'MIDDAY' && _isChop) {
+    const chopBlock = HIERARCHY_V2
+      ? (_w3Score < 3 && signal.confidence !== 'HIGH')
+      : (_w3Score < 3);
+    if (chopBlock) {
+      console.log(`  [MIDDAY CHOP] ${instrument} skipped — confirmed chop, W3 ${_w3Score}/5`);
+      jGateBlock(sigEngine, instrument, sigDir, 'MIDDAY_CHOP', { w3Score: _w3Score, confidence: signal.confidence, macro4H });
+      return;
+    }
   }
 
   // Daily-bias gate — block midday entries on CHOPPY/COILED unless STRUCTURE HIGH
   const _bias = _getDailyBias ? _getDailyBias() : null;
   if (_bias && getSession().name === 'MIDDAY' && _bias.verdict.midDayPolicy === 'stand_down') {
     if (!(sigEngine === 'STRUCTURE' && signal.confidence === 'HIGH')) {
-      jGateBlock(sigEngine, instrument, sigDir, 'BIAS_STAND_DOWN', { bias: _bias.verdict.bias });
+      jGateBlock(sigEngine, instrument, sigDir, 'BIAS_STAND_DOWN', { bias: _bias.verdict.bias, macro4H });
       return;
     }
   }
 
   const direction = signal.action.includes('CALLS') ? 'CALLS' : 'PUTS';
   if (!signal.action.includes('CALLS') && !signal.action.includes('PUTS')) {
-    jGateBlock(sigEngine, instrument, sigDir, 'NO_DIRECTION', { action: signal.action });
+    jGateBlock(sigEngine, instrument, sigDir, 'NO_DIRECTION', { action: signal.action, macro4H });
     return; // WAIT/CHOP/NEUTRAL
   }
 
@@ -2399,11 +2437,11 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     liveStrike = contract.strike;
     liveExpiry = contract.expiry;
   }
-  if (estimatedPrice <= 0.05) { jGateBlock(sigEngine, instrument, direction, 'PRICE_TOO_LOW', { estimatedPrice }); return; }
+  if (estimatedPrice <= 0.05) { jGateBlock(sigEngine, instrument, direction, 'PRICE_TOO_LOW', { estimatedPrice, macro4H }); return; }
 
   const now = Date.now();
   if (now - (lastScalpOrder[instrument] ?? 0) < SCALP_COOLDOWN) {
-    jGateBlock(sigEngine, instrument, direction, 'COOLDOWN', { sinceLastMs: now - (lastScalpOrder[instrument] ?? 0) });
+    jGateBlock(sigEngine, instrument, direction, 'COOLDOWN', { sinceLastMs: now - (lastScalpOrder[instrument] ?? 0), macro4H });
     return;
   }
 
@@ -2413,11 +2451,11 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     const allOpen = (lg.trades ?? []).filter(t => t.status === 'OPEN');
     const globalCap = _w3Score >= 4 ? 3 : 2;
     if (allOpen.length >= globalCap) {
-      jGateBlock(sigEngine, instrument, direction, 'GLOBAL_CAP', { open: allOpen.length, cap: globalCap });
+      jGateBlock(sigEngine, instrument, direction, 'GLOBAL_CAP', { open: allOpen.length, cap: globalCap, macro4H });
       return;
     }
     if (allOpen.filter(t => t.instrument === instrument).length >= 1) {
-      jGateBlock(sigEngine, instrument, direction, 'INSTRUMENT_CAP', { open: allOpen.filter(t => t.instrument === instrument).length });
+      jGateBlock(sigEngine, instrument, direction, 'INSTRUMENT_CAP', { open: allOpen.filter(t => t.instrument === instrument).length, macro4H });
       return;
     }
   } catch {}
@@ -2431,7 +2469,7 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
       console.log(`  [NEWS GATE] W3 ${_w3Score}/5 override — CALLS allowed despite BEAR news (${_newsBias.toFixed(0)})`);
     } else {
       console.log(`  [NEWS GATE] CALLS blocked — bear news (${_newsBias.toFixed(0)}) · ${_newsTitle.slice(0,55)}`);
-      jGateBlock(sigEngine, instrument, direction, 'NEWS_BIAS_BEAR', { newsBias: _newsBias });
+      jGateBlock(sigEngine, instrument, direction, 'NEWS_BIAS_BEAR', { newsBias: _newsBias, macro4H });
       return;
     }
   }
@@ -2440,7 +2478,7 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
       console.log(`  [NEWS GATE] W3 ${_w3Score}/5 override — PUTS allowed despite BULL news (+${_newsBias.toFixed(0)})`);
     } else {
       console.log(`  [NEWS GATE] PUTS blocked — bull news (+${_newsBias.toFixed(0)}) · ${_newsTitle.slice(0,55)}`);
-      jGateBlock(sigEngine, instrument, direction, 'NEWS_BIAS_BULL', { newsBias: _newsBias });
+      jGateBlock(sigEngine, instrument, direction, 'NEWS_BIAS_BULL', { newsBias: _newsBias, macro4H });
       return;
     }
   }
@@ -2476,7 +2514,7 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     try {
       const cf = _confirmDirection(instrument, direction);
       if (cf.confirms === false && boostedSignal.confidence !== 'HIGH') {
-        jGateBlock(sigEngine, instrument, direction, 'OPTIONS_FLOW_DISAGREES', { reason: cf.reason });
+        jGateBlock(sigEngine, instrument, direction, 'OPTIONS_FLOW_DISAGREES', { reason: cf.reason, macro4H });
         return;
       }
       if (cf.confirms === true && boostedSignal.confidence === 'MEDIUM') {
@@ -2489,27 +2527,67 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
   // chasing/pullback context. Then stack the string confidence into a numeric
   // finalConfidence using the 4H macro direction and today's bias regime.
   // paperTrading reads finalConfidence to size the position via tier.getPositionSize.
+  // (macro4H is already computed at function top so every GATE_BLOCK can include it.)
   const marketBias = readDailyBiasRegime();
-  let macro4H = 'UNKNOWN', ana1H = null;
+  let ana1H = null;
   if (barCache[instrument]) {
     try {
-      const [bars4H, bars1H] = await Promise.all([
-        barCache[instrument].get('240'),
-        barCache[instrument].get('60'),
-      ]);
-      if (bars4H && bars4H.length) macro4H = analyze4H(bars4H).direction;
-      if (bars1H && bars1H.length) ana1H   = analyze1H(bars1H, underlyingPrice);
+      const bars1H = await barCache[instrument].get('60');
+      if (bars1H && bars1H.length) ana1H = analyze1H(bars1H, underlyingPrice);
     } catch {}
   }
 
   const gate = gate1H(boostedSignal, ana1H, marketBias);
   if (gate.block) {
     jGateBlock(sigEngine, instrument, direction, gate.reason, {
-      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange,
+      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange, macro4H,
     });
     return;
   }
-  const stack = applyMultipliers(boostedSignal, { macro4H, marketBias, baseAdjust: gate.baseAdjust });
+
+  // MACRO4H BLOCK — chart-first hierarchy v2 promotes counter-direction
+  // from 0.6× dampener to a hard block. FADE is exempted in the gate
+  // helper itself (counter-trend by design). Per-instrument macro4H (each
+  // monitor computes its own from its 240-min bars).
+  const macro4HGate = gateMacro4H(boostedSignal, { macro4H });
+  if (macro4HGate.block) {
+    jGateBlock(sigEngine, instrument, direction, macro4HGate.reason, {
+      macro4H, signalEngine: sigEngine,
+    });
+    return;
+  }
+
+  // VWAP wrong-side gate — unified ±0.15% tolerance, FADE exempt.
+  // Pulls current price + vwap from the per-instrument analysis already
+  // computed for this poll cycle.
+  const _vwapMap = { SPY: _spyVwap, QQQ: _qqqVwap, IWM: _iwmVwap };
+  const vwapGate = gateVwap(boostedSignal, underlyingPrice, _vwapMap[instrument]);
+  if (vwapGate.block) {
+    jGateBlock(sigEngine, instrument, direction, vwapGate.reason, {
+      price: underlyingPrice, vwap: _vwapMap[instrument], macro4H,
+    });
+    return;
+  }
+
+  // Boosters — consensus inputs (Mag-6, W3, TICK, delta, vol) feed numeric
+  // bonus to baseConfidence, capped at +0.15. Threaded through ctx.baseAdjust
+  // alongside the gate1H pullback bonus. Only computed under HIERARCHY_V2;
+  // legacy path keeps the unchanged baseAdjust.
+  let boosterAdj = 0;
+  if (HIERARCHY_V2 && instrument === 'SPY') {
+    const consensus = {
+      bulls: _spyBulls, bears: _spyBears, w3Score: _w3Score,
+      tick: _spyTick, delta: _spyDelta, volPct: _spyVolPct,
+      price: underlyingPrice, vwap: _vwapMap.SPY,
+    };
+    const b = computeSpyBoosters(consensus, direction);
+    boosterAdj = computeBoosterAdj(b);
+  }
+
+  const stack = applyMultipliers(boostedSignal, {
+    macro4H, marketBias,
+    baseAdjust: (gate.baseAdjust ?? 0) + boosterAdj,
+  });
 
   const consensus = {
     signal:     direction,
@@ -2783,9 +2861,29 @@ async function poll() {
   _spyPrice = spy?.price  ?? 0;
   _qqqPrice = qqq?.price  ?? 0;
   _iwmPrice = iwm?.price  ?? 0;
+  // HIERARCHY_V2 — expose VWAP + Mag-6 + TICK + delta for the new gates & boosters
+  _spyVwap  = Number.isFinite(spy?.vwap) ? spy.vwap : 0;
+  _qqqVwap  = Number.isFinite(qqq?.vwap) ? qqq.vwap : 0;
+  _iwmVwap  = Number.isFinite(iwm?.vwap) ? iwm.vwap : 0;
+  _spyBulls = pureBulls;
+  _spyBears = pureBears;
+  _spyTick  = Number.isFinite(spy?.tick)  ? spy.tick  : 0;
+  _spyDelta = Number.isFinite(spy?.delta) ? spy.delta : 0;
 
   // Session
   const session = getSession();
+
+  // Per-poll SPY macro4H — computed once and threaded into SIGNAL/GATE
+  // journal records so post-session review can correlate fires/blocks with
+  // 4H regime. Per-instrument; QQQ/IWM compute their own inside their
+  // monitors. Failure → 'UNKNOWN' (non-blocking under gateMacro4H).
+  let _spyMacro4H = 'UNKNOWN';
+  if (barCache.SPY) {
+    try {
+      const bars4H = await barCache.SPY.get('240');
+      if (bars4H && bars4H.length) _spyMacro4H = analyze4H(bars4H).direction;
+    } catch {}
+  }
 
   // Triple engine: TREND + FADE + STRUCTURE
   const trendSig     = trendEngine(bulls, bears, spy, spySummary, isChop, w3Score, spy.tick);
@@ -2843,11 +2941,11 @@ async function poll() {
       },
     });
     if (trendSig && (trendSig.action.includes('CALLS') || trendSig.action.includes('PUTS')))
-      jSignal('TREND',     trendSig.action.includes('CALLS') ? 'CALLS' : 'PUTS',     trendSig.confidence,     trendSig.reason);
+      jSignal('TREND',     trendSig.action.includes('CALLS') ? 'CALLS' : 'PUTS',     trendSig.confidence,     trendSig.reason,     { macro4H: _spyMacro4H, instrument: 'SPY' });
     if (fadeSig)
-      jSignal('FADE',      fadeSig.action.includes('CALLS') ? 'CALLS' : 'PUTS',      fadeSig.confidence,      fadeSig.reason);
+      jSignal('FADE',      fadeSig.action.includes('CALLS') ? 'CALLS' : 'PUTS',      fadeSig.confidence,      fadeSig.reason,      { macro4H: _spyMacro4H, instrument: 'SPY' });
     if (structureSig)
-      jSignal('STRUCTURE', structureSig.action,                                       structureSig.confidence, structureSig.reason, { event: structureSig.event });
+      jSignal('STRUCTURE', structureSig.action,                                       structureSig.confidence, structureSig.reason, { event: structureSig.event, macro4H: _spyMacro4H, instrument: 'SPY' });
   } catch (e) { jError('poll-journal', e.message); }
 
   printSummary(rows, spy, pureBulls, pureBears, spySummary, isChop, swingState, spyAnalysis, trendSig, fadeSig, w3Rows, session, structureSig);
@@ -2959,14 +3057,19 @@ async function poll() {
   // ── Alert + scalp order logic ─────────────────────────────────────────────
   const now = Date.now();
 
-  // Fire on trendSig when actionable
+  // Fire on trendSig when actionable — under HIERARCHY_V2, trendSig is a
+  // confidence input only (consumed via computeSpyBoosters); the dispatch
+  // path is gated off so only chart engines (STRUCTURE/FVG/SWEEP/FADE)
+  // can fire orders. Alerts still fire so the visual remains intact.
   if (trendSig && isTradingHours()) {
     const dir = trendSig.action.includes('CALLS') ? 'CALLS' : trendSig.action.includes('PUTS') ? 'PUTS' : null;
     if (dir && (lastAlert !== dir || now - lastAlertTime > COOLDOWN)) {
       fireAlert(dir, trendSig.reason);
       lastAlert = dir; lastAlertTime = now;
     }
-    await executeScalpSignal('SPY', trendSig, getL2Signal('SPY'), _spyVolumePct);
+    if (!HIERARCHY_V2) {
+      await executeScalpSignal('SPY', trendSig, getL2Signal('SPY'), _spyVolumePct);
+    }
   }
 
   // Fire on fadeSig with cooldown — structural signals but still gated
