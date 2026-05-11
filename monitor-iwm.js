@@ -1044,6 +1044,26 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
   }
   if (entryPrice <= 0.05) { jGateBlock(sigEngine, 'IWM', dir, 'PRICE_TOO_LOW', { entryPrice, macro4H }); return; }
 
+  // §19 — Signal reversal exit. If a chart engine fires opposite direction
+  // while an opposite-direction position is open on IWM, close it (SWING exempt).
+  try {
+    const lgRev = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));
+    const oppositeOpen = (lgRev.trades ?? []).find(t =>
+      t.instrument === 'IWM' && t.status === 'OPEN' &&
+      t.signal !== dir && t.engine !== 'SWING'
+    );
+    if (oppositeOpen && closePosition && underlyingPrice > 0 && dir) {
+      const entryU = oppositeOpen.underlyingPrice ?? underlyingPrice;
+      const dirMult = oppositeOpen.signal === 'CALLS' ? 1 : -1;
+      const optMove = (underlyingPrice - entryU) * dirMult * 0.4;
+      const synthExit = Math.max(0.01, parseFloat((oppositeOpen.fillPrice + optMove).toFixed(4)));
+      const closed = closePosition(oppositeOpen.requestId, synthExit, 'SIGNAL_REVERSAL');
+      if (closed) {
+        console.log(`  [SIGNAL_REVERSAL] Closed IWM ${oppositeOpen.signal} at $${synthExit.toFixed(2)} (entry $${oppositeOpen.fillPrice}) — ${sigEngine} flipped to ${dir}`);
+      }
+    }
+  } catch {}
+
   // Global cap: 3 when Mag-6 ≥ 4 bull (strong trend), 2 otherwise; max 1 IWM
   try {
     const lg = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));

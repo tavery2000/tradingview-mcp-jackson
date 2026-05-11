@@ -1028,6 +1028,27 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
   if (now - (lastScalpOrder.QQQ ?? 0) < SCALP_COOLDOWN) {
     jGateBlock(sigEngine, 'QQQ', sigDir, 'COOLDOWN', { sinceLastMs: now - (lastScalpOrder.QQQ ?? 0), macro4H }); return;
   }
+
+  // §19 — Signal reversal exit. If a chart engine fires opposite direction
+  // while an opposite-direction position is open on QQQ, close it (SWING exempt).
+  try {
+    const lgRev = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));
+    const oppositeOpen = (lgRev.trades ?? []).find(t =>
+      t.instrument === 'QQQ' && t.status === 'OPEN' &&
+      t.signal !== sigDir && t.engine !== 'SWING'
+    );
+    if (oppositeOpen && closePosition && underlyingPrice > 0 && sigDir !== 'WAIT') {
+      const entryU = oppositeOpen.underlyingPrice ?? underlyingPrice;
+      const dirMult = oppositeOpen.signal === 'CALLS' ? 1 : -1;
+      const optMove = (underlyingPrice - entryU) * dirMult * 0.4;
+      const synthExit = Math.max(0.01, parseFloat((oppositeOpen.fillPrice + optMove).toFixed(4)));
+      const closed = closePosition(oppositeOpen.requestId, synthExit, 'SIGNAL_REVERSAL');
+      if (closed) {
+        console.log(`  [SIGNAL_REVERSAL] Closed QQQ ${oppositeOpen.signal} at $${synthExit.toFixed(2)} (entry $${oppositeOpen.fillPrice}) — ${sigEngine} flipped to ${sigDir}`);
+      }
+    }
+  } catch {}
+
   // Max 3 open positions gate
   try {
     const lg = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));
