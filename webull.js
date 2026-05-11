@@ -71,7 +71,16 @@ const C = {
 // ─── Signature Generation ────────────────────────────────
 // Per official Webull docs: HMAC-SHA1 with specific header signing
 
+// Per Webull support (2026-05-11): trade-scope endpoints (/openapi/trade/*)
+// are transitioning to HMAC-SHA256 as the security standard for write
+// operations. Backend is currently algorithm-aware via the
+// `x-signature-algorithm` header — SHA1 still works for read/account endpoints,
+// SHA256 is the recommended path for trade endpoints. Auto-select by path.
 function generateSignature(path, queryParams={}, body=null) {
+  const useSHA256 = path.startsWith('/openapi/trade/');
+  const algorithm = useSHA256 ? 'HMAC-SHA256' : 'HMAC-SHA1';
+  const hashAlgo  = useSHA256 ? 'sha256' : 'sha1';
+
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const nonce     = crypto.randomUUID().replace(/-/g, '');
 
@@ -79,7 +88,7 @@ function generateSignature(path, queryParams={}, body=null) {
   const signingHeaders = {
     'x-app-key':             CONFIG.appKey,
     'x-timestamp':           timestamp,
-    'x-signature-algorithm': 'HMAC-SHA1',
+    'x-signature-algorithm': algorithm,
     'x-signature-version':   '1.0',
     'x-signature-nonce':     nonce,
     'host':                  CONFIG.host,
@@ -105,27 +114,27 @@ function generateSignature(path, queryParams={}, body=null) {
   // Step 3: URL-encode str3
   const encodedString = encodeURIComponent(str3);
 
-  // Step 4: HMAC-SHA1 with appSecret + '&' as key
+  // Step 4: HMAC with appSecret + '&' as key (SHA1 or SHA256 per algorithm above)
   const signingKey  = `${CONFIG.appSecret}&`;
   const signature   = crypto
-    .createHmac('sha1', signingKey)
+    .createHmac(hashAlgo, signingKey)
     .update(encodedString)
     .digest('base64');
 
-  return { signature, timestamp, nonce };
+  return { signature, timestamp, nonce, algorithm };
 }
 
 // ─── HTTP Request ─────────────────────────────────────────
 
 function apiRequest(method, path, queryParams={}, body=null, extraHeaders={}) {
   return new Promise((resolve, reject) => {
-    const { signature, timestamp, nonce } = generateSignature(path, queryParams, body);
+    const { signature, timestamp, nonce, algorithm } = generateSignature(path, queryParams, body);
 
     const headers = {
       'x-app-key':             CONFIG.appKey,
       'x-timestamp':           timestamp,
       'x-signature':           signature,
-      'x-signature-algorithm': 'HMAC-SHA1',
+      'x-signature-algorithm': algorithm,
       'x-signature-version':   '1.0',
       'x-signature-nonce':     nonce,
       'x-version':             'v2',
@@ -136,6 +145,15 @@ function apiRequest(method, path, queryParams={}, body=null, extraHeaders={}) {
 
     // Include 2FA token if available
     if(cachedToken) headers['x-access-token'] = cachedToken;
+
+    // Trade-scope endpoints require x-trade-token (obtained via 6-digit
+    // trading password — see acquireTradeToken / --trade-token-login).
+    // Auto-inject when calling /openapi/trade/* paths; skip the token-issuance
+    // endpoint itself (which is how you get the token in the first place).
+    if (path.startsWith('/openapi/trade/') && !path.includes('/token')) {
+      const tt = loadTradeToken();
+      if (tt) headers['x-trade-token'] = tt;
+    }
 
     // Build query string
     const qs = Object.keys(queryParams).length
@@ -602,6 +620,51 @@ function consumerRequest(hostname, path, queryParams={}) {
 const CONSUMER_TOKEN_FILE = join(__dirname, '.webull_consumer_token');
 let cachedConsumerToken   = null;
 
+// ─── Trade Token (for order placement) ────────────────────────────────────
+// Per Webull support (2026-05-11): order POSTs to /openapi/trade/* require
+// an `x-trade-token` header. Acquire it once per session by POSTing the
+// 6-digit trading password to /openapi/trade/v2/token. Token cache lives in
+// .webull_trade_token (same pattern as .webull_token and .webull_consumer_token).
+// Token expires on inactivity — refresh with `node webull.js --trade-token-login`.
+const TRADE_TOKEN_FILE = join(__dirname, '.webull_trade_token');
+let cachedTradeToken   = null;
+
+function loadTradeToken() {
+  if (cachedTradeToken) return cachedTradeToken;
+  if (process.env.WEBULL_TRADE_TOKEN) {
+    cachedTradeToken = process.env.WEBULL_TRADE_TOKEN.trim();
+    return cachedTradeToken;
+  }
+  try {
+    if (!existsSync(TRADE_TOKEN_FILE)) return null;
+    const data = JSON.parse(readFileSync(TRADE_TOKEN_FILE, 'utf8'));
+    if (!data.token) return null;
+    cachedTradeToken = data.token;
+    return cachedTradeToken;
+  } catch { return null; }
+}
+
+function saveTradeToken(token, extra={}) {
+  writeFileSync(TRADE_TOKEN_FILE, JSON.stringify({ token, savedAt: Date.now(), ...extra }, null, 2));
+  cachedTradeToken = token;
+}
+
+// Trade an OpenAPI 6-digit trading password for a trade_token.
+// Endpoint per Webull: POST /openapi/trade/v2/token
+// Response shape (per spec): { trade_token: "...", expire_in: <seconds> } — adapt
+// in error handler if Webull returns a different field name.
+async function acquireTradeToken(password) {
+  if (!password || !/^\d{6}$/.test(password)) {
+    return { error: 'trading password must be 6 digits', status: 0 };
+  }
+  const res = await apiRequest('POST', '/openapi/trade/v2/token', {}, { password });
+  if (res.status !== 200) return { error: res.data, status: res.status };
+  const token = res.data?.trade_token ?? res.data?.tradeToken ?? res.data?.data?.trade_token;
+  if (!token) return { error: `no trade_token field in response: ${JSON.stringify(res.data)?.slice(0,200)}`, status: res.status };
+  saveTradeToken(token, { source: 'acquireTradeToken' });
+  return { token, status: res.status };
+}
+
 // Well-known tickerIds for our trading instruments — verified vs Webull search.
 // Search the public endpoint if a symbol isn't here.
 const TICKER_ID = {
@@ -895,9 +958,39 @@ function selectContract(symbol, price, direction, atr = null) {
 // ─── Order Placement ──────────────────────────────────────────────────────────
 
 /**
+ * Look up the Webull-internal numeric tickerId for a specific option contract.
+ * Per Webull support (2026-05-11): the order endpoint requires this numeric ID,
+ * NOT the OSI symbol string. tickerIds live in the consumer-API option chain
+ * response (s.call.tickerId / s.put.tickerId from getOptionsChain).
+ *
+ * Requires consumer token (.webull_consumer_token) — same as options-chain reads.
+ * Returns string tickerId on success, or null on miss/error.
+ */
+async function lookupOptionContractTickerId(symbol, strike, expiry, type) {
+  if (!loadConsumerToken()) return null;
+  try {
+    const all = await getOptionsExpirations(symbol);
+    if (all.error || !all.chains) return null;
+    const chain = all.chains[expiry];
+    if (!chain) return null;
+    const slot = chain.find(s => Math.abs(s.strikePrice - parseFloat(strike)) < 0.005);
+    if (!slot) return null;
+    const leg  = type === 'CALL' ? slot.call : slot.put;
+    return leg?.tickerId ? String(leg.tickerId) : null;
+  } catch { return null; }
+}
+
+/**
  * Place an options order via Webull REST API.
  * In PAPER mode — simulates fill at mid price.
  * In LIVE mode  — sends real order to Webull.
+ *
+ * LIVE-mode prerequisites (2026-05-11 spec from Webull support):
+ *   1. .webull_trade_token loaded (run `node webull.js --trade-token-login`)
+ *   2. .webull_consumer_token loaded (run `node webull.js --consumer-login`) —
+ *      needed for tickerId lookup on the option contract
+ *   3. contract.tickerId pre-populated, OR symbol/strike/expiry/type provided
+ *      so lookupOptionContractTickerId can resolve it
  */
 async function placeOptionsOrder(contract, action, quantity=1) {
   const mode = process.env.TRADING_MODE ?? 'PAPER';
@@ -921,52 +1014,62 @@ async function placeOptionsOrder(contract, action, quantity=1) {
   }
 
   // LIVE — Webull OpenAPI US options order
-  // Endpoint: POST /openapi/trade/option/order/place (v2, account_id in both QS and body)
-  // Confirmed correct format from systematic testing 2026-05-05
-  try {
-    const side       = action === 'BUY_TO_OPEN' ? 'BUY' : 'SELL';
-    const posIntent  = action === 'BUY_TO_OPEN' ? 'BUY_TO_OPEN' : 'SELL_TO_CLOSE';
-    const limitPrice = (contract.mid || contract.ask || 1.0).toFixed(2);
-    const ts         = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
-    const clientOid  = ts + crypto.randomBytes(8).toString('hex');
+  // Endpoint: POST /openapi/trade/option/order/place
+  // Schema per Webull support (2026-05-11): flat camelCase body keyed on
+  // numeric `tickerId` (not OSI symbol). x-trade-token header auto-injected
+  // by apiRequest when path starts with /openapi/trade/. HMAC-SHA256 used
+  // for trade-scope signing per generateSignature path-detection.
+  //
+  // Prior schema (nested new_orders[].legs[], snake_case, client_order_id)
+  // returned OAUTH_OPENAPI_PARAM_ERR "invalid client_order_id" on 2026-05-05.
+  // That was a parameter-validation rejection of unknown field names, NOT
+  // a permission gate (Webull confirmed 2026-05-11). Migrated to current spec.
 
+  // Verify trade_token is present — fail fast with actionable message
+  if (!loadTradeToken()) {
+    const msg = 'no trade_token loaded — run `node webull.js --trade-token-login`';
+    console.log(`  [ORDER] ${C.red}${msg}${C.reset}`);
+    return { success: false, error: msg };
+  }
+
+  // Resolve tickerId — required by new schema. Use pre-populated if caller
+  // provided it; otherwise look up via consumer-API option chain.
+  let tickerId = contract.tickerId;
+  if (!tickerId) {
+    tickerId = await lookupOptionContractTickerId(
+      contract.symbol, contract.strike, contract.expiry, contract.type
+    );
+  }
+  if (!tickerId) {
+    const msg = `tickerId lookup failed for ${contract.occSymbol} — consumer token loaded? chain available?`;
+    console.log(`  [ORDER] ${C.red}${msg}${C.reset}`);
+    return { success: false, error: msg };
+  }
+
+  try {
+    const limitPrice = (contract.mid || contract.ask || 1.0).toFixed(2);
     const body = {
-      account_id:      CONFIG.activeAccount,
-      client_order_id: clientOid,
-      combo_type:      'NORMAL',
-      new_orders: [{
-        symbol:          contract.symbol,
-        side,
-        order_type:      'LIMIT',
-        limit_price:     limitPrice,
-        time_in_force:   'DAY',
-        instrument_type: 'OPTION',
-        option_strategy: 'SINGLE',
-        entrust_type:    'QTY',
-        quantity:        quantity.toString(),
-        position_intent: posIntent,
-        legs: [{
-          symbol:             contract.symbol,
-          side,
-          quantity:           quantity.toString(),
-          option_type:        contract.type,   // 'CALL' or 'PUT'
-          option_expire_date: contract.expiry, // 'YYYY-MM-DD'
-          strike_price:       parseFloat(contract.strike).toFixed(2),
-        }],
-      }],
+      orderId:     crypto.randomUUID(),
+      tickerId:    String(tickerId),
+      action:      action === 'BUY_TO_OPEN' ? 'BUY' : 'SELL',
+      orderType:   'LMT',
+      lmtPrice:    limitPrice,
+      quantity:    quantity.toString(),
+      timeInForce: 'DAY',
+      orderSide:   action === 'BUY_TO_OPEN' ? 'OPEN' : 'CLOSE',
+      category:    'OPTION',
     };
 
     const res = await apiRequest(
       'POST',
       '/openapi/trade/option/order/place',
       { account_id: CONFIG.activeAccount },
-      body,
-      { category: 'US_OPTION' }
+      body
     );
 
     if (res.status === 200 || res.status === 201) {
-      const orderId = res.data?.[0]?.client_order_id ?? res.data?.client_order_id ?? 'unknown';
-      console.log(`  [ORDER] ✓ ${contract.occSymbol} ${side} × ${quantity} @ $${limitPrice} | id: ${orderId}`);
+      const orderId = res.data?.orderId ?? res.data?.[0]?.orderId ?? body.orderId;
+      console.log(`  [ORDER] ✓ ${contract.occSymbol} ${body.action} × ${quantity} @ $${limitPrice} | id: ${orderId}`);
       return {
         success: true, paper: false,
         orderId, action, quantity,
@@ -974,13 +1077,14 @@ async function placeOptionsOrder(contract, action, quantity=1) {
         strike:    contract.strike,
         expiry:    contract.expiry,
         type:      contract.type,
+        tickerId:  body.tickerId,
         fillPrice: parseFloat(limitPrice),
         occSymbol: contract.occSymbol,
       };
     }
 
     console.log(`  [ORDER] Failed ${res.status}: ${JSON.stringify(res.data)?.slice(0,200)}`);
-    return { success: false, error: res.data };
+    return { success: false, error: res.data, status: res.status };
 
   } catch(e) {
     console.log(`  [ORDER] Error: ${e.message}`);
@@ -996,8 +1100,47 @@ export { connectMQTT, subscribeSymbols, getAccountList, getVerifiedToken, getSta
          getCachedToken,
          // Options chain (consumer API)
          getOptionsExpirations, getOptionsChain, lookupTickerId,
+         lookupOptionContractTickerId,
          loadConsumerToken, saveConsumerToken,
-         consumerCall, consumerHeaders };
+         consumerCall, consumerHeaders,
+         // Trade token (live order placement)
+         loadTradeToken, saveTradeToken, acquireTradeToken };
+
+// ─── Trade token login ────────────────────────────────────
+// Usage: node webull.js --trade-token-login
+// Prompts for the 6-digit trading password, calls /openapi/trade/v2/token,
+// saves the returned trade_token to .webull_trade_token. Run this before
+// any LIVE order placement. Token expires on inactivity; re-run to refresh.
+
+if (process.argv.includes('--trade-token-login')) {
+  console.log(C.bold + '\n  ⬡ HANK Webull — Trade Token Login\n' + C.reset);
+
+  if (!CONFIG.appKey || !CONFIG.appSecret) {
+    console.error(`  ${C.red}✗ Missing WEBULL_APP_KEY or WEBULL_APP_SECRET in .env${C.reset}`);
+    process.exit(1);
+  }
+
+  const readline = await import('readline/promises');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  console.log('  Enter your Webull 6-digit trading password (NOT account password):');
+  const pw = (await rl.question('  > ')).trim();
+  rl.close();
+
+  if (!/^\d{6}$/.test(pw)) {
+    console.error(`  ${C.red}✗ Password must be exactly 6 digits.${C.reset}\n`);
+    process.exit(1);
+  }
+
+  console.log('\n  Requesting trade_token from /openapi/trade/v2/token...');
+  const res = await acquireTradeToken(pw);
+  if (res.error) {
+    console.error(`  ${C.red}✗ ${typeof res.error === 'string' ? res.error : JSON.stringify(res.error)}${C.reset}\n`);
+    process.exit(1);
+  }
+  console.log(`  ${C.green}✓ Saved to .webull_trade_token (${res.token.slice(0, 8)}...)${C.reset}`);
+  console.log(`  ${C.green}  Verify by attempting a live order test (when ready).${C.reset}\n`);
+  process.exit(0);
+}
 
 // ─── Auth mode ────────────────────────────────────────────
 // Usage: node webull.js --auth
@@ -1179,8 +1322,21 @@ if(process.argv.includes('--test')) {
     console.log(`  ${C.yellow}⚠  Status ${res.status}: ${JSON.stringify(res.data)}${C.reset}\n`);
   }
 
-  // Step 3: Options chain — API_DISABLED (pending Webull scope grant)
-  console.log(`  ${C.yellow}⚠  Step 3: Options chain skipped — API_DISABLED (resolve with Webull support)${C.reset}`);
+  // Step 3: Options chain — needs consumer token, not OpenAPI HMAC.
+  // OpenAPI scope excludes options market data by design; consumer endpoint
+  // (quotes-gw.webullfintech.com) is the intended path. Not a permissions issue.
+  if (loadConsumerToken()) {
+    console.log(`  ${C.green}✓ Step 3: Consumer token loaded — options chain available via getOptionsExpirations${C.reset}`);
+  } else {
+    console.log(`  ${C.yellow}⚠  Step 3: No consumer token — run \`node webull.js --consumer-login\` to enable options chain reads${C.reset}`);
+  }
+
+  // Step 4: Trade token status
+  if (loadTradeToken()) {
+    console.log(`  ${C.green}✓ Step 4: Trade token loaded — live order placement ready${C.reset}`);
+  } else {
+    console.log(`  ${C.yellow}⚠  Step 4: No trade token — run \`node webull.js --trade-token-login\` before LIVE order placement${C.reset}`);
+  }
 
   console.log('\n  Test complete.');
   process.exit(0);
