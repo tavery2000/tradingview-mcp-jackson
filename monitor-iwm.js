@@ -32,9 +32,11 @@ import { createBarCache } from './bars.js';
 import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
 import {
-  applyMultipliers, readDailyBiasRegime, gate1H,
+  // Path 2 simplification 2026-05-11: gate1H / gateMacro4H / gateVwap /
+  // computeBoosterAdj dropped — chart engines fire through basic gates
+  // + tier sizing only. Helpers remain exported if we need them back.
+  applyMultipliers, readDailyBiasRegime,
   HIERARCHY_V2, CHART_ENGINE_SET,
-  computeBoosterAdj, gateMacro4H, gateVwap,
 } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS }    from './chartDraws.js';
@@ -1010,20 +1012,8 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
     jGateBlock(sigEngine, 'IWM', sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
     return;
   }
-  // §18 — Direction conflict suppression (first-fired-wins, 10 min)
-  if (HIERARCHY_V2 && sigDir !== 'WAIT' && _iwmLastFire.dir && _iwmLastFire.dir !== sigDir) {
-    const elapsed = Date.now() - _iwmLastFire.ms;
-    if (elapsed < DIRECTION_CONFLICT_MS) {
-      jGateBlock(sigEngine, 'IWM', sigDir, 'DIRECTION_CONFLICT', {
-        previousDir: _iwmLastFire.dir,
-        currentDir:  sigDir,
-        elapsedSec:  Math.floor(elapsed / 1000),
-        windowSec:   Math.floor(DIRECTION_CONFLICT_MS / 1000),
-        macro4H,
-      });
-      return;
-    }
-  }
+  // §18 — Direction conflict gate stripped 2026-05-11 (Path 2 simplification).
+  // Tracker (_iwmLastFire / DIRECTION_CONFLICT_MS) preserved at module scope.
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
     jGateBlock(sigEngine, 'IWM', sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H }); return;
   }
@@ -1059,53 +1049,22 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
     if (allOpen.filter(t => t.instrument === 'IWM').length >= 1) { jGateBlock(sigEngine, 'IWM', dir, 'INSTRUMENT_CAP', { macro4H }); return; }
   } catch {}
 
+  // Path 2 simplification 2026-05-11: gate1H, gateMacro4H, gateVwap, and the
+  // booster threading were stripped. Chart-engine signals flow straight from
+  // basic-gate pass to tier sizing. macro4H is still recorded for logging.
   const marketBias = readDailyBiasRegime();
-  let ana1H = null;
-  if (barCache) {
-    try {
-      const bars1H = await barCache.get('60');
-      if (bars1H && bars1H.length) ana1H = analyze1H(bars1H, underlyingPrice);
-    } catch {}
-  }
-
-  const gate = gate1H({ ...signal, engine: signal.engine ?? 'TREND' }, ana1H, marketBias);
-  if (gate.block) {
-    jGateBlock(sigEngine, 'IWM', dir, gate.reason, {
-      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange, macro4H,
-    });
-    return;
-  }
-
-  // MACRO4H BLOCK — chart-first hierarchy v2 hard gate. FADE exempt.
-  const macro4HGate = gateMacro4H({ ...signal, engine: signal.engine ?? 'TREND' }, { macro4H });
-  if (macro4HGate.block) {
-    jGateBlock(sigEngine, 'IWM', dir, macro4HGate.reason, { macro4H, signalEngine: sigEngine });
-    return;
-  }
-
-  // VWAP wrong-side gate — unified ±0.15%, FADE exempt. etfCtx supplies vwap.
-  const _vwap = Number.isFinite(etfCtx?.vwap) ? etfCtx.vwap : 0;
-  const vwapGate = gateVwap({ ...signal, engine: signal.engine ?? 'TREND' }, underlyingPrice, _vwap);
-  if (vwapGate.block) {
-    jGateBlock(sigEngine, 'IWM', dir, vwapGate.reason, { price: underlyingPrice, vwap: _vwap, macro4H });
-    return;
-  }
-
   const stack = applyMultipliers({ ...signal, engine: signal.engine ?? 'TREND' },
-                                 { macro4H, marketBias, baseAdjust: gate.baseAdjust });
+                                 { macro4H, marketBias });
 
   const reqId = orderGate.createRequest({ signal: dir, engine: 'TREND' });
   const fill  = await sendOrder({
     signal: dir, engine:'TREND', confidence:signal.confidence,
     finalConfidence: stack.finalConfidence, multipliers: stack.breakdown,
-    gate1H: { reason: gate.reason, baseAdjust: gate.baseAdjust,
-              structurePattern: ana1H?.structurePattern ?? null,
-              pctOfRange:       ana1H?.pctOfRange       ?? null },
     instrument:'IWM', strike: liveStrike, expiry: liveExpiry, entryPrice, underlyingPrice, contracts:1,
   }, reqId, null);
   if (!fill.vetoed) {
-    // §18 — record successful fire for direction conflict suppression
-    if (HIERARCHY_V2) { _iwmLastFire.ms = Date.now(); _iwmLastFire.dir = dir; }
+    // §18 tracker still updated so the gate can be restored without code changes.
+    _iwmLastFire.ms = Date.now(); _iwmLastFire.dir = dir;
     lastScalpOrder.IWM = now;
     console.log(`  [SCALP] IWM ${dir} paper entry $${entryPrice.toFixed(2)} — ${signal.confidence} → final ${stack.finalConfidence.toFixed(2)}`);
   }
@@ -1224,27 +1183,15 @@ async function poll() {
   const _optEst = parseFloat((_swAtr * 0.4).toFixed(2));
 
   // Exit open TREND positions before entering new ones.
-  // HIERARCHY_V2: buildSignal output (TREND consensus) no longer dispatches —
-  // it becomes a confidence input. Chart engines (STRUCTURE/FVG/SWEEP) are
-  // the only paths that fire orders.
+  // Path 2 simplification 2026-05-11: buildSignal output (TREND consensus)
+  // and its alert print were stripped. Chart engines fire orders; trend is
+  // no longer surfaced from this monitor.
   checkTrendExits(_optEst);
-  if (!HIERARCHY_V2) {
-    await executeScalpSignal(signal, _optEst, _volumePct, etf?.price ?? 0, etf);
-  }
   if (structureSig) await executeScalpSignal(structureSig, _optEst, _volumePct, etf?.price ?? 0, etf);
   if (fvgSig)       await executeScalpSignal(fvgSig,       _optEst, _volumePct, etf?.price ?? 0, etf);
   if (sweepSig)     await executeScalpSignal(sweepSig,     _optEst, _volumePct, etf?.price ?? 0, etf);
 
-  // Alerts
   const now = Date.now();
-  if (signal.confidence === 'HIGH' || signal.confidence === 'MEDIUM') {
-    const dir = signal.action.includes('CALLS') ? 'CALLS' : signal.action.includes('PUTS') ? 'PUTS' : null;
-    if (dir && (lastAlert !== dir || now - lastAlertTime > COOLDOWN)) {
-      process.stdout.write('\x07');
-      console.log(`\n  ${dir==='CALLS'?C.bgGreen:C.bgRed}  *** IWM ${dir} ***  ${C.reset}  ${signal.reason}\n`);
-      lastAlert = dir; lastAlertTime = now;
-    }
-  }
 
   // Write iwm-levels.json for briefing
   try {

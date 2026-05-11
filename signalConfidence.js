@@ -10,6 +10,17 @@
  * Kept tiny on purpose — three monitors and two sendOrder sites each call
  * this; the alternative is duplicating the base-mapping + bias-normalization
  * + direction-extraction logic six times.
+ *
+ * ─── Path 2 simplification 2026-05-11 ───────────────────────────────────
+ * Operator call after 2h live (3 trades, +$56.24, missed morning rally):
+ * the Pine chart's HL/LH/SELL labels are reliable; the HANK monitor's
+ * gates were over-filtering them. Chart-engine signals now fire with
+ * minimal gating (basic gates + tier sizing only). The gate helpers
+ * below — gate1H, gateMacro4H, gateVwap, computeBoosterAdj,
+ * computeSpyBoosters — remain exported but are no longer called from
+ * monitor.js / monitor-qqq.js / monitor-iwm.js. Kept available so the
+ * filters can be re-enabled without restoring deleted logic. See git log
+ * for the strip commit.
  */
 
 import { stackConfidence } from './multipliers.js';
