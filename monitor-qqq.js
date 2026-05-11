@@ -1017,6 +1017,12 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
     jGateBlock(sigEngine, 'QQQ', sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H }); return;
   }
+  // ATR-based fallback when chain quote unavailable (Webull chain API_DISABLED).
+  // Mirrors executeSwingEntry pattern; without this, chart-engine signals hit
+  // PRICE_TOO_LOW=0 because optPriceEst comes empty from getL2Signal under API_DISABLED.
+  if ((!optPriceEst || optPriceEst <= 0.05) && underlyingPrice > 0) {
+    optPriceEst = parseFloat((underlyingPrice * 0.005 * 0.4).toFixed(2));
+  }
   if (optPriceEst <= 0.05) { jGateBlock(sigEngine, 'QQQ', sigDir, 'PRICE_TOO_LOW', { optPriceEst, macro4H }); return; }
   const now = Date.now();
   if (now - (lastScalpOrder.QQQ ?? 0) < SCALP_COOLDOWN) {
