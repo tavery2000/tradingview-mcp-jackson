@@ -31,7 +31,11 @@ import { jPoll, jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { createBarCache } from './bars.js';
 import { chartStructureEngine } from './chartStructure.js';
 import { analyze4H, analyze1H } from './analyze.js';
-import { applyMultipliers, readDailyBiasRegime, gate1H } from './signalConfidence.js';
+import {
+  applyMultipliers, readDailyBiasRegime, gate1H,
+  HIERARCHY_V2, CHART_ENGINE_SET,
+  computeBoosterAdj, gateMacro4H, gateVwap,
+} from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS }    from './chartDraws.js';
 import { loadFVGState }   from './fvg.js';
@@ -982,19 +986,34 @@ function checkTrendExits(currentEst) {
 
 const IWM_AVG_VOL_PER_BAR = 25_000_000 / 780; // 100-day avg volume / (390 min * 2 bars/min)
 
-async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, underlyingPrice = 0) {
+async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, underlyingPrice = 0, etfCtx = null) {
   const sigEngine = signal?.engine ?? 'TREND';
   const sigDir    = signal?.action?.includes('CALLS') ? 'CALLS' : signal?.action?.includes('PUTS') ? 'PUTS' : 'WAIT';
-  if (!sendOrder || !orderGate) { jGateBlock(sigEngine, 'IWM', sigDir, 'TRADE_DISABLED'); return; }
-  if (!isTradingHours())        { jGateBlock(sigEngine, 'IWM', sigDir, 'OUT_OF_HOURS');   return; }
+
+  // HIERARCHY_V2: compute macro4H up-front so every GATE_BLOCK record includes it.
+  let macro4H = 'UNKNOWN';
+  if (barCache) {
+    try {
+      const bars4H = await barCache.get('240');
+      if (bars4H && bars4H.length) macro4H = analyze4H(bars4H).direction;
+    } catch {}
+  }
+
+  if (!sendOrder || !orderGate) { jGateBlock(sigEngine, 'IWM', sigDir, 'TRADE_DISABLED', { macro4H }); return; }
+  if (!isTradingHours())        { jGateBlock(sigEngine, 'IWM', sigDir, 'OUT_OF_HOURS',   { macro4H }); return; }
+  // Chart-first hierarchy v2 — only chart engines dispatch; TREND becomes context.
+  if (HIERARCHY_V2 && !CHART_ENGINE_SET.has(sigEngine)) {
+    jGateBlock(sigEngine, 'IWM', sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
+    return;
+  }
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
-    jGateBlock(sigEngine, 'IWM', sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence }); return;
+    jGateBlock(sigEngine, 'IWM', sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H }); return;
   }
   const dir = signal.action.includes('CALLS') ? 'CALLS' : signal.action.includes('PUTS') ? 'PUTS' : null;
-  if (!dir) { jGateBlock(sigEngine, 'IWM', sigDir, 'NO_DIRECTION', { action: signal.action }); return; }
+  if (!dir) { jGateBlock(sigEngine, 'IWM', sigDir, 'NO_DIRECTION', { action: signal.action, macro4H }); return; }
   const now = Date.now();
   if (now - (lastScalpOrder.IWM ?? 0) < SCALP_COOLDOWN) {
-    jGateBlock(sigEngine, 'IWM', dir, 'COOLDOWN', { sinceLastMs: now - (lastScalpOrder.IWM ?? 0) }); return;
+    jGateBlock(sigEngine, 'IWM', dir, 'COOLDOWN', { sinceLastMs: now - (lastScalpOrder.IWM ?? 0), macro4H }); return;
   }
 
   // Options pricing — ATR estimate (Webull chain API_DISABLED, pending scope grant)
@@ -1009,7 +1028,7 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
       console.log(`  [OPTIONS] IWM strike selection error: ${e.message}`);
     }
   }
-  if (entryPrice <= 0.05) { jGateBlock(sigEngine, 'IWM', dir, 'PRICE_TOO_LOW', { entryPrice }); return; }
+  if (entryPrice <= 0.05) { jGateBlock(sigEngine, 'IWM', dir, 'PRICE_TOO_LOW', { entryPrice, macro4H }); return; }
 
   // Global cap: 3 when Mag-6 ≥ 4 bull (strong trend), 2 otherwise; max 1 IWM
   try {
@@ -1018,27 +1037,42 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
     let mag6Bulls = 0;
     try { mag6Bulls = JSON.parse(readFileSync(join(__dirname, 'mag6-state.json'), 'utf8')).bulls ?? 0; } catch {}
     const globalCap = mag6Bulls >= 4 ? 3 : 2;
-    if (allOpen.length >= globalCap) { jGateBlock(sigEngine, 'IWM', dir, 'GLOBAL_CAP', { open: allOpen.length, cap: globalCap }); return; }
-    if (allOpen.filter(t => t.instrument === 'IWM').length >= 1) { jGateBlock(sigEngine, 'IWM', dir, 'INSTRUMENT_CAP'); return; }
+    if (allOpen.length >= globalCap) { jGateBlock(sigEngine, 'IWM', dir, 'GLOBAL_CAP', { open: allOpen.length, cap: globalCap, macro4H }); return; }
+    if (allOpen.filter(t => t.instrument === 'IWM').length >= 1) { jGateBlock(sigEngine, 'IWM', dir, 'INSTRUMENT_CAP', { macro4H }); return; }
   } catch {}
 
   const marketBias = readDailyBiasRegime();
-  let macro4H = 'UNKNOWN', ana1H = null;
+  let ana1H = null;
   if (barCache) {
     try {
-      const [bars4H, bars1H] = await Promise.all([barCache.get('240'), barCache.get('60')]);
-      if (bars4H && bars4H.length) macro4H = analyze4H(bars4H).direction;
-      if (bars1H && bars1H.length) ana1H   = analyze1H(bars1H, underlyingPrice);
+      const bars1H = await barCache.get('60');
+      if (bars1H && bars1H.length) ana1H = analyze1H(bars1H, underlyingPrice);
     } catch {}
   }
 
   const gate = gate1H({ ...signal, engine: signal.engine ?? 'TREND' }, ana1H, marketBias);
   if (gate.block) {
     jGateBlock(sigEngine, 'IWM', dir, gate.reason, {
-      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange,
+      structurePattern: ana1H?.structurePattern, pctOfRange: ana1H?.pctOfRange, macro4H,
     });
     return;
   }
+
+  // MACRO4H BLOCK — chart-first hierarchy v2 hard gate. FADE exempt.
+  const macro4HGate = gateMacro4H({ ...signal, engine: signal.engine ?? 'TREND' }, { macro4H });
+  if (macro4HGate.block) {
+    jGateBlock(sigEngine, 'IWM', dir, macro4HGate.reason, { macro4H, signalEngine: sigEngine });
+    return;
+  }
+
+  // VWAP wrong-side gate — unified ±0.15%, FADE exempt. etfCtx supplies vwap.
+  const _vwap = Number.isFinite(etfCtx?.vwap) ? etfCtx.vwap : 0;
+  const vwapGate = gateVwap({ ...signal, engine: signal.engine ?? 'TREND' }, underlyingPrice, _vwap);
+  if (vwapGate.block) {
+    jGateBlock(sigEngine, 'IWM', dir, vwapGate.reason, { price: underlyingPrice, vwap: _vwap, macro4H });
+    return;
+  }
+
   const stack = applyMultipliers({ ...signal, engine: signal.engine ?? 'TREND' },
                                  { macro4H, marketBias, baseAdjust: gate.baseAdjust });
 
@@ -1123,6 +1157,15 @@ async function poll() {
 
   printSummary(compRows, etf, summary, swingState, signal, analysis, structureSig);
 
+  // Per-poll IWM macro4H — for SIGNAL journal records under HIERARCHY_V2.
+  let _iwmMacro4H = 'UNKNOWN';
+  if (barCache) {
+    try {
+      const bars4H = await barCache.get('240');
+      if (bars4H && bars4H.length) _iwmMacro4H = analyze4H(bars4H).direction;
+    } catch {}
+  }
+
   // Journal — IWM-scoped poll snapshot + actionable signal records
   try {
     jPoll({
@@ -1133,11 +1176,12 @@ async function poll() {
       signal:   signal ? { action: signal.action, confidence: signal.confidence, reason: signal.reason } : null,
       structure:structureSig ? { action: structureSig.action, confidence: structureSig.confidence, event: structureSig.event, reason: structureSig.reason } : null,
       swing:    swingState ? { status: swingState.status, direction: swingState.direction, entry: swingState.entry, atr: swingState.atr } : null,
+      macro4H:  _iwmMacro4H,
     });
     if (signal && (signal.action.includes('CALLS') || signal.action.includes('PUTS')))
-      jSignal('TREND', signal.action.includes('CALLS') ? 'CALLS' : 'PUTS', signal.confidence, signal.reason, { instrument: 'IWM' });
+      jSignal('TREND', signal.action.includes('CALLS') ? 'CALLS' : 'PUTS', signal.confidence, signal.reason, { instrument: 'IWM', macro4H: _iwmMacro4H });
     if (structureSig)
-      jSignal('STRUCTURE', structureSig.action, structureSig.confidence, structureSig.reason, { instrument: 'IWM', event: structureSig.event });
+      jSignal('STRUCTURE', structureSig.action, structureSig.confidence, structureSig.reason, { instrument: 'IWM', event: structureSig.event, macro4H: _iwmMacro4H });
   } catch (e) { jError('iwm-poll-journal', e.message); }
 
   // Swing order wiring
@@ -1156,12 +1200,17 @@ async function poll() {
   const _swAtr  = SwingEngine.getState().atr ?? (etf?.price != null ? etf.price * 0.005 : 0);
   const _optEst = parseFloat((_swAtr * 0.4).toFixed(2));
 
-  // Exit open TREND positions before entering new ones
+  // Exit open TREND positions before entering new ones.
+  // HIERARCHY_V2: buildSignal output (TREND consensus) no longer dispatches —
+  // it becomes a confidence input. Chart engines (STRUCTURE/FVG/SWEEP) are
+  // the only paths that fire orders.
   checkTrendExits(_optEst);
-  await executeScalpSignal(signal, _optEst, _volumePct, etf?.price ?? 0);
-  if (structureSig) await executeScalpSignal(structureSig, _optEst, _volumePct, etf?.price ?? 0);
-  if (fvgSig)       await executeScalpSignal(fvgSig,       _optEst, _volumePct, etf?.price ?? 0);
-  if (sweepSig)     await executeScalpSignal(sweepSig,     _optEst, _volumePct, etf?.price ?? 0);
+  if (!HIERARCHY_V2) {
+    await executeScalpSignal(signal, _optEst, _volumePct, etf?.price ?? 0, etf);
+  }
+  if (structureSig) await executeScalpSignal(structureSig, _optEst, _volumePct, etf?.price ?? 0, etf);
+  if (fvgSig)       await executeScalpSignal(fvgSig,       _optEst, _volumePct, etf?.price ?? 0, etf);
+  if (sweepSig)     await executeScalpSignal(sweepSig,     _optEst, _volumePct, etf?.price ?? 0, etf);
 
   // Alerts
   const now = Date.now();

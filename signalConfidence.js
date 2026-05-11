@@ -15,6 +15,20 @@
 import { stackConfidence } from './multipliers.js';
 import { getDailyBias }    from './daily-bias.js';
 
+// ─── Chart-first hierarchy v2 (2026-05-12) ──────────────────────────────
+// Master toggle for the chart-first signal architecture. Defaults ON;
+// `HIERARCHY_V2=false` in env restores the legacy dispatch (trendSig/
+// buildSignal fires orders directly, no MACRO4H block, no VWAP gate, no
+// chart-engine-set check). Every new gate in this file consults this
+// constant and falls back to a passthrough when it is false.
+export const HIERARCHY_V2 = process.env.HIERARCHY_V2 !== 'false';
+
+// Engines allowed to dispatch when HIERARCHY_V2 is on. SWING is intentionally
+// excluded for v1 (see plan § E sub-question 5); SWING continues to fire via
+// its own swing-entry path, not executeScalpSignal. TREND/BOUNCE are
+// confidence inputs only — they do not appear here.
+export const CHART_ENGINE_SET = new Set(['STRUCTURE', 'FVG', 'SWEEP', 'FADE']);
+
 // String → numeric base. TICK-EXTREME/SPY+W3 OVERRIDE are above-HIGH cases
 // the trend engine emits; map those to a slight boost over plain HIGH.
 const BASE_FOR_CONFIDENCE = {
@@ -133,6 +147,122 @@ export function gate1H(signal, analysis1H, marketBias) {
     if (p >= 0.35 && p <= 0.70 && marketBias === 'TRENDING_BEAR') {
       return { block: false, baseAdjust: 0.10, reason: 'PULLBACK_WITH_TREND', direction };
     }
+  }
+  return noop;
+}
+
+// ─── Booster math (chart-first v2) ──────────────────────────────────────
+// Consensus inputs (Mag-6, W3, TICK, delta, vwap-alignment, volume) feed
+// numeric bonuses added to baseConfidence before the multiplier stack runs.
+// Caps and direction-direction wiring per plan § C / § E.2.
+//
+// Inputs are pre-normalized by the monitor that owns them — this function
+// is the same shape regardless of instrument. SPY callers stack mag6 + w3
+// (different stock universes); QQQ / IWM callers populate only their own
+// w3-equivalent slot. Hard cap on additive total: +0.15.
+//
+// Schema (all fields optional, undefined → 0 contribution):
+//   tick         numeric, +0.05 when in correct zone for direction
+//   delta        numeric, +0.05 when confirming direction (±$1000 thresh)
+//   mag6         numeric, +0.05 when |bulls-bears| ≥ 3 (SPY only)
+//   w3           numeric, +0.05 at ≥3 alignment, +0.10 at ≥4 alignment
+//   vwap_align   bool,    +0.03 when price on correct side of VWAP
+//   vol_burst    bool,    +0.03 when session volPct > 0.50
+export function computeBoosterAdj(boosters) {
+  if (!boosters) return 0;
+  let adj = 0;
+  if (Number.isFinite(boosters.tick))    adj += boosters.tick;
+  if (Number.isFinite(boosters.delta))   adj += boosters.delta;
+  if (Number.isFinite(boosters.mag6))    adj += boosters.mag6;
+  if (Number.isFinite(boosters.w3))      adj += boosters.w3;
+  if (boosters.vwap_align)               adj += 0.03;
+  if (boosters.vol_burst)                adj += 0.03;
+  return Math.min(0.15, Math.max(0, adj));
+}
+
+// SPY-specific booster builder — stacks Mag-6 + W3 contributions per E.2.
+// `consensus` shape: { bulls, bears, w3Score, tick, delta, volPct, price, vwap }.
+// Returns the boosters object computeBoosterAdj consumes.
+//
+// Direction is derived from the signal upstream; the caller passes the
+// consensus and signal direction separately. mag6 / w3 are mapped to the
+// direction-aware bonus (a bullish Mag-6 majority boosts CALLS, not PUTS).
+export function computeSpyBoosters(consensus, direction) {
+  if (!consensus) return {};
+  const b = {};
+  // TICK ±400 (SPY only — QQQ/IWM never populate this slot)
+  if (Number.isFinite(consensus.tick)) {
+    if (direction === 'CALLS' && consensus.tick >  400) b.tick = 0.05;
+    if (direction === 'PUTS'  && consensus.tick < -400) b.tick = 0.05;
+  }
+  // Delta ±$1000 confirms direction
+  if (Number.isFinite(consensus.delta)) {
+    if (direction === 'CALLS' && consensus.delta >  1000) b.delta = 0.05;
+    if (direction === 'PUTS'  && consensus.delta < -1000) b.delta = 0.05;
+  }
+  // Mag-6 alignment — +0.05 when 3+ of 6 lean in signal direction
+  const bulls = consensus.bulls ?? 0;
+  const bears = consensus.bears ?? 0;
+  if (direction === 'CALLS' && bulls >= 3 && bulls > bears) b.mag6 = 0.05;
+  if (direction === 'PUTS'  && bears >= 3 && bears > bulls) b.mag6 = 0.05;
+  // W3 alignment — +0.05 at ≥3, +0.10 at ≥4 (out of 5)
+  const w3 = consensus.w3Score ?? 0;
+  if (direction === 'CALLS') {
+    if (w3 >= 4) b.w3 = 0.10;
+    else if (w3 >= 3) b.w3 = 0.05;
+  }
+  if (direction === 'PUTS') {
+    // Bearish W3 = (5 - w3Score) bullish components, so ≥4 bears means w3 ≤ 1
+    if (w3 <= 1) b.w3 = 0.10;
+    else if (w3 <= 2) b.w3 = 0.05;
+  }
+  // Volume burst — session > 50% of average bar
+  if (Number.isFinite(consensus.volPct) && consensus.volPct > 0.50) b.vol_burst = true;
+  // VWAP alignment — correct side
+  if (Number.isFinite(consensus.price) && Number.isFinite(consensus.vwap)) {
+    if (direction === 'CALLS' && consensus.price > consensus.vwap) b.vwap_align = true;
+    if (direction === 'PUTS'  && consensus.price < consensus.vwap) b.vwap_align = true;
+  }
+  return b;
+}
+
+// ─── Macro-4H counter-direction gate ────────────────────────────────────
+// HIERARCHY_V2 promotes the legacy 0.6× dampener in multipliers.js to a
+// hard block. FADE is exempted (counter-trend by design). RANGING and
+// UNKNOWN are non-blocking. The 0.6× dampener stays in multipliers.js as
+// forward-compat fallback when HIERARCHY_V2 is false.
+export function gateMacro4H(signal, ctx) {
+  const noop = { block: false, reason: null };
+  if (!HIERARCHY_V2) return noop;
+  if (!signal || !ctx) return noop;
+  if (signal.engine === 'FADE') return noop;
+  const direction = directionFor(signal);
+  if (!direction) return noop;
+  const m = ctx.macro4H;
+  if (direction === 'CALLS' && m === 'DOWN') return { block: true, reason: 'MACRO4H_COUNTER' };
+  if (direction === 'PUTS'  && m === 'UP'  ) return { block: true, reason: 'MACRO4H_COUNTER' };
+  return noop;
+}
+
+// ─── VWAP wrong-side gate ───────────────────────────────────────────────
+// Unified ±0.15% tolerance band per E.6. Block when price is on the wrong
+// side of VWAP by more than the tolerance; pivots through VWAP at bar-flip
+// timing remain allowed. FADE is exempted because the FADE engine fires
+// in zones (PDH/PDL, VWAP-1σ, VWAP+1σ) where price is intentionally on the
+// "wrong" side relative to a naïve trend interpretation.
+export function gateVwap(signal, currentPrice, vwap, tolerancePct = 0.0015) {
+  const noop = { block: false, reason: null };
+  if (!HIERARCHY_V2) return noop;
+  if (!signal) return noop;
+  if (signal.engine === 'FADE') return noop;
+  if (!Number.isFinite(currentPrice) || !Number.isFinite(vwap) || vwap <= 0) return noop;
+  const direction = directionFor(signal);
+  if (!direction) return noop;
+  if (direction === 'CALLS' && currentPrice < vwap * (1 - tolerancePct)) {
+    return { block: true, reason: 'VWAP_WRONG_SIDE' };
+  }
+  if (direction === 'PUTS' && currentPrice > vwap * (1 + tolerancePct)) {
+    return { block: true, reason: 'VWAP_WRONG_SIDE' };
   }
   return noop;
 }
