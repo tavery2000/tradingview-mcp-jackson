@@ -2574,6 +2574,7 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     underlyingPrice: underlyingPrice,
     contracts:  contractCount,
     tag:        tradeTag,
+    macro4H,
   };
 
   const reqId = orderGate.createRequest({ signal: direction, engine: sigEngine });
@@ -3070,16 +3071,15 @@ async function poll() {
   if (bears >= THRESHOLD && (spy.bias === 'bullish' || spy.bias === 'div_bull'))
     fireDivergence(`${bears}/6 stocks bearish but SPY tab diverging (SPY: ${spy.bias})`);
 
-  // QQQ + IWM scalp signals (volume gate uses 1.0 since standalone monitors handle QQQ/IWM trading)
+  // QQQ + IWM chart-engine dispatch. TREND consensus (buildSignalForInstrument)
+  // no longer dispatched from monitor.js — completes Path 2 simplification +
+  // chart-first hierarchy v2 (the NOT_CHART_ENGINE gate at line 2384 would
+  // have caught it anyway; this removes the dead pathway entirely).
   if (qqqClient && qqq && !QQQ_SUSPENDED) {
-    const qqqSignal = buildSignalForInstrument('QQQ', qqqRows, qqq, qqqSummary, 3);
-    await executeScalpSignal('QQQ', qqqSignal, getL2Signal('QQQ'));
     if (qqqFvgSig   && isTradingHours()) await executeScalpSignal('QQQ', qqqFvgSig,   getL2Signal('QQQ'));
     if (qqqSweepSig && isTradingHours()) await executeScalpSignal('QQQ', qqqSweepSig, getL2Signal('QQQ'));
   }
   if (iwmClient && iwm) {
-    const iwmSignal = buildSignalForInstrument('IWM', iwmRows, iwm, iwmSummary, 2);
-    await executeScalpSignal('IWM', iwmSignal, getL2Signal('IWM'));
     if (iwmFvgSig   && isTradingHours()) await executeScalpSignal('IWM', iwmFvgSig,   getL2Signal('IWM'));
     if (iwmSweepSig && isTradingHours()) await executeScalpSignal('IWM', iwmSweepSig, getL2Signal('IWM'));
   }

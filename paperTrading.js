@@ -452,6 +452,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       w3Score:  consensus.w3Score  ?? null,
       tickVal:  consensus.tickVal  ?? null,
       vwapDist: consensus.vwapDist ?? null,
+      macro4H:  consensus.macro4H  ?? null,
       sessionWindow: consensus.sessionWindow ?? getCurrentSession(),
       context:  consensus.context  ?? null,
       tier:           tierNum,

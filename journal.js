@@ -75,6 +75,7 @@ export function jEntry(trade) {
     strike:      trade.strike ?? null,
     expiry:      trade.expiry ?? null,
     entryIV:     trade.entryIV ?? null,
+    macro4H:     trade.macro4H ?? null,
     tag:         trade.tag ?? null,
   });
 }
