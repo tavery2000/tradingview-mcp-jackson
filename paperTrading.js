@@ -313,6 +313,20 @@ function etDate() {
  */
 export async function sendOrder(consensus, requestId, lastQuote = null) {
 
+  // ── Defense-in-depth RTH gate (audit 2026-05-11 §5) ───
+  // Reject any trade attempt outside 09:30:00–16:00:00 ET. Upstream callers
+  // already gate via isTradingHours(); this catches direct sendOrder() calls
+  // that ever bypass the upstream guard.
+  const _etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  const [_eh, _em, _es] = _etHMS.split(':').map(Number);
+  const _etSec = _eh * 3600 + _em * 60 + _es;
+  if (_etSec < 34200 || _etSec >= 57600) {
+    const reason = `OUT_OF_HOURS — sendOrder rejected at ${_etHMS} ET (gate: 09:30:00–16:00:00)`;
+    orderGate.markVetoed(requestId, reason);
+    console.log(`  ${C.red}🛑 OUT_OF_HOURS — sendOrder rejected: ${_etHMS} ET${C.reset}`);
+    return { vetoed: true, reason };
+  }
+
   // ── Tier-aware risk + sizing gate ─────────────────────
   const tierState  = loadTier();
   const tierNum    = tierState.tier;
