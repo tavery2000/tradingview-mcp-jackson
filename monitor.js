@@ -2452,6 +2452,29 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     return;
   }
 
+  // §19 — Signal reversal exit. If a chart engine fires the opposite direction
+  // while an opposite-direction position is open on this instrument, close it.
+  // Prevents holding through clear chart-thesis reversals (mean-reversion
+  // bounces erasing gains, etc.). SWING positions exempt — they have their own
+  // exit logic via EMA9/VWAP confirmation.
+  try {
+    const lgRev = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));
+    const oppositeOpen = (lgRev.trades ?? []).find(t =>
+      t.instrument === instrument && t.status === 'OPEN' &&
+      t.signal !== direction && t.engine !== 'SWING'
+    );
+    if (oppositeOpen && closePosition && underlyingPrice > 0) {
+      const entryU = oppositeOpen.underlyingPrice ?? underlyingPrice;
+      const dirMult = oppositeOpen.signal === 'CALLS' ? 1 : -1;
+      const optMove = (underlyingPrice - entryU) * dirMult * 0.4;
+      const synthExit = Math.max(0.01, parseFloat((oppositeOpen.fillPrice + optMove).toFixed(4)));
+      const closed = closePosition(oppositeOpen.requestId, synthExit, 'SIGNAL_REVERSAL');
+      if (closed) {
+        console.log(`  [SIGNAL_REVERSAL] Closed ${instrument} ${oppositeOpen.signal} at $${synthExit.toFixed(2)} (entry $${oppositeOpen.fillPrice}) — ${sigEngine} flipped to ${direction}`);
+      }
+    }
+  } catch {}
+
   // Global cap: 3 positions when W3 ≥ 4 (strong Mag-7 trend), 2 otherwise; max 1 per instrument
   try {
     const lg = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));

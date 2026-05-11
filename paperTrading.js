@@ -1119,7 +1119,8 @@ function _gradeProcess(trade, exitReason) {
   const conf = trade.confidence ?? '';
   const goodEntry = ['HIGH', 'MEDIUM', 'SPY-FIRST', 'TICK-EXTREME', 'SPY+W3 OVERRIDE'].includes(conf);
   const ruleExit  = ['TARGET_2X', 'TARGET_1.5X', 'STOP_0.5X', 'EOD_CLOSE', 'TIME_STOP',
-                     'TREND_EXIT', 'VWAP_EXIT', 'TARGET', 'STOP'].includes(exitReason);
+                     'TREND_EXIT', 'VWAP_EXIT', 'SIGNAL_REVERSAL',
+                     'TARGET', 'STOP'].includes(exitReason);
   const win = (trade.pnl ?? 0) > 0;
 
   if  (goodEntry &&  ruleExit &&  win) return 'Good Process';
