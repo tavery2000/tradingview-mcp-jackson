@@ -986,6 +986,10 @@ function checkTrendExits(currentEst) {
 
 const IWM_AVG_VOL_PER_BAR = 25_000_000 / 780; // 100-day avg volume / (390 min * 2 bars/min)
 
+// §18 — Direction conflict tracker (first-fired-wins, 10 min window)
+const _iwmLastFire = { ms: 0, dir: null };
+const DIRECTION_CONFLICT_MS = 10 * 60 * 1000;
+
 async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, underlyingPrice = 0, etfCtx = null) {
   const sigEngine = signal?.engine ?? 'TREND';
   const sigDir    = signal?.action?.includes('CALLS') ? 'CALLS' : signal?.action?.includes('PUTS') ? 'PUTS' : 'WAIT';
@@ -1005,6 +1009,20 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
   if (HIERARCHY_V2 && !CHART_ENGINE_SET.has(sigEngine)) {
     jGateBlock(sigEngine, 'IWM', sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
     return;
+  }
+  // §18 — Direction conflict suppression (first-fired-wins, 10 min)
+  if (HIERARCHY_V2 && sigDir !== 'WAIT' && _iwmLastFire.dir && _iwmLastFire.dir !== sigDir) {
+    const elapsed = Date.now() - _iwmLastFire.ms;
+    if (elapsed < DIRECTION_CONFLICT_MS) {
+      jGateBlock(sigEngine, 'IWM', sigDir, 'DIRECTION_CONFLICT', {
+        previousDir: _iwmLastFire.dir,
+        currentDir:  sigDir,
+        elapsedSec:  Math.floor(elapsed / 1000),
+        windowSec:   Math.floor(DIRECTION_CONFLICT_MS / 1000),
+        macro4H,
+      });
+      return;
+    }
   }
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
     jGateBlock(sigEngine, 'IWM', sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H }); return;
@@ -1085,7 +1103,12 @@ async function executeScalpSignal(signal, optPriceEst = 0, volumePct = 1.0, unde
               pctOfRange:       ana1H?.pctOfRange       ?? null },
     instrument:'IWM', strike: liveStrike, expiry: liveExpiry, entryPrice, underlyingPrice, contracts:1,
   }, reqId, null);
-  if (!fill.vetoed) { lastScalpOrder.IWM = now; console.log(`  [SCALP] IWM ${dir} paper entry $${entryPrice.toFixed(2)} — ${signal.confidence} → final ${stack.finalConfidence.toFixed(2)}`); }
+  if (!fill.vetoed) {
+    // §18 — record successful fire for direction conflict suppression
+    if (HIERARCHY_V2) { _iwmLastFire.ms = Date.now(); _iwmLastFire.dir = dir; }
+    lastScalpOrder.IWM = now;
+    console.log(`  [SCALP] IWM ${dir} paper entry $${entryPrice.toFixed(2)} — ${signal.confidence} → final ${stack.finalConfidence.toFixed(2)}`);
+  }
 }
 
 // ─── Poll ─────────────────────────────────────────────────────────────────────

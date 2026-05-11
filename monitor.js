@@ -936,6 +936,12 @@ let _isChop    = false; // updated each poll — MIDDAY chop filter
 let _spyPrice  = 0;     // underlying prices for Webull contract selection in executeScalpSignal
 let _qqqPrice  = 0;
 let _iwmPrice  = 0;
+
+// §18 — Direction conflict tracker (first-fired-wins, 10 min window).
+// Prevents same-instrument opposite-direction whipsaw (e.g. FADE PUTS + STRUCTURE
+// CALLS firing in same poll). Per-instrument because monitor.js handles SPY/QQQ/IWM.
+const _lastFire = { SPY: { ms: 0, dir: null }, QQQ: { ms: 0, dir: null }, IWM: { ms: 0, dir: null } };
+const DIRECTION_CONFLICT_MS = 10 * 60 * 1000;
 // HIERARCHY_V2 booster + gate context — set each poll() before dispatch
 let _spyVwap   = 0;
 let _qqqVwap   = 0;
@@ -2375,6 +2381,22 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
     jGateBlock(sigEngine, instrument, sigDir, 'NOT_CHART_ENGINE', { engine: sigEngine, macro4H });
     return;
   }
+  // §18 — Direction conflict suppression. If opposite-direction fired on this
+  // instrument within DIRECTION_CONFLICT_MS, block. First-fired-wins, prevents
+  // whipsaw between FADE/STRUCTURE engines on indecisive tape.
+  if (HIERARCHY_V2 && sigDir !== 'WAIT' && _lastFire[instrument]?.dir && _lastFire[instrument].dir !== sigDir) {
+    const elapsed = Date.now() - _lastFire[instrument].ms;
+    if (elapsed < DIRECTION_CONFLICT_MS) {
+      jGateBlock(sigEngine, instrument, sigDir, 'DIRECTION_CONFLICT', {
+        previousDir: _lastFire[instrument].dir,
+        currentDir:  sigDir,
+        elapsedSec:  Math.floor(elapsed / 1000),
+        windowSec:   Math.floor(DIRECTION_CONFLICT_MS / 1000),
+        macro4H,
+      });
+      return;
+    }
+  }
   if (signal.confidence !== 'HIGH' && signal.confidence !== 'MEDIUM') {
     jGateBlock(sigEngine, instrument, sigDir, 'LOW_CONFIDENCE', { confidence: signal.confidence, macro4H });
     return;
@@ -2611,6 +2633,10 @@ async function executeScalpSignal(instrument, signal, lastQuote, volumePct = 1.0
   const fill  = await sendOrder(consensus, reqId, lastQuote);
 
   if (!fill.vetoed) {
+    // §18 — record successful fire for direction conflict suppression
+    if (HIERARCHY_V2 && _lastFire[instrument]) {
+      _lastFire[instrument] = { ms: Date.now(), dir: direction };
+    }
     lastScalpOrder[instrument] = now;
     const newsTag = _newsBias !== 0 ? ` · news ${_newsBias > 0 ? 'BULL +' : 'BEAR '}${_newsBias.toFixed(0)}` : '';
     const tagNote = tradeTag ? ` · ${tradeTag}` : '';
