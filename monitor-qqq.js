@@ -36,7 +36,7 @@ import {
   // computeBoosterAdj dropped — chart engines fire through basic gates
   // + tier sizing only. Helpers remain exported if we need them back.
   applyMultipliers, readDailyBiasRegime,
-  HIERARCHY_V2, CHART_ENGINE_SET,
+  HIERARCHY_V2, CHART_ENGINE_SET, PINE_PRIMARY,
 } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS }    from './chartDraws.js';
@@ -1198,9 +1198,11 @@ async function poll() {
     const _swAtr  = SwingEngine.getState().atr ?? (etf?.price != null ? etf.price * 0.005 : 0);
     const _optEst = parseFloat((_swAtr * 0.4).toFixed(2));
     checkTrendExits(_optEst);
-    if (structureSig) await executeScalpSignal(structureSig, _optEst, _volumePct, etf?.price ?? 0, etf);
-    if (fvgSig)       await executeScalpSignal(fvgSig,       _optEst, _volumePct, etf?.price ?? 0, etf);
-    if (sweepSig)     await executeScalpSignal(sweepSig,     _optEst, _volumePct, etf?.price ?? 0, etf);
+    // PINE_PRIMARY: chart-engine dispatch owned by Pine→webhook. Computation
+    // above still runs for jSignal audit + printSummary + qqq-levels.json.
+    if (structureSig && !PINE_PRIMARY) await executeScalpSignal(structureSig, _optEst, _volumePct, etf?.price ?? 0, etf);
+    if (fvgSig       && !PINE_PRIMARY) await executeScalpSignal(fvgSig,       _optEst, _volumePct, etf?.price ?? 0, etf);
+    if (sweepSig     && !PINE_PRIMARY) await executeScalpSignal(sweepSig,     _optEst, _volumePct, etf?.price ?? 0, etf);
   }
 
   const now = Date.now();
@@ -1250,7 +1252,12 @@ async function main() {
   console.log(`  Hours:      7:00 AM – 4:00 PM ET  |  Poll: ${POLL_MS/1000}s`);
   console.log(`  Threshold:  ${THRESHOLD}/5 components + QQQ confirms`);
   console.log(`  VRRS:       ±${VRRS_THRESH} — VRRS_vs_Market + VRRS_vs_Sector`);
-  console.log(`  Trading:    ${process.env.TRADING_MODE || 'PAPER'} mode\n`);
+  console.log(`  Trading:    ${process.env.TRADING_MODE || 'PAPER'} mode`);
+  if (PINE_PRIMARY) {
+    console.log(`  ${C.cyan}Dispatch:   PINE_PRIMARY — chart-engine signals computed for audit only; Pine→webhook owns trade dispatch${C.reset}\n`);
+  } else {
+    console.log(`  ${C.yellow}Dispatch:   PINE_PRIMARY=false — monitor dispatches chart-engine signals${C.reset}\n`);
+  }
 
   await initClient();
 

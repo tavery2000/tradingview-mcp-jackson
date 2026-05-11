@@ -34,6 +34,19 @@ import { getDailyBias }    from './daily-bias.js';
 // constant and falls back to a passthrough when it is false.
 export const HIERARCHY_V2 = process.env.HIERARCHY_V2 !== 'false';
 
+// ─── Pine-as-Primary (2026-05-11 EOD) ───────────────────────────────────
+// Pine indicator (smc-pro-futures.pine) emits alert() function calls that
+// TradingView forwards to webhook-server.js → paperTrading.sendOrder. The
+// monitors retain signal COMPUTATION (for printSummary, jSignal audit
+// trail, mag6-state.json, dashboard) but no longer dispatch trades —
+// every executeScalpSignal call site is gated by !PINE_PRIMARY.
+// SWING dispatch (executeSwingEntry) is intentionally NOT gated: separate
+// engine on a separate timescale, Pine does not emit SWING signals.
+// Toggle off (`PINE_PRIMARY=false` in env) to restore monitor dispatch
+// as a fallback if the webhook path is down or Pine alerts aren't
+// configured yet across all instruments.
+export const PINE_PRIMARY = process.env.PINE_PRIMARY !== 'false';
+
 // Engines allowed to dispatch when HIERARCHY_V2 is on. SWING is intentionally
 // excluded for v1 (see plan § E sub-question 5); SWING continues to fire via
 // its own swing-entry path, not executeScalpSignal. TREND/BOUNCE are

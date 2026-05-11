@@ -41,7 +41,7 @@ import {
   // through basic gates + tier sizing only. Helpers remain exported from
   // signalConfidence.js if we need to put any of them back.
   applyMultipliers, readDailyBiasRegime,
-  HIERARCHY_V2, CHART_ENGINE_SET,
+  HIERARCHY_V2, CHART_ENGINE_SET, PINE_PRIMARY,
 } from './signalConfidence.js';
 import { scanTriggers, runEntryEngines } from './triggerScans.js';
 import { buildDrawJS } from './chartDraws.js';
@@ -3048,20 +3048,22 @@ async function poll() {
       console.log(`  ${C.bold}Time:${C.reset}   ${getETString()} ET\n`);
       lastFadeAlert = dir; lastFadeAlertTime = now;
     }
-    await executeScalpSignal('SPY', fadeSig, getL2Signal('SPY'), _spyVolumePct);
+    if (!PINE_PRIMARY) await executeScalpSignal('SPY', fadeSig, getL2Signal('SPY'), _spyVolumePct);
   }
 
-  // Fire on structureSig — chart pattern signals, independent of consensus
-  if (structureSig && isTradingHours()) {
+  // Fire on structureSig — chart pattern signals, independent of consensus.
+  // PINE_PRIMARY: computation still runs (printSummary, jSignal); dispatch
+  // is owned by Pine→webhook→paperTrading.sendOrder.
+  if (structureSig && isTradingHours() && !PINE_PRIMARY) {
     await executeScalpSignal('SPY', structureSig, getL2Signal('SPY'), _spyVolumePct);
   }
 
-  // Fire FVG + SWEEP entries — these go through the same scalp path
-  // (gate1H + multipliers + tier sizing) as TREND/STRUCTURE.
-  if (spyFvgSig && isTradingHours()) {
+  // Fire FVG + SWEEP entries — same gate stack as TREND/STRUCTURE.
+  // PINE_PRIMARY: dispatch deferred to webhook.
+  if (spyFvgSig && isTradingHours() && !PINE_PRIMARY) {
     await executeScalpSignal('SPY', spyFvgSig, getL2Signal('SPY'), _spyVolumePct);
   }
-  if (spySweepSig && isTradingHours()) {
+  if (spySweepSig && isTradingHours() && !PINE_PRIMARY) {
     await executeScalpSignal('SPY', spySweepSig, getL2Signal('SPY'), _spyVolumePct);
   }
 
@@ -3076,12 +3078,12 @@ async function poll() {
   // chart-first hierarchy v2 (the NOT_CHART_ENGINE gate at line 2384 would
   // have caught it anyway; this removes the dead pathway entirely).
   if (qqqClient && qqq && !QQQ_SUSPENDED) {
-    if (qqqFvgSig   && isTradingHours()) await executeScalpSignal('QQQ', qqqFvgSig,   getL2Signal('QQQ'));
-    if (qqqSweepSig && isTradingHours()) await executeScalpSignal('QQQ', qqqSweepSig, getL2Signal('QQQ'));
+    if (qqqFvgSig   && isTradingHours() && !PINE_PRIMARY) await executeScalpSignal('QQQ', qqqFvgSig,   getL2Signal('QQQ'));
+    if (qqqSweepSig && isTradingHours() && !PINE_PRIMARY) await executeScalpSignal('QQQ', qqqSweepSig, getL2Signal('QQQ'));
   }
   if (iwmClient && iwm) {
-    if (iwmFvgSig   && isTradingHours()) await executeScalpSignal('IWM', iwmFvgSig,   getL2Signal('IWM'));
-    if (iwmSweepSig && isTradingHours()) await executeScalpSignal('IWM', iwmSweepSig, getL2Signal('IWM'));
+    if (iwmFvgSig   && isTradingHours() && !PINE_PRIMARY) await executeScalpSignal('IWM', iwmFvgSig,   getL2Signal('IWM'));
+    if (iwmSweepSig && isTradingHours() && !PINE_PRIMARY) await executeScalpSignal('IWM', iwmSweepSig, getL2Signal('IWM'));
   }
 
   // Session reset at 16:00 ET
@@ -3384,7 +3386,13 @@ async function main() {
   console.log(`  S/R:        swing highs/lows over ${OHLCV_COUNT} bars + VWAP bands`);
   console.log(`  VRRS:       ±${VRRS_THRESH} threshold  |  Keys: VRRS_vs_Market + VRRS_vs_Sector  ✓ confirmed`);
   console.log(`  L2:         SPY · QQQ · IWM — order book imbalance (4th conviction factor)`);
-  console.log(`  Trading:    ${process.env.TRADING_MODE || 'PAPER'} mode  |  Swing + Scalp engines wired → paperTrading.js\n`);
+  console.log(`  Trading:    ${process.env.TRADING_MODE || 'PAPER'} mode  |  Swing + Scalp engines wired → paperTrading.js`);
+  if (PINE_PRIMARY) {
+    console.log(`  ${C.cyan}Dispatch:   PINE_PRIMARY — chart-engine signals computed for audit only; Pine→webhook owns trade dispatch${C.reset}`);
+    console.log(`  ${C.dim}            (SWING entries unaffected. Toggle: PINE_PRIMARY=false in env restores monitor dispatch.)${C.reset}\n`);
+  } else {
+    console.log(`  ${C.yellow}Dispatch:   PINE_PRIMARY=false — monitor dispatches chart-engine signals (legacy mode)${C.reset}\n`);
+  }
 
   await initClients();
   console.log('');
