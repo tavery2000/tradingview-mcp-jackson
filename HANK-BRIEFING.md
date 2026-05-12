@@ -231,6 +231,7 @@ Three rounds of Webull support specs failed against `api.webull.com` with our ve
 9. Webull live order placement pre-staged per 2026-05-11 spec — HMAC-SHA256 for trade-scope, `x-trade-token` auto-injection, flat camelCase body schema with tickerId, `--trade-token-login` CLI, fail-fast guards in `placeOptionsOrder`. Untested in LIVE mode (paper-only throughout codebase); first live order is a deliberate operator-driven event with both tokens loaded.
 10. Webhook allow-list extended to MES/MNQ (both bare and `1!` forms) per `project_1k_scaleup_plan.md` futures scaling. MES1! TV alert configured by operator 2026-05-11 EOD — MES paper trades will route end-to-end starting next session. MNQ1! TV alert still pending operator setup; code-side ready.
 11. §18 architectural gap logged (`timeframe-behavior-analysis.md` §18 + `smc-pro-calibration-log.md`) — demand-zone-breakdown SELL trigger missing, distinct from §10's supply-rejection-SELL geometry. Not shipped; threshold criterion needs 1–2 more observations Tue–Wed before implementation.
+12. Late-session 5/11 validation: MES1! 1M indicator ~80% accurate across 9 signals over 2.25 hours of after-hours tape. Confirms chart-first hierarchy decision was right; remaining gaps are zone-break-specific (§10, §18), not structural fire logic.
 
 **Webhook validated end-of-day.** Pine alert → ngrok → webhook-server → paperTrading.sendOrder path proven.
 
