@@ -189,6 +189,44 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~14:45 ET — SPY 30sec — CHOP detected, timeframe-as-filter solution proposed
+
+- **Event:** Post-rally consolidation. Price chopped 735.99-736.45 for 20 minutes (14:25-14:45). 4-6 cent ranges per bar. LH, HL, LL, HL all visible inside the box — geometrically the same structure-pivot shapes the indicator detects during real reversals. Multiple BUY (14:25, 14:30, 14:42) and SELL (14:30 LH) fires in the chop zone. All would be losing trades.
+- **Operator read:** *"Not sure how we can achieve this but we definitely need some sort of chop filter. This just cannot be traded, not even by me."*
+- **Operator-proposed solution:** *"That's where the 1min timeframe comes into play."*
+- **The insight (this is novel and worth emphasizing):** Timeframe-per-regime, not just timeframe-per-instrument. Today's data shows:
+  - **08:00-09:15 SPY 30sec:** beat 1m on pre-market early-move detection
+  - **10:20-13:00 SPY 30sec:** captured real directional moves with realistic P&L on the post-fix pipeline
+  - **13:30-14:45 SPY 30sec:** fires too many chop signals; SIGNAL_REVERSAL whipsaw locks in losses
+  
+  **Same instrument, same chart, opposite verdicts based on regime.** The operator's intuition: 1m would average out the 30sec chop while preserving most of the directional-move capture (because real moves span multiple minutes anyway). 30sec is a SCOUTING tool; 1m is a CONFIRMATION tool. Use 30sec when looking for moves; use 1m when in/near consolidation.
+- **Pattern class:** TIMEFRAME-AS-CHOP-FILTER. Distinct from the earlier TIMEFRAME-PER-INSTRUMENT pattern — that was "what timeframe per ticker"; this is "what timeframe per market regime."
+
+### Four candidate solution paths (post-close decision)
+
+**θ — Operator-side regime switching (cheapest).** Operator switches between 30sec and 1m on SPY based on observed regime. No code change. Pros: zero risk, immediate. Cons: requires operator attention; HANK still fires on whatever timeframe the chart is set to; can't automate.
+
+**ι — Pine-side chop detection input.** Add `enableChopFilter` + ATR/range threshold. When ATR(N) or high-low-range(N) is below threshold, suppress fires for the next M bars. ~15 LOC Pine. Pros: automated; per-chart configurable. Cons: thresholds need tuning per timeframe; may suppress legitimate consolidation breakouts.
+
+**κ — Volume-based chop detection.** Require volume on the fire bar to be ≥ X × SMA(volume, 20). Chop bars typically have low volume; real-move bars typically have spike volume. Already partially in §12 LIVE intra-bar logic (`liveVolMult: 1.8`). Could extend volume gate to ALL fires (currently only LIVE intra-bar). ~10 LOC. Pros: market-mechanic-grounded. Cons: pre-market and overnight volume profiles differ.
+
+**λ — Higher-timeframe chop detection (operator's intuition encoded).** Compute chop on 5m or 15m via `request.security`. When 5m ATR contracts below threshold (Bollinger Band squeeze, etc.), suppress all 30sec fires. ~20 LOC Pine. Pros: matches operator's mental model exactly — the 1m smoothing intuition mechanized. Cons: more complex; HTF dependency adds load.
+
+**Recommended starting point:** θ (operator regime switching) for the remaining session and tomorrow as data-gathering. Pair with γ (two-tier sweep alert from the timing-architecture observation) and tonight's analyzer to capture: which timeframe wins which regime by how much. Decide between ι/κ/λ post-3-day-window.
+
+### Updated post-close decision pool
+
+Four distinct architectural patterns logged today, **13 candidate fix options** total:
+
+| Pattern | Options | Recommended starting fix |
+|---|---|---|
+| Trend-context blindness | α / β / γ | (defer until paired 1M data exists) |
+| Sweep-vs-confirmation timing | α / β / γ | γ (two-tier alert, zero behavior change) |
+| SIGNAL_REVERSAL whipsaw | δ / ε / ζ / η | ε (multi-engine opposite-confirmation) |
+| Timeframe-as-chop-filter (NEW) | θ / ι / κ / λ | θ (operator regime switching as data) |
+
+All four pattern families share the same architectural family-resemblance: indicator + exit logic don't encode market-regime context. The fixes are all about adding context dimensions (direction-vs-trend, sweep-vs-confirmation, signal-vs-noise, trend-vs-chop) the current code doesn't weight.
+
 ### 2026-05-12 ~14:25 ET — SPY 30sec — diagnostic answer: SIGNAL_REVERSAL whipsaw on 30sec chop
 
 Operator observation: clean uptrend continuation 14:10 → 14:25, BUY fired at HL ~14:18-14:20, move continued. *"This was an easy trade."* But journal shows mixed results — some BUYs filled, some blocked, ones that filled mostly lost via SIGNAL_REVERSAL.
