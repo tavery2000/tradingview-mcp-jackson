@@ -314,7 +314,7 @@ Hypothesis: gates should be permissive for high-WR engines (BUY/SELL/STRUCTURE),
 
 **B first** (per-engine confidence threshold). Lowest implementation cost, directly leverages the existing confidence-band system from `tier.js`, easy to roll back per-engine.
 
-**16:02 ET analyzer output is needed to calibrate the thresholds.** Without per-engine continuation-rate data, we'd be guessing at the cutoffs. Wait for tonight's `per-instrument-signal-quality-2026-05-12.md` output before deciding cutoff values.
+**Calibration data status (updated 2026-05-12 22:00 ET):** Today's analyzer output (`per-instrument-signal-quality-2026-05-12.md`) is **INVALID for calibration** — see the caveat at the top of that file. The session had multiple infrastructure failures (pricing bug, monitor crash, webhook crashes, misrouted alerts) that contaminate the per-engine and per-instrument metrics. **Wait for a clean-infrastructure session** (≥1 day with zero mid-session code restarts and no data-write bugs) before tuning per-engine thresholds. "IWM laggard" / "QQQ leader" framings from 2026-05-12 are noise contaminated by infra issues, not signal-quality signal.
 
 **Operator decision required:** A / B / C / defer.
 
