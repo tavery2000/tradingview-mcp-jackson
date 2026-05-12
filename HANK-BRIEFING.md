@@ -249,6 +249,65 @@ Three "EMERGENCY: fix N stacked bugs" tasks today contained bugs that were alrea
 
 Pattern: stress-bundling 3 things, two of which need verification not fixing. Resolution: run journal diagnostics first, push back on misattributions, fix what's actually real. The veto-journaling hardening (`4881865`) is largely about preventing this in the future — "why didn't this fire?" should resolve via `grep GATE_BLOCK` not via 30 minutes of cross-instrument investigation.
 
+## Architectural Observations — Live Trading 2026-05-12
+
+Three distinct architectural concerns surfaced from today's live SPY 30sec data. These add a new dimension to the calibration picture: the May 11 chart-first hierarchy migration was about **WHAT** signals fire (engine set, gates, boosters); these observations are about **WHEN** signals fire and **WHEN to listen to them**.
+
+Yesterday's hierarchy work is NOT invalidated. These are an additional layer.
+
+Forensic detail per observation is in `smc-pro-calibration-log.md`. Implementation options for each are in `pending-architectural-decisions.md`.
+
+### Observation 1 — Signal Timing Lag (Sweep vs Confirmation)
+
+**Time:** ~14:15 ET, SPY 30sec
+**Mechanic:** The `bullBreak` / `bearBreak` OR-chain (smc-pro-futures.pine:611-612) does NOT include `bullSweepRaw` / `bearSweepRaw`. Sweep detection (blue diamond) is downstream confluence, never a trigger. Fire happens at the structure-break bar AFTER the sweep — typically 2-3 bars later on 30sec = 60-90 second timing lag.
+**Operator observation:** *"Signals are late. I'm manual trading at LL (blue dot) while Hank does not see the signal until BUY is fired. By then the play is over."*
+**Result:**
+- HANK enters at structure-confirmation bar, exits via SIGNAL_REVERSAL on next opposite alert → $1 to small gains
+- Operator enters at sweep, exits at structure confirmation → 25-80% gains on same setups
+- The +$80 SPY winner at 13:37 was the exception (no opposite signal arrived during the run); the median outcome is "entered late, flushed by next opposite alert"
+
+**Architectural fix candidates** (full sketch in `pending-architectural-decisions.md`):
+- **A. Two-stage signal** — Tier 1 alert at sweep, Tier 2 at confirmation
+- **B. Trail-the-sweep** — arm entry state on sweep, fire if structural confirmation within N bars
+- **C. Different signal threshold per timeframe** — sweep-as-trigger only on ≤1M timeframes
+
+### Observation 2 — Chop Detection Required
+
+**Time:** ~14:45 ET, SPY 30sec (after preceding rally completed)
+**Mechanic:** Indicator fires every structural pivot regardless of whether the broader market regime is trending or ranging. Inside a tight 4-6¢ chop range (735.99-736.45 for 20 minutes), the LH/HL/LL geometric shapes are identical to those produced by reversal entries — current code can't distinguish.
+**Operator quote:** *"This just cannot be traded, not even by me."*
+**Result:** Multiple BUY/SELL fires inside the chop box, every one a losing trade after SIGNAL_REVERSAL whipsaw closes it for a small loss before the next opposite alert.
+
+**Architectural fix candidates:**
+- **A. Operator-side** — manual timeframe switch at fixed time of day (cheapest, no code)
+- **B. Pine-side** — ATR-based or range-based chop detection input that suspends BUY/SELL fires when chop conditions met
+- **C. HANK-side** — chop detection in `monitor.js` or `webhook-server.js` that ignores incoming Pine signals when range-bound bars exceed N
+
+### Observation 3 — Time-of-Day Timeframe Rule
+
+**Pattern emerged across today's data:**
+
+| Time window | Regime | 30sec verdict |
+|---|---|---|
+| 08:00-09:15 ET (pre-market) | Low-volume directional moves | 30sec wins — catches early entries |
+| 09:30-13:00 ET (NY morning) | Real directional moves | 30sec captures cleanly, realistic P&L on post-fix pipeline |
+| 13:00-15:00 ET (midday) | Chop / consolidation | 30sec loses — too many fake signals, SIGNAL_REVERSAL whipsaw |
+| 15:00-16:00 ET (power hour) | Mixed | TBD — need more data |
+
+**Operator hypothesis:** A simple time-of-day rule for timeframe selection beats trying to detect regime algorithmically. SPY 30sec is a SCOUTING tool best deployed during directional periods; SPY 1min is a CONFIRMATION tool that averages out the chop.
+
+**Architectural fix candidates:**
+- **A. Manual operator switch** — 30sec → 1min at 13:00 ET → 30sec at 15:00 ET (or some variation)
+- **B. Adaptive timeframe** based on chop detection (composes with Observation 2's fix)
+- **C. Parallel 30sec + 1min alerts** — HANK picks based on chop state
+
+### Common architectural family
+
+All three observations share the same root: **the indicator + exit logic are context-blind in ways the operator's discretionary trading isn't.** Yesterday's hierarchy migration encoded direction and macro alignment. Today's observations reveal three more context dimensions that current code doesn't weight: signal-vs-noise (timing), trend-vs-chop (regime), time-of-day-vs-timeframe (matching the tool to the moment).
+
+Post-close decision pool consolidated to `pending-architectural-decisions.md`. None decided today — all deferred per session-discipline (operator's own log entry framing: "no architectural Pine change with N min to close").
+
 ## Yesterday's Commits (2026-05-11)
 - `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
 - `ffd0d8d` docs(briefing): May 11 EOD update — Webull intel + 3-stage testing ladder
@@ -299,13 +358,16 @@ Pattern: stress-bundling 3 things, two of which need verification not fixing. Re
 **Webhook validated end-of-day.** Pine alert → ngrok → webhook-server → paperTrading.sendOrder path proven.
 
 **Tomorrow morning checklist (operator):**
-1. Confirm 6 TV alerts configured (SPY/QQQ/IWM/ES1!/NQ1!/MES1!) per `TV-ALERT-SETUP.md` — MNQ1! still pending operator setup, code-side ready when you're ready
-2. Confirm ngrok URL hasn't rotated (paste current URL into the 5 alerts if it has)
-3. Start `webhook-server.js`, start `ngrok http 9001`
-4. Start `monitor.js` — verify the `PINE_PRIMARY` startup line prints
-5. First Pine signal → ngrok inspector shows `POST /pine-alert 200`
-6. Paper-ledger gets entry; verify `engine` field matches Pine's emitted engine
-7. If webhook down: `set PINE_PRIMARY=false`, restart monitor.js — back on monitor dispatch within 30s
+1. **Decide SPY chart timeframe** before open (operator architectural-observation 3 from 2026-05-12): start on **30sec** (catches early NY-morning directional moves better) OR start on **1min** (chop-safer if midday chop expected). Default recommended: **start 30sec, plan to switch to 1min around 13:00 ET** if previous day's pattern holds. Both choices are operator-side via TV chart settings — no code change. Same question for MES1!.
+2. Confirm 6 TV alerts configured (SPY/QQQ/IWM/ES1!/NQ1!/MES1!) per `TV-ALERT-SETUP.md` — MNQ1! still pending operator setup, code-side ready when you're ready
+3. Confirm ngrok URL hasn't rotated (paste current URL into the 6 alerts if it has)
+4. Start `webhook-supervisor.js` (NOT `webhook-server.js` directly — supervisor auto-restarts on death, logs cause to `logs/webhook-supervisor.log`), start `ngrok http 9001`
+5. Start `monitor.js` — verify the `PINE_PRIMARY` startup line prints
+6. First Pine signal → ngrok inspector shows `POST /pine-alert 200`, journal contains a `pine-alert.inbound` ALERT record (hardening 82681ce)
+7. Paper-ledger gets entry; verify `engine` field matches Pine's emitted engine, `fillPrice` is non-null (verifies simulateFill fix 1cdf278), `underlyingPrice` present (verifies alias from same commit)
+8. If webhook down: `set PINE_PRIMARY=false`, restart monitor.js — back on monitor dispatch within 30s
+9. **First chop period observed** (4-6¢ ranges sustained for 10+ min, especially mid-day): consider TV-side switch to 1min on SPY and/or MES per Observation 3, OR bump `Signal cooldown (bars)` in Pine indicator settings dialog from 20 → 40
+10. Watch for SIGNAL_REVERSAL whipsaw pattern (multiple opposite-direction flips per chart within 5min): if observed, log to `smc-pro-calibration-log.md` for post-session review and confirm Observation 1's mechanic still applies
 
 ## Webull-Routed Testing Ladder
 
