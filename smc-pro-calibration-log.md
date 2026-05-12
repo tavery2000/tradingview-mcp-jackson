@@ -189,6 +189,39 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~14:15 ET — SPY 30sec — STRUCTURAL TIMING OBSERVATION (sweep detection fires before BUY signal)
+
+- **Operator observation:** *"Signals are late. I'm manual trading at LL (blue dot) while Hank does not see the signal until BUY is fired. By then the play is over."* Operator-marked blue diamond at LL ~14:10, BUY label at upper position ~14:13 — visual evidence of ~3-bar lag (90 sec on 30sec).
+- **Mechanism (Pine-verified):** The current `bullBreak`/`bearBreak` OR-chain (smc-pro-futures.pine:611-612) is:
+  ```pine
+  bullBreak = bullBOSraw or bullCHOraw or bullZoneBreakRaw or bullHLraw
+  bearBreak = bearBOSraw or bearCHOraw or bearZoneBreakRaw or bearLHraw
+  ```
+  Critically: **`bullSweepRaw` / `bearSweepRaw` are NOT in this OR-chain.** Sweep detection (the blue diamond — line ~277) is used downstream as a confluence input (`bullSweepRecent` / `bearSweepRecent` gates within sensitivity tiers), never as a direct signal trigger. The fire happens at the structure-break bar that comes AFTER the sweep, not at the sweep bar itself.
+- **Sequence on the 14:10 SPY bounce:**
+  1. Bar N: sweep detected → blue diamond drawn → operator enters manually
+  2. Bars N+1 to N+M: price continues up, structure forms
+  3. Bar N+M: HL/LH/CHoCH satisfied → BUY signal fires → HANK enters here
+  M ≈ 2-3 bars on 30sec = 60-90 sec lag. Operator captures the first leg; HANK is consistently mid-move.
+- **Operator's connection to today's loss pattern:**
+  - BUY/SELL/STRUCTURE engines (caught the structural breaks) had OK conviction but late timing → +$1 wins or modest gains
+  - LH/HL/ZONE engines (late-fire variants) had 80% loss rate today
+  - SIGNAL_REVERSAL exits hit so often because HANK entered mid-leg and got flushed at the predictable pullback
+  - Manual scalps consistently winning because operator entered at the sweep, exited at structure confirmation
+- **Verdict:** **NOT A BUG — design tension.** The indicator was designed to fire on confirmation (lower trap rate, higher conviction). The operator trades on detection (better timing, requires context judgment). These are different operating modes; the current code is internally consistent with its "structure-confirmed" design intent.
+- **Conservative sensitivity makes this strictly worse:** confluence requirements are checked at the structure-break bar (not the sweep bar). Stricter gating → fewer fires → all of them still late. **Recommend reverting SPY 30sec to Balanced or Aggressive** if optimizing for fire timing rather than fire selectivity.
+- **Pattern class:** TIMING ARCHITECTURE / sweep-vs-confirmation design tension.
+
+### Three design options for post-close decision
+
+**α — Sweep-as-trigger (literal).** Add `bullSweepRaw` / `bearSweepRaw` to the OR-chain. Mirrors how §10 zone-break and §14 HL/LH were added. ~3 LOC Pine. **Risk:** every failed sweep = paper loss. No follow-through filter. Likely too noisy.
+
+**β — Sweep-with-confluence (disciplined).** New trigger `bullSweepEntry := bullSweepRaw and volSpike and closeNearHigh`. Borrows §12 LIVE's volume + extreme-close gate, applies at sweep bar instead of structure-break bar. ~15 LOC Pine. **Risk:** threshold tuning needed per timeframe.
+
+**γ — Two-tier alert (observability).** Keep current BUY/SELL logic unchanged. Add a separate "SWEEP_BULL" / "SWEEP_BEAR" alert at the sweep bar with distinct `alertName`. Operator gets early heads-up; HANK doesn't dispatch on it (no behavior change to paper trading); journal captures timing differential. ~10 LOC Pine. **Pros:** zero risk to current pipeline, builds dataset to choose between α and β empirically.
+
+**Recommended path:** ship γ first (low risk, high info), let it collect data for 2-3 sessions, then decide α vs β with empirical evidence rather than intuition. ALL THREE deferred to post-close per session-discipline.
+
 ### 2026-05-12 ~13:37 ET — SPY 30sec — FALSE SELL trap at LH retest inside sustained uptrend
 
 - **Event:** Sustained uptrend from 12:55 LL ~731.80 → HH at 13:25 ~734.70. Pulled back to LH retest ~734.80. Indicator fired SELL at 13:37:30 at 734.35. Price did NOT continue down — bounced and continued the uptrend, reaching ~734.81+ within minutes.
