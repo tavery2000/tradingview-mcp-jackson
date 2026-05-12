@@ -133,7 +133,18 @@ function saveLedger(l) {
 // Adds realistic slippage model for options
 
 function simulateFill(order, lastQuote) {
-  const quote = lastQuote || { bid: order.limitPrice * 0.98, ask: order.limitPrice * 1.02 };
+  // Defensive: previous `lastQuote || fallback` check only triggered fallback
+  // when lastQuote was falsy. A truthy partial object (e.g., webhook-server.js
+  // passes `{ mid: optEst }` with no bid/ask) bypassed the fallback, leaving
+  // quote.bid and quote.ask undefined. NaN cascaded through mid/spread/slippage
+  // and the resulting fillPrice serialized to null in the ledger — producing
+  // the deterministic +$1.00 SIGNAL_REVERSAL exit pattern observed 2026-05-12.
+  // Fix: validate bid+ask are finite, otherwise synthesize from mid or limitPrice.
+  let quote = lastQuote;
+  if (!quote || !Number.isFinite(quote.bid) || !Number.isFinite(quote.ask)) {
+    const seed = Number.isFinite(quote?.mid) ? quote.mid : order.limitPrice;
+    quote = { bid: seed * 0.98, ask: seed * 1.02 };
+  }
   const mid   = (quote.bid + quote.ask) / 2;
 
   // Realistic slippage model for 0DTE options
@@ -459,6 +470,13 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       finalConfidence: finalConf,
       entryIV,
       entryUnderlying,
+      // Alias for callers (webhook-server.js SIGNAL_REVERSAL exit math) that
+      // look up `underlyingPrice` rather than `entryUnderlying`. Same value,
+      // two names — schema redundancy intentional to prevent future field-name
+      // mismatch bugs. Diagnosed 2026-05-12: webhook's exit math read
+      // `oppositeOpen.underlyingPrice` (undefined) and fell back to current
+      // price, producing zero-move synthetic exit clamped to $0.01 floor.
+      underlyingPrice: entryUnderlying,
     };
 
     // Lock gate
