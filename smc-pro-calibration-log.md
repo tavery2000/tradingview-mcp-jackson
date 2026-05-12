@@ -189,6 +189,71 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~15:20 ET — SPY 1M + MES 1M — SYNTHESIZED HYPOTHESIS: pivot-extreme trigger + 1M timeframe
+
+**Setup observed:** SPY 1M + MES 1M afternoon comparison window 12:00-15:25 ET.
+
+**SPY 1M:** ~15 signals across 3+ hours. Major moves caught (12:55 LL bounce, 13:30+ uptrend, 15:10 LH retest). Signals fired at structural points (BUYs at HLs, SELLs at LHs). **NO duplicate fires in tight ranges** — chop suppression that 30sec lacks.
+
+**MES 1M:** ~12 signals across same window. Clean morning chop SELLs into LL at 12:50. BUY at 12:50 LL caught the full uptrend leg to 7,425 HH. HL retest at 15:10 caught with BUY.
+
+**Operator quote:** *"The one minute definitely avoids the chops... we just missed a few signals."*
+
+**Operator's synthesizing hypothesis:** *"If we tighten down where chart actually fires the signal from (LL or HH, etc) that should solve our issues."*
+
+---
+
+### Today's three findings unified into a single architectural hypothesis
+
+The synthesis ties together all of today's major architectural observations:
+
+| Finding | Current mechanism | Proposed solution component |
+|---|---|---|
+| #1 Sweep timing (~14:15) | Pine fires on CHoCH confirmation, 2-3 bars after sweep | **Fire AT the pivot extreme bar** (LL or HH itself) |
+| #2 Chop filter (~14:45) | 30sec catches early but fires on noise | **Use 1M timeframe** for natural chop suppression |
+| #3 Pivot precision (15:20) | Multi-bar lag between extreme and signal | **Single architectural change addresses both** |
+
+### The synthesized hypothesis
+
+> **Fire BUY at the LL bar (when sweep + volume + reversal-candle align). Fire SELL at the HH bar (with mirror confluence). Combine with 1M timeframe.**
+
+This is a single Pine architectural change that explains why operator manual trading consistently wins:
+
+| Operator's manual entry | Synthesized Pine fix |
+|---|---|
+| Enters at sweep / pivot extreme bar | Pine fires at pivot extreme bar |
+| Uses 1M context judgment to filter false sweeps | 1M timeframe naturally averages out micro-pullback false sweeps |
+| Exits at structure confirmation | Same — Pine's existing CHoCH-confirmation as exit signal still works |
+
+The hypothesis claims that **firing at the pivot extreme on 1M is naturally precise** because the 1M timeframe filters the geometric pivot false-fires that plague 30sec. It's a stronger claim than either sweep-as-trigger (Decision 1) alone OR timeframe-switch (Decision 2/3) alone — they reinforce each other.
+
+### Why this is a stronger hypothesis than the original Decisions 1 + 2 + 3 considered separately
+
+- **Decision 1 alone** (sweep-as-trigger on current timeframe): every failed sweep becomes a paper loss. Trap rate likely too high.
+- **Decisions 2/3 alone** (timeframe switching): saves chop losses but doesn't recover the entry-timing edge — HANK still enters at CHoCH bar.
+- **Combined (synthesized hypothesis):** sweep-as-trigger AT pivot bar PLUS 1M timeframe — the 1M timeframe is itself the trap-rate filter, allowing the more aggressive entry rule to work.
+
+### Operator's proposed post-close investigation
+
+**Primary post-close work item:**
+
+1. Walk through today's trades (full count TBD — operator estimated 33; actual will be in ledger filter)
+2. For each loss: identify the bar gap between the structural extreme bar (LL or HH) and the actual BUY/SELL fire bar
+3. Determine: if HANK had entered at the extreme bar instead, would the trade have:
+   - **a.** Improved win rate (earlier entry → wider profit window before SIGNAL_REVERSAL)?
+   - **b.** Caused new false fires (every wick fires, including failed sweeps)?
+4. If favorable: draft Pine modification combining sweep-as-trigger with sweep+volume+reversal-candle confluence filter, ship for tomorrow with 1M timeframe recommendation
+
+This investigation is well-bounded — it's empirical replay against today's already-captured journal/ledger data, no new live runs needed. The journal has every signal's bar timestamp; the underlying-price timeline from POLL records gives the price action between extreme and fire. The analyzer at 16:02 ET starts the data; this investigation extends it.
+
+### Classification
+
+**SYNTHESIZED FIX HYPOTHESIS — possibly the single biggest improvement available.**
+
+If this hypothesis holds empirically against today's data, it transforms three separate architectural concerns into one targeted Pine change + one operator workflow change (1M default during chop hours, 30sec for morning directional periods).
+
+If it doesn't hold: at least we'll have a clean empirical answer about WHY operator manual trading wins where HANK loses, and the failure mode tells us what additional context dimension is needed (e.g., specific candlestick context that can't be encoded geometrically).
+
 ### 2026-05-12 ~15:00 ET — MES1! 1M — CONFIRMS timeframe-as-chop-filter with hard cross-instrument data
 
 - **Setup:** MES1! 1M chart, same 14:25-15:00 ET window as the SPY 30sec chop observation just below. Range: HH ~7,412 / LL ~7,400 = 12 MES pts over 35 min. The exact same intraday chop regime.

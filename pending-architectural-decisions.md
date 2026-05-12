@@ -10,6 +10,65 @@ Cross-references:
 
 ---
 
+## **PRIMARY POST-CLOSE INVESTIGATION** — Synthesized "Pivot-Extreme Trigger + 1M Timeframe" Hypothesis
+
+Logged 2026-05-12 ~15:20 ET. **Decisions 1 + 2 + 3 below are likely all facets of this single hypothesis.** Investigate this first; the result determines whether Decisions 1/2/3 need to be implemented separately or are subsumed.
+
+### The hypothesis
+
+> **Fire BUY at the LL bar itself (when sweep + volume + reversal-candle align). Fire SELL at the HH bar (with mirror confluence). Combine with 1M timeframe as default.**
+
+Single Pine architectural change that simultaneously addresses:
+- Signal timing lag (Decision 1) — entries happen at the pivot, not at CHoCH confirmation
+- Chop filtering (Decision 2) — 1M timeframe naturally averages out micro-pullback false sweeps
+- Time-of-day timeframe rule (Decision 3) — same change
+
+The trap-rate problem of "sweep-as-trigger" (Decision 1-A's main risk) is mitigated by the 1M timeframe (Decision 2/3-A). They reinforce each other.
+
+### Empirical investigation plan (post-close)
+
+The investigation IS bounded — uses today's already-captured data, no new live runs needed.
+
+1. **Count today's signal-driven trades** (engine ≠ SWING, not test probes). Operator estimated ~33; actual will be in ledger filter.
+2. **For each trade**: find the bar timestamp of the structural extreme (LL or HH) preceding the entry. The extreme bar = where bullSweepRaw / bearSweepRaw fired most recently before the actual fire bar.
+3. **For each trade**: identify the bar gap between extreme and entry. On 30sec that's typically 2-3 bars (60-90s). On 1M typically 1-2 bars.
+4. **Replay**: assume entry had happened at the extreme bar instead. Compute hypothetical:
+   - Hypothetical fillPrice = synthesized from underlying price at extreme bar
+   - Hypothetical exitPrice = same as actual (exit logic unchanged in hypothesis)
+   - Hypothetical pnl
+5. **Categorize**: did the replay improve, neutral, or worsen the outcome? Tabulate by:
+   - Engine (BUY/SELL/HL/LH/ZONE/HTF)
+   - Instrument
+   - Timeframe (30sec on SPY today, 1M on other instruments)
+6. **Decision criterion**: if replay shows ≥60% of losing trades become wins or breakeven (and <10% of winning trades become losses), proceed to ship sweep-as-trigger with sweep+volume+reversal-candle filter, recommend 1M-by-default for SPY/MES.
+
+### Pine change sketch (if investigation favorable)
+
+```pine
+// New synthesized trigger — fires at pivot extreme with confluence
+bullPivotEntry = bullSweepRaw and volSpike and closeNearHigh
+bearPivotEntry = bearSweepRaw and volSpike and closeNearLow
+
+// Add to bullBreak / bearBreak OR-chain
+bullBreak := bullBOSraw or bullCHOraw or bullZoneBreakRaw or bullHLraw or bullPivotEntry
+bearBreak := bearBOSraw or bearCHOraw or bearZoneBreakRaw or bearLHraw or bearPivotEntry
+```
+
+Estimate ~10-15 LOC including the new input toggle (`enablePivotEntry`, default true once vetted), threshold inputs (already exist as `liveVolMult` and `liveExtremeRatio`).
+
+### Why this should be Investigation #1 post-close
+
+If favorable: collapses 3 decisions into 1 implementation. Largest possible improvement-per-LOC.
+If unfavorable: rules out the dominant hypothesis cleanly, refocuses Decisions 1/2/3 as separate problems.
+Either way: empirical answer using today's data, no risk of premature implementation.
+
+**Failure modes the investigation must distinguish:**
+- Pivot-extreme entry fires at every wick (high trap rate even on 1M) → hypothesis fails, Decision 1 needs a different solve
+- Pivot-extreme entry on 30sec gets trapped but on 1M works → confirms timeframe-as-trap-filter, hypothesis valid with TF caveat
+- Pivot-extreme entry works on both timeframes → strongest result, ship the change and update default TF guidance
+
+---
+
 ## Decision 1 — Signal Timing Lag (Sweep vs Confirmation)
 
 ### The choice
