@@ -2940,8 +2940,8 @@ async function poll() {
       current:   spy.price ?? null,
       vwap:      spy.vwap  ?? null,
       bias:      spy.bias  ?? null,
-      volumePct: parseFloat(_spyVolumePct.toFixed(2)),
-      volumeColor: _spyVolumePct < 0.50 ? 'red' : _spyVolumePct < 0.80 ? 'yellow' : 'green',
+      volumePct: parseFloat(_spyVolPct.toFixed(2)),
+      volumeColor: _spyVolPct < 0.50 ? 'red' : _spyVolPct < 0.80 ? 'yellow' : 'green',
       ts:        Date.now(),
       time:      getETString(),
     };
