@@ -189,6 +189,70 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~13:37 ET — SPY 30sec — FALSE SELL trap at LH retest inside sustained uptrend
+
+- **Event:** Sustained uptrend from 12:55 LL ~731.80 → HH at 13:25 ~734.70. Pulled back to LH retest ~734.80. Indicator fired SELL at 13:37:30 at 734.35. Price did NOT continue down — bounced and continued the uptrend, reaching ~734.81+ within minutes.
+- **Indicator behavior (journal-verified, not just operator-described):** This was NOT a weak single-trigger ZONE fire. Three simultaneous alert() calls fired at the same 30sec bar close:
+  - `13:37:30 PUTS SELL MEDIUM price=734.35`
+  - `13:37:30 PUTS LH MEDIUM price=734.35`
+  - `13:37:30 PUTS HTF HIGH price=734.35`
+  Triple-engine confluence: structural SELL + LH-pivot early-entry + HTF-aligned (HIGH confidence on the HTF leg). The strongest possible bear signal the indicator can emit. **Still got trapped by continuation.**
+- **Operator read:** *"another trap"*. Did not enter.
+- **Operator note on the engine label:** Original report listed engine as "ZONE PUTS MEDIUM" — journal shows the actual triple was SELL+LH+HTF. Operator's note may reflect the TV toast which displays only the most recent alert, not the simultaneous batch. The journal is ground truth.
+- **Why this is significant:** §17 collateral cost is supposed to be when HTF filter BLOCKS legitimate signals. This is the opposite: HTF filter ALLOWED a counter-trend trap fire because the 1H HTF bias hadn't flipped to match the immediate 30sec rally yet. The HTF leg fired with HIGH confidence saying "HTF says Bearish, SELL aligned" — but the immediate 30sec context showed clear continuation up.
+- **Verdict:** **FALSE SELL despite triple-engine confluence.** Strongest available bear signal still wrong because the LH-pivot inside an uptrend got treated structurally the same as an LH after a clean reversal pattern. No bear-flag-vs-reversal differentiation.
+- **Pattern class:** Counter-trend false fire / trend-context-filter gap. **Pairs with the 11:55 ET false BUY** — same architectural class, opposite direction (false BUY on bear flag, false SELL on bull flag).
+- **Reference:** `timeframe-behavior-analysis.md` §14 (HL/LH), §16/§17 (HTF filter), §13 (sensitivity tiers).
+
+### 2026-05-12 ~13:37 ET — Pine instrument override deployment — CONFIRMED FULLY WORKING
+
+- **Operator observation:** Alert toast at 13:37 now shows *"Alert on SPY"* with `"instrument":"SPY"` in payload. **The Pine override fix (`12f5e50`) is confirmed working end-to-end.** Earlier toasts on the SPY chart showing ES1!/MES1! payloads have stopped.
+- **Combined with `82681ce` inbound-journal logging:** every Pine alert now appears in the journal with the correct (override-resolved) instrument label, making future label-mismatch detection deterministic via journal grep.
+- **Closes:** the 2026-05-12 11:55 ET "toast still shows ES1!" entry. Verified working.
+
+### 2026-05-12 — PATTERN: Trend-context filter gap (multi-instance, multi-timeframe)
+
+Bundled observation across today's session — NOT a single event, a pattern across multiple events:
+
+| Time | Instrument | TF | Setup | Engine fires | Outcome |
+|---|---|---|---|---|---|
+| 08:35 | ES1! | 1M | BUY at HL ~7,405 | §14 HL | Drew down to 7,398 before resuming — §14 collateral cost |
+| 08:35 | ES1! | 1M | SELL on inverted hammer | (unknown) | Price continued up — false |
+| 10:30 | MES1! | 1M | LH ~7,412 missed → SELL at ~7,408 (late) | §14 LH (late) | Caught most of move but missed early entry |
+| 11:55 | SPY | 30sec | BUY at HL ~732.85 in continuing downtrend | §14 HL | Bear-flag misread — false BUY |
+| 13:37 | SPY | 30sec | SELL at LH ~734.35 in continuing uptrend | SELL+LH+HTF triple | Bull-flag misread — false SELL despite triple confluence |
+
+**Common architecture:** indicator fires structural pivots (HL/LH) regardless of trend context. A pullback HL in an uptrend, geometrically, looks identical to a reversal HL after a downtrend ended. The indicator doesn't differentiate. HTF filter is supposed to help (§16/§17 Path A active) but lags behind the immediate trend on short timeframes — and when HTF DOES align, it sometimes confirms the wrong direction (today's 13:37 case had HTF saying SELL while immediate trend was UP).
+
+**Proposed fix family (NOT shipped — pattern observation only):**
+- **Option α — Bear-flag/bull-flag context filter for §14:** require HL pivot to be confirmed by either (a) prior CHoCH break in the same direction or (b) sweep below a prior swing low, before §14 fires BUY. Symmetric for LH→SELL. Rejects HL inside ongoing downtrend without prior structural reversal.
+- **Option β — Trend-state require for counter-trend fires:** if 5M trend is UP, suppress SELL signals on 30sec/1M unless they have CHoCH-grade structural confirmation (close < prior LL, not just LH pivot).
+- **Option γ — Sensitivity tier expansion:** add a "Trend-aware" sensitivity option between Balanced and Aggressive that applies a single rule: counter-trend signals require ≥2 confluence sources (sweep + zone, or zone + HTF-flip, etc.) even though aligned signals can fire on any single source.
+
+**Decision criteria:** all three options have similar ship cost (~10-20 LOC in Pine). Choice depends on how aggressive the trade-off is between (a) catching real reversals early vs (b) refusing counter-trend traps. Need ≥1 more session of data + tonight's analyzer continuation rates per direction to decide.
+
+**Connection to prior architectural findings:**
+- §10 zone-break gap (zones as confluence only)
+- §13 sensitivity-tier event-type-aware logic (CHoCH fires alone, BOS needs confluence — extend this principle to direction-vs-trend?)
+- §15 filter-validation win (operator's manual hold preserved capital where indicator would have traded)
+- §17 HTF-filter collateral cost (today's 13:37 is HTF filter PAYING in a new way — confirming wrong-side instead of blocking right-side)
+
+All these are members of the same architectural family: **the indicator treats every structural pivot equally regardless of higher-level market context.** Direction-vs-trend, bar-context (candlestick interpretation), and time-of-day (open vs midday vs close) are all context dimensions the current code doesn't weight.
+
+### 2026-05-12 — TIMEFRAME CAVEAT for today's data
+
+Today's observations are mostly on SPY 30sec (operator's primary test for the timeframe-per-instrument question). MES observations are 1M. Conclusions about "indicator misses counter-trend traps" should NOT be generalized across all timeframes without 1M comparison data on the same instrument.
+
+**Risk:** the trend-context filter pattern observed today may be a 30sec-amplification of a known §14 limitation. Bar-time has 2× more samples on 30sec vs 1M, so geometric HL/LH pivots inside continuation patterns are 2× more frequent, magnifying the trap rate.
+
+**Resolution plan:**
+- Tonight's 16:02 analyzer captures per-instrument continuation rates from journal data — gives a quantitative baseline
+- Tomorrow's session: operator runs SPY on 1M for direct comparison. Same observation methodology
+- After 2-3 sessions of paired 30sec / 1M data, can compute whether the trap pattern is timeframe-amplified or timeframe-universal
+- Decision on trend-context filter (Options α/β/γ above) waits until the comparison data exists
+
+**Why this caveat matters:** earlier today I called the SPY-on-30sec recommendation wrong (after my initial "keep on 1M" advice was contradicted by operator's 09:15 observation). Symmetric risk now: jumping to a code fix based on 30sec data could regret-cost the same way. Empirical validation before architectural change.
+
 ### 2026-05-12 ~11:55 ET — SPY 30sec — FALSE BUY on bear-flag consolidation
 
 - **Event:** Post-NY mid-morning. Earlier sequence: HH ~11:45-11:50 → SELL at LH ~733.50 ~11:54 (correct fade). Indicator then fired **BUY at ~732.85 (~11:55)** in what looked structurally like an HL pivot. Price did NOT continue up — actually dropped to 732.60. Operator-marked with red-down arrow as a fake signal.
