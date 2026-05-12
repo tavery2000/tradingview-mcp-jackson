@@ -86,7 +86,7 @@ restores a layer of the legacy pipeline.
 - Claude SPY tab: SPY only
 - QQQ tab: AMD, AVGO, TSLA, ARM, NVDA (W3 components)
 - IWM tab: BE, CRDO, FN (Mag-3 components)
-- Futures tab: ES1!, NQ1!
+- Futures tab: ES1!, NQ1!, MES1! (TV alert wired 2026-05-11), MNQ1! (TV alert pending)
 - Indicator: **SMC Pro** (`smc-pro-futures.pine`) — visible on every tradable chart
 - VWAP Session + Volume Delta on all charts
 
@@ -112,7 +112,7 @@ LIVE signals use `alert.freq_once_per_bar` (intra-bar fires); all others use
 `alert.freq_once_per_bar_close`.
 
 ## Trading Rules
-- Instruments: SPY, QQQ, IWM, ES1!, NQ1! (allow-list in webhook-server.js)
+- Instruments: SPY, QQQ, IWM, ES1!, NQ1!, MES1!, MNQ1! (full allow-list in `webhook-server.js:73`: SPY/QQQ/IWM/ES/NQ/ES1!/NQ1!/MES/MNQ/MES1!/MNQ1! — both bare and continuous-front-month forms accepted)
 - Account: $25,000 paper
 - Max positions: 2 concurrent (3 when W3 ≥ 4)
 - Max per instrument: 1 open
@@ -187,6 +187,8 @@ Three rounds of Webull support specs failed against `api.webull.com` with our ve
 - `may-11-webull-live-prestage` — live order placement scaffolding per 2026-05-11 Webull spec (HEAD)
 
 ## Today's Commits (2026-05-11)
+- `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
+- `ffd0d8d` docs(briefing): May 11 EOD update — Webull intel + 3-stage testing ladder
 - `b5d4443` feat(webull): pre-stage live order placement per 2026-05-11 spec (HMAC-SHA256 for trade scope, trade-token flow, body schema migration to flat camelCase with tickerId, lookupOptionContractTickerId helper, --trade-token-login CLI)
 - `89b16fd` chore(webull): drop UAT endpoint, run prod-only
 - `8238f77` feat(hierarchy): Pine-as-Primary — webhook owns all chart-engine dispatch
@@ -227,11 +229,13 @@ Three rounds of Webull support specs failed against `api.webull.com` with our ve
 7. GitHub fork created (`tavery2000/tradingview-mcp-jackson`)
 8. Webull UAT endpoint removed — prod-only signing (`api.webull.com`), `--test` flag retained as a connection test against prod (Step 2 returns 200 OK)
 9. Webull live order placement pre-staged per 2026-05-11 spec — HMAC-SHA256 for trade-scope, `x-trade-token` auto-injection, flat camelCase body schema with tickerId, `--trade-token-login` CLI, fail-fast guards in `placeOptionsOrder`. Untested in LIVE mode (paper-only throughout codebase); first live order is a deliberate operator-driven event with both tokens loaded.
+10. Webhook allow-list extended to MES/MNQ (both bare and `1!` forms) per `project_1k_scaleup_plan.md` futures scaling. MES1! TV alert configured by operator 2026-05-11 EOD — MES paper trades will route end-to-end starting next session. MNQ1! TV alert still pending operator setup; code-side ready.
+11. §18 architectural gap logged (`timeframe-behavior-analysis.md` §18 + `smc-pro-calibration-log.md`) — demand-zone-breakdown SELL trigger missing, distinct from §10's supply-rejection-SELL geometry. Not shipped; threshold criterion needs 1–2 more observations Tue–Wed before implementation.
 
 **Webhook validated end-of-day.** Pine alert → ngrok → webhook-server → paperTrading.sendOrder path proven.
 
 **Tomorrow morning checklist (operator):**
-1. Confirm 5 TV alerts configured (SPY/QQQ/IWM/ES1!/NQ1!) per `TV-ALERT-SETUP.md`
+1. Confirm 6 TV alerts configured (SPY/QQQ/IWM/ES1!/NQ1!/MES1!) per `TV-ALERT-SETUP.md` — MNQ1! still pending operator setup, code-side ready when you're ready
 2. Confirm ngrok URL hasn't rotated (paste current URL into the 5 alerts if it has)
 3. Start `webhook-server.js`, start `ngrok http 9001`
 4. Start `monitor.js` — verify the `PINE_PRIMARY` startup line prints
