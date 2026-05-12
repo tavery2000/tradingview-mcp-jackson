@@ -189,6 +189,22 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~10:30 ET — MES1! 1M — partial coverage of 27-pt breakdown leg
+
+- **Event:** Post-NY-open. HH ~7,415 → LH ~7,412 (operator-marked) → dump to LL ~7,385 over ~30 minutes (-27 MES pts). Then BUY at LL bounce ~7,385 (operator circled with red arrow).
+- **Indicator behavior:**
+  - **MISSED:** no SELL at the LH ~7,412 retest. That was the first clean short entry of the move.
+  - **CAUGHT:** SELL fired ~09:55 at ~7,408 — late but captured most of the dump.
+  - Multiple SELL/BUY fires during the leg (some appear to be late retest fires rather than fresh structural breaks).
+  - **CAUGHT:** BUY fired at LL ~7,385 ~10:35 — clean bottom mark.
+- **Operator action:** Manual scalp for +55% on MES. Third manual win today following indicator chart reads.
+- **Operator hypothesis:** *"MES missing signals on the 1min. At noon I will switch to 30seconds and will compare."* Same hypothesis they're testing on SPY today (30sec catches more chop transitions and earlier reversals than 1min on liquid index instruments).
+- **Cross-reference:** Pairs with the 2026-05-12 09:15 ET SPY 30sec-vs-1min observation. Two independent instruments (SPY equities, MES futures), same pattern (1min missing entries that operator's tape read catches). Building empirical case for per-instrument timeframe optimization.
+- **Verdict:** **TIMEFRAME-PER-INSTRUMENT — data gathering.** Decision point at noon when operator switches MES to 30sec. If MES 30sec catches the missed setups going forward (and tonight's analyzer confirms continuation rate doesn't degrade), the recommendation generalizes from "SPY-on-30sec" to "liquid-index instruments perform better on 30sec across the board."
+- **Caveat — context of today's pipeline:** Today's autonomous dispatch has been intermittent (webhook-server.js outages, multiple recurrences). The chart-side indicator behavior captured in this entry is independent of dispatch state — operator is reading the indicator visually. Tonight's analyzer will only capture signals that made it through the webhook to the journal, which is a separate (smaller) data set than what the operator sees on the chart.
+- **Pattern class:** timeframe-per-instrument (continued).
+- **Reference:** see 2026-05-12 09:15 ET entry below for the SPY-side companion observation.
+
 ### 2026-05-12 ~09:15 ET — SPY 30sec vs 1min — TIMEFRAME COMPARISON
 
 - **Event:** Operator compared SPY signal density across two timeframes over a ~2 hour window. 30sec chart showed multiple BUY/SELL fires, caught the 08:30 ET LL major reversal cleanly, and produced more chop-transition signals aligned with VWAP±1σ bands. 1min chart in same window showed fewer signals and missed several of the chop transitions; the 08:30 LL bounce was still detected but with less granularity.
@@ -223,7 +239,7 @@ By pattern class, all-time:
 | **§18 (demand-zone-breakdown — NEW)** | — | **1 (open)** | First observed 2026-05-11 20:35 ET MES1! |
 | **Filter-gap (candlestick context — CANDIDATE)** | — | **1 (open, unverified)** | 2026-05-12 08:35 ES SELL on inverted hammer in uptrend. Specific Pine trigger not yet identified. Would escalate to §19 on recurrence. |
 | **TV-render-artifact (suspected)** | — | **1 (verification pending)** | 2026-05-12 08:35 NQ1! floating signals — operator hypothesis is chart-reset replay. Verify by checking webhook server logs for inbound NQ1! payloads at 08:35 ET |
-| **Timeframe-per-instrument** | — | **1 (open — connects to noon decision)** | 2026-05-12 09:15 SPY 30sec > 1min in operator observation. Contradicts earlier "keep on 1M" generic recommendation. Empirically verifiable via tonight's analyzer if operator runs SPY on 30sec through RTH |
+| **Timeframe-per-instrument** | — | **2 (open — converging evidence)** | (1) 2026-05-12 09:15 SPY 30sec > 1min. (2) 2026-05-12 10:30 MES1! 1M missed LH at 7,412 of 27-pt breakdown — operator switching MES to 30sec at noon to test. Two independent instruments showing same pattern. Empirically verifiable via tonight's analyzer + operator's noon switch |
 | Config issues (TV alert + webhook allow-list) | MES1! TV alert wired ✓ 2026-05-11; MES1!/MNQ1! webhook allow-list wired ✓ 2026-05-12 c73b666 | **1 (open)** | MNQ1! TV alert still pending operator setup |
 
 ---
