@@ -331,8 +331,44 @@ Hypothesis: gates should be permissive for high-WR engines (BUY/SELL/STRUCTURE),
 | 5 | Time-of-day timeframe | Axis 2 | **Decision 3** | A (manual switching) — validated today |
 | 6 | Pivot-extreme trigger validation (15:20 + 15:30) | Axis 1 | **Decision 1** | Primary investigation #1 |
 | 7 | Per-engine WR asymmetry (15:35 frame) | Axis 3 | **Decision 4** | B (per-engine confidence threshold) — needs 16:02 analyzer output to calibrate |
+| 8 | HARD_EXIT near-close losses (15:42-15:43) | Axis 3 (HANK gate) | **Decision 5** | B then A — investigate pricing math first, then ship time-window gate if real |
 
-All 7 patterns map cleanly into the 3-axis frame. No remainder.
+All 8 patterns map cleanly into the 3-axis frame. No remainder.
+
+---
+
+## Decision 5 — HARD_EXIT Near-Close Behavior (NEW — added 2026-05-12 ~16:00 ET)
+
+### The choice
+
+**Should HANK suppress new entries in the final ~10 minutes before the 15:45 RTH cutoff?**
+
+Today's end-of-day pair (15:42:31 PUTS HTF -$99.20, 15:43:01 CALLS BUY -$69.99 — both exited via `HARD_EXIT` at heavily discounted prices) is a **new pattern not seen earlier in the session**. The 15:07:30 power-hour winners exited cleanly via SIGNAL_REVERSAL; the 15:42-15:43 entries hit HARD_EXIT minutes later.
+
+Hypotheses (mutually non-exclusive):
+1. **EOD pricing artifact** — `HARD_EXIT` simulation prices options at a heavy theta-adjusted discount; the realized loss isn't representative of how a live broker would mark/close those positions
+2. **Real loss from late entry** — positions opened 3 min before RTH cutoff don't have time to play out; the move is over and entries near close are systematically lower-edge
+3. **Compound of 1 + 2** — both contribute
+
+### Implementation options
+
+**A. Time-window entry suppression in webhook-server.js.** Reject inbound Pine alerts between 15:35 and 15:45 ET with a `jGateBlock('LATE_DAY_ENTRY')`. ~10 LOC.
+- **Pros:** Free. Trivial to roll back. Aligns with operator-discretionary practice ("don't open new trades 10 min before close").
+- **Cons:** Cuts off legitimate late-day setups (today's 15:07:30 winner would NOT be affected — that's outside the window).
+
+**B. HARD_EXIT pricing investigation only.** No code change. Read paperTrading.js's HARD_EXIT branch, determine if the exit price computation is artifact-prone. Decide A/C from forensic understanding rather than reflexive gate.
+- **Pros:** Distinguishes hypothesis 1 from hypothesis 2 before adding gate logic.
+- **Cons:** Defers the operational fix; tomorrow could see the same pattern again.
+
+**C. Per-engine late-day handling.** BUY/SELL allowed until 15:40, HL/LH/ZONE/HTF cut off at 15:35. Composes with Decision 4.
+- **Pros:** Surgical, leverages today's per-engine asymmetry observation.
+- **Cons:** Adds another tier of per-engine policy state. Slightly more complex than A.
+
+### Recommendation
+
+**B then A.** Read the HARD_EXIT code path FIRST to determine whether the loss is artifact or real. If artifact: fix the pricing math; A becomes unnecessary. If real: ship A as the conservative default; revisit C after Decision 4 lands.
+
+**Operator decision required:** A / B / C / defer.
 
 ---
 
