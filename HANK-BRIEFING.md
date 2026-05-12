@@ -205,7 +205,7 @@ Three rounds of Webull support specs failed against `api.webull.com` with our ve
 
 ## Today's Commits (2026-05-12)
 
-Ten commits today, all addressing pipeline stability / observability / P&L accuracy. None are "feature work" — all are hardening or bug fixes uncovered during live trading hours.
+Thirteen commits today, all addressing pipeline stability / observability / P&L accuracy / late-day gating. None are "feature work" — all are hardening, bug fixes, or post-session synthesis from live trading hours.
 
 - `2f28ab3` config(tier): T1 maxConcurrent 2 → 3 (allow SPY+QQQ+IWM parallel)
 - `4881865` fix(paperTrading): journal every sendOrder veto via jGateBlock (visibility)
@@ -217,6 +217,9 @@ Ten commits today, all addressing pipeline stability / observability / P&L accur
 - `cfe6aa2` fix(monitor): spy-levels.json `_spyVolumePct` typo (file silent for weeks)
 - `fabdc14` tools: reconcile-ledger.js + paper-trading P&L investigation
 - `dfa9b03` fix(swing): underlying→option conversion in monitor-iwm.js/monitor-qqq.js executeSwingExit (fixes IWM +$28K phantom)
+- `1c801bd` docs(eod): SPY 1M +92% operator vs HANK +37% comparison; Decision 5 added
+- `fa7afc2` docs(analysis): per-instrument signal quality 2026-05-12 (392 RTH signals)
+- `3ad575a` feat(webhook): **LATE_DAY_ENTRY_0DTE gate at 15:30 ET — closes Decision 5**
 
 ### Bugs uncovered and fixed today
 
@@ -307,6 +310,69 @@ Forensic detail per observation is in `smc-pro-calibration-log.md`. Implementati
 All three observations share the same root: **the indicator + exit logic are context-blind in ways the operator's discretionary trading isn't.** Yesterday's hierarchy migration encoded direction and macro alignment. Today's observations reveal three more context dimensions that current code doesn't weight: signal-vs-noise (timing), trend-vs-chop (regime), time-of-day-vs-timeframe (matching the tool to the moment).
 
 Post-close decision pool consolidated to `pending-architectural-decisions.md`. None decided today — all deferred per session-discipline (operator's own log entry framing: "no architectural Pine change with N min to close").
+
+## Session-End Summary — 2026-05-12 EOD
+
+### Headline numbers
+- **First full RTH day under Pine-as-Primary architecture.** 392 inbound Pine signals across 6 active instruments (SPY/QQQ/IWM/ES1!/NQ1!/MES1!). MNQ1! intentionally not active until 2026-06-01.
+- **Daily P&L: -$187.70** (vs +$1,706.64 on 2026-05-11 paper baseline). Account balance post-reconcile: $26,744.78.
+- **Three concurrent positions allowed (T1 bumped 2→3 this morning).** SPY/QQQ/IWM ran in parallel.
+- **Operator manual +92% SPY 1M power-hour scalp** (entry HL ~737.10 at 14:55-15:00, exit ~738.50 at HH). HANK detected the same setup at 15:07:30 (~12 min late) and captured +$108.80 across CALLS ZONE + CALLS BUY at +37% each — proof detection works; gap is fire-timing precision.
+
+### Per-instrument signal quality (16:02 ET analyzer, full table in `per-instrument-signal-quality-2026-05-12.md`)
+
+| Instrument | Signals | T+5 cont% | 5-min WR |
+|---|---:|---:|---:|
+| SPY (30sec) | 114 | 57.6% | 57.6% |
+| QQQ (1m) | 59 | 57.9% | 57.9% (best) |
+| IWM (1m) | 57 | 43.9% | 43.9% (worst — 13.7pp below SPY) |
+| ES1! (1m) | 56 | 46.9% | 46.9% |
+| NQ1! (1m) | 52 | 46.2% | 46.2% |
+| MES1! (1m) | 54 | 46.9% | 46.9% |
+
+**Empirical answer to "should SPY stay on 30sec?":** YES at HANK's current SIGNAL_REVERSAL exit horizon (T+5 cont rate ties QQQ at 57.6%/57.9% on 2x the signal volume). The T+5→T+30 decay (57.6 → 43.1) confirms 30sec is a scouting tool, not a hold tool — pairs naturally with operator-side timeframe switch for chop periods (Decision 2-A / 3-A).
+
+### Bugs uncovered + fixed today (six surgical commits during market hours)
+See "Bugs uncovered and fixed today" table above (rows 1-6). All fixed and pushed. Webhook child restarted 5 times today; 4 were deliberate fix-load restarts, 1 was the post-close gate restart at 16:39. **Zero silent crashes** since supervisor took over at 11:07 ET.
+
+### Three-axis architectural frame (locked 15:35 ET)
+
+Today's findings decompose into THREE INDEPENDENT axes — not one fix. The 15:30 MES1! 1M observation (12-min lag on 1M, same mechanism as 30sec 60-90s lag) proved lag and chop are orthogonal:
+
+| Axis | Layer | Status |
+|---|---|---|
+| 1 — Signal timing lag (sweep vs structure-break) | Pine code | Decision 1 — recommended A (two-stage signal); pending |
+| 2 — Chop noise filter | Operator workflow | Decision 2 — recommended A (TF switch); validated 1 day |
+| 3 — Per-engine gating + late-day cutoff | HANK gate logic | Decision 4 pending; **Decision 5 SHIPPED today** |
+
+### Decisions shipped today
+- **Decision 5 — LATE_DAY_ENTRY_0DTE gate** (commit `3ad575a`): Block new SPY/QQQ/IWM entries after 15:30 ET. Investigated the HARD_EXIT pricing math (BS chain in monitor.js:3013 + theta.js:98 verified correct, frozen entryIV mildly punitive vs real-market vol ramp). The 15:42/15:43 -$169.19 was real theta-burn from entering near-ATM 0DTE 15-16 min before close, not a pricing artifact. Gate placed after SIGNAL_REVERSAL so late-day opposite alerts still close existing positions; only new entries blocked. **Webhook child restarted 16:39 ET, gate live.**
+
+### Decisions pending (post-close work block)
+- **Decision 1** — Pine timing-lag fix (pivot-extreme trigger with confluence). Primary post-close engineering work. Bounded investigation: replay today's 392 signals against hypothetical sweep-as-trigger before shipping.
+- **Decision 2** — Chop detection (recommended A: operator-side TF switch). Validated 1 day; needs 3-5 more sessions before judging A sufficient vs graduating to B/C.
+- **Decision 3** — Time-of-day TF rule (recommended A: 30sec→1m at 13:00→30sec at 15:00). Same status as Decision 2; validate as workflow before automating.
+- **Decision 4** — Per-engine gating. IWM flagged as candidate by today's analyzer (13.7pp below SPY at T+5); needs 3-5 sessions of by-engine data before tuning thresholds.
+
+### Tomorrow morning checklist (operator) — UPDATED 2026-05-12 EOD
+
+1. **Decide SPY chart timeframe** before open. Today's analyzer empirically supports keeping SPY on **30sec at open** (57.6% T+5 cont on 2x volume). Plan to switch to **1m around 13:00 ET** if chop pattern repeats. Both via TV chart settings — no code change.
+2. Confirm 6 TV alerts configured (SPY/QQQ/IWM/ES1!/NQ1!/MES1!) per `TV-ALERT-SETUP.md`. **MNQ1! not active until 2026-06-01 — do NOT investigate "0 MNQ signals" before that date.**
+3. Confirm ngrok URL hasn't rotated.
+4. Start `webhook-supervisor.js` (auto-restart wrapper) + `ngrok http 9001`. Verify `/health` returns ok=true.
+5. Start monitors (`monitor.js` / `monitor-qqq.js` / `monitor-iwm.js`) — verify `PINE_PRIMARY` startup line on each.
+6. First Pine signal: ngrok inspector → `POST /pine-alert 200`, journal contains `pine-alert.inbound` ALERT record.
+7. Paper-ledger entry: verify `engine` matches Pine's emitted engine, `fillPrice` non-null, `underlyingPrice` present.
+8. **NEW: After 15:30 ET, expect SPY/QQQ/IWM Pine alerts to journal as `GATE_BLOCK reason=LATE_DAY_ENTRY_0DTE` instead of opening positions.** SIGNAL_REVERSAL still closes existing positions through 15:30-15:45 window. Confirm pattern in journal during first late-day signal.
+9. If webhook down: `set PINE_PRIMARY=false`, restart monitor.js → back on monitor dispatch within 30s.
+10. **First chop period observed** (4-6¢ sustained 10+ min): consider TV-side SPY 30sec→1m switch per Decision 2-A; log to `smc-pro-calibration-log.md`.
+11. Watch SIGNAL_REVERSAL whipsaw pattern; log if observed.
+
+### Operator collaboration pattern (from today)
+
+- Stress-bundled "EMERGENCY: fix N bugs" tasks frequently contain 1-2 not-actually-bugs. Verify journal/ledger evidence BEFORE code change.
+- Architectural-observation logging during live trading was high-value — produced the three-axis frame and Decision 5 cleanly.
+- Pricing-math investigations should run first when symptoms are extreme (-$99 / -$70 in 2 min); often the math is right and the strategy needs adjusting (today's case).
 
 ## Yesterday's Commits (2026-05-11)
 - `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
