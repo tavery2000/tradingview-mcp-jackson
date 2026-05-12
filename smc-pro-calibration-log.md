@@ -189,6 +189,58 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~14:25 ET — SPY 30sec — diagnostic answer: SIGNAL_REVERSAL whipsaw on 30sec chop
+
+Operator observation: clean uptrend continuation 14:10 → 14:25, BUY fired at HL ~14:18-14:20, move continued. *"This was an easy trade."* But journal shows mixed results — some BUYs filled, some blocked, ones that filled mostly lost via SIGNAL_REVERSAL.
+
+**Journal-verified state for SPY 14:05-14:30:**
+
+| Time | Alert | Outcome |
+|---|---|---|
+| 14:05:30 | PUTS ZONE | BLOCKED — MAX_CONCURRENT (3 open: IWM,SPY,SPY) |
+| 14:10:30 | CALLS BUY | FILLED → closed SIGNAL_REVERSAL **-$6.40** |
+| 14:10:30 | CALLS HL | FILLED → closed SIGNAL_REVERSAL **-$13.20** |
+| 14:11:01 | PUTS ZONE | FILLED → closed SIGNAL_REVERSAL **-$16.00** |
+| 14:13:00 | PUTS SELL | FILLED → closed SIGNAL_REVERSAL **-$22.80** |
+| 14:13:00 | PUTS HTF | BLOCKED — MAX_CONCURRENT |
+| 14:13:00 | PUTS LH | BLOCKED — MAX_CONCURRENT |
+| 14:21:30 | CALLS BUY | FILLED — OPEN |
+| 14:21:30 | CALLS HL | FILLED — OPEN |
+
+**Mechanism:** The "clean uptrend" on the chart is being sliced into bidirectional micro-setups by the 30sec indicator. Every minor pullback within the larger up-move produces an opposite-direction alert. SIGNAL_REVERSAL closes the CALLS at the bottom of the dip, opens PUTS, then closes the PUTS at the top of the next push and reopens CALLS. Each flip locks in a small loss. The +$80 winner earlier (13:37 BUY) only worked because no opposite signal arrived during its leg up.
+
+**Diagnosis: NOT a Pine signal-firing bug, NOT a webhook issue, NOT a sensitivity setting problem.** It's an **exit-logic mismatch.** §19 SIGNAL_REVERSAL was designed assuming opposite-direction signals = real direction change. On 30sec chop, opposite signals = ~30-90 second micro-pullback. The exit fires on noise, not on signal.
+
+**Why operator's manual approach wins where HANK loses:**
+- Operator enters at sweep (per the 14:15 timing-architecture observation)
+- Holds through SIGNAL_REVERSAL-eligible bars based on contextual judgment (delta, momentum, candlestick shape)
+- Exits at structure confirmation when the move's done — NOT on every reverse-direction print
+- Effectively uses SIGNAL_REVERSAL as INFORMATION, not as an automatic exit
+
+**Action items for post-close (added to decision pool):**
+
+**δ — SIGNAL_REVERSAL hold-time minimum.** Don't close on opposite-direction alert within N minutes of entry. e.g., minimum 5-min hold. Filters out micro-pullback reversal exits. ~10 LOC in webhook-server.js. **Risk:** legitimate quick reversals also held longer. **Pros:** captures more of the legs HANK currently flushes.
+
+**ε — SIGNAL_REVERSAL only on multi-engine opposite confirmation.** Current: ANY opposite-direction Pine alert triggers close. Proposed: require ≥2 opposite engines fire on the same bar (e.g., SELL+LH or SELL+ZONE) to close a CALL position. Reduces single-engine micro-pullback flush. ~15 LOC. **Risk:** legitimate decisive flips that fire only one opposite engine get held too long.
+
+**ζ — SIGNAL_REVERSAL gated by underlying-move threshold.** Don't close unless price has actually moved ≥ X ATR against the position. Filters out reversal alerts that fire on inconsequential price movement. ~10 LOC. **Pros:** directly addresses "the position was still winning when SIGNAL_REVERSAL flushed it."
+
+**η — Per-instrument SIGNAL_REVERSAL cooldown.** After a SIGNAL_REVERSAL fires on an instrument, don't allow another SIGNAL_REVERSAL on the same instrument for N minutes. Stops the rapid-fire flip cycle observed today. ~10 LOC. **Pros:** simplest. **Cons:** allows runaway positions if the original entry was wrong.
+
+**Recommended post-close path:** ε or ζ likely the highest-quality fixes — both directly target the "noise vs signal" classification that's the root issue. δ is cheapest to ship but introduces fresh trade-offs. All four deferred per session-discipline.
+
+### Cross-reference to today's other architectural observations
+
+This timing-architecture observation (sweep vs structure-break) and the SIGNAL_REVERSAL whipsaw observation share a common architectural family:
+
+| Pattern | Root | Operator manual handles via |
+|---|---|---|
+| Trend-context trap (11:55 / 13:37) | Indicator geometrically blind to trend continuation vs reversal | Visual context judgment |
+| Sweep-vs-structure timing | Indicator fires at confirmation, not at detection | Tape-reading at the sweep |
+| SIGNAL_REVERSAL whipsaw | Exit logic treats any opposite signal as direction change | Holding through noise, exiting on confirmed reversal |
+
+All three are facets of the same underlying observation: **the indicator + exit logic are context-blind in ways that the operator's discretionary trading isn't.** The fix family for post-close is to encode more context into the rules — direction-vs-trend filters, sweep-as-trigger options, multi-engine confirmation gates, hold-time minimums.
+
 ### 2026-05-12 ~14:15 ET — SPY 30sec — STRUCTURAL TIMING OBSERVATION (sweep detection fires before BUY signal)
 
 - **Operator observation:** *"Signals are late. I'm manual trading at LL (blue dot) while Hank does not see the signal until BUY is fired. By then the play is over."* Operator-marked blue diamond at LL ~14:10, BUY label at upper position ~14:13 — visual evidence of ~3-bar lag (90 sec on 30sec).
