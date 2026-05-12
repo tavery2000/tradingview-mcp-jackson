@@ -45,6 +45,26 @@ import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 
+// ─── Last-gasp crash logging ──────────────────────────────────────────────────
+// If anything in the request pipeline throws unexpectedly, we want to know
+// WHY in the journal before the process dies (so the supervisor's restart
+// record + this journal entry together explain the death). These handlers
+// MUST be registered before any other code runs.
+process.on('uncaughtException', (err) => {
+  try { jError('WEBHOOK', 'UNCAUGHT_EXCEPTION', { message: err.message, stack: err.stack?.slice(0, 800) }); } catch {}
+  console.error(`\n[WEBHOOK] FATAL uncaughtException: ${err.message}`);
+  console.error(err.stack);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack?.slice(0, 800) : null;
+  try { jError('WEBHOOK', 'UNHANDLED_REJECTION', { message: msg, stack }); } catch {}
+  console.error(`\n[WEBHOOK] FATAL unhandledRejection: ${msg}`);
+  if (stack) console.error(stack);
+  process.exit(1);
+});
+
 // Lazy-load webull so the webhook runs even if Webull module errors
 let selectContract = null;
 try {
@@ -128,6 +148,15 @@ async function handlePineAlert(req, res) {
 
   console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | ${etTimeString()} ET`);
 
+  // Journal every inbound Pine alert at receipt — BEFORE any gate or
+  // downstream code path. Prevents the "[PINE-ALERT] logged to console but
+  // no journal record" gap that hid today's webhook outages from the
+  // post-mortem dataset. Subsequent records (GATE_BLOCK / SIGNAL / ERROR /
+  // ENTRY) then narrate what happened to this specific alert.
+  try {
+    jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
+  } catch {}
+
   // RTH gate
   if (!isTradingHours()) {
     jGateBlock(engine, instrument, direction, 'OUT_OF_HOURS', { etTime: etTimeString() });
@@ -192,8 +221,25 @@ async function handlePineAlert(req, res) {
     vwap,
   };
 
-  const reqId = orderGate.createRequest({ signal: direction, engine });
-  const fill  = await sendOrder(consensus, reqId, { mid: optEst });
+  // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
+  // uncaught throw here (e.g., paper-ledger.json lock contention,
+  // sendOrder internal error) would propagate up through the async
+  // request handler and either crash the process or leave the TV client
+  // hanging until ngrok timed out with 502. With this wrap, the journal
+  // captures the failure and TV gets a clean 500 response.
+  let reqId, fill;
+  try {
+    reqId = orderGate.createRequest({ signal: direction, engine });
+    fill  = await sendOrder(consensus, reqId, { mid: optEst });
+  } catch (e) {
+    jError('WEBHOOK', 'SEND_ORDER_THREW', {
+      message: e.message,
+      stack: e.stack?.slice(0, 600),
+      instrument, direction, engine, price, reqId,
+    });
+    console.error(`  [WEBHOOK] sendOrder threw: ${e.message}`);
+    return send(res, 500, { ok: false, reason: 'SEND_ORDER_THREW', error: e.message });
+  }
 
   jSignal(engine, direction, confidence, alertName ?? `${engine} ${direction}`, {
     instrument, price, vwap, optEst, pineAlert: true, reqId,
