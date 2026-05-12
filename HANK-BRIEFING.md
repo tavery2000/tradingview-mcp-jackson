@@ -374,13 +374,51 @@ Today's findings decompose into THREE INDEPENDENT axes — not one fix. The 15:3
 - Architectural-observation logging during live trading was high-value — produced the three-axis frame and Decision 5 cleanly.
 - Pricing-math investigations should run first when symptoms are extreme (-$99 / -$70 in 2 min); often the math is right and the strategy needs adjusting (today's case).
 
-### Post-session addendum — 2026-05-12 22:00 ET
+## 2026-05-12 22:00 ET — Post-session addendum
 
-1. **Today's signal-quality data is INVALID for calibration use.** The 392-signal per-instrument analyzer report (`per-instrument-signal-quality-2026-05-12.md`) was generated during a session with multiple infrastructure failures: +$1.00 pricing bug (1cdf278), monitor.js crash and stale spy-levels.json early in session (cfe6aa2), webhook-server.js crash and 4 deliberate restarts, misrouted SPY/MES alerts before per-chart override (12f5e50). Per-instrument win rates and continuation rates **must NOT be used to inform Decision 4 (per-engine gating) or per-instrument tuning** until clean session data from a stable-infrastructure day is available. "IWM is laggard" / "QQQ leads" / engine-breakdown numbers are noise until re-measured under clean conditions.
+Three updates that should inform Wednesday morning's read of today's data:
 
-2. **Briefing data source architecture rebuilt** (tag `may-12-briefing-live-data`, commit `eab5b46`). Briefing now pulls live state via wsServer (port 8080), falls back to snapshot files with smart STALE check (post-07:00 ET today, not previous-calendar-day). Operator can re-enable email distribution Wednesday morning per the startup sequence in this document.
+### 1. Signal-quality data is not yet usable for engine tuning
 
-3. **Stale-data-causing-trade-losses hypothesis** was investigated tonight and **REJECTED**. Code trace confirmed `*-levels.json` files are consumed by display/context paths only (briefing.js, dashboard-server.js, daily-bias.js, moc-engine.js, l2.js, monitors as writers) — NOT by the trade dispatch path (webhook-server.js / paperTrading.js / signalConfidence.js / tier.js read zero levels files). Today's losses trace cleanly to identified, already-fixed bugs (`1cdf278` +$1.00 plague, `dfa9b03`/`fabdc14` IWM phantom, `3ad575a` HARD_EXIT theta burn) plus pending architectural decisions (Axis 1 timing lag, Axis 2 chop filter, Axis 3 per-engine gating).
+The per-instrument signal-quality table (SPY 57.6%, QQQ 57.9%, IWM 43.9%, etc.) and continuation rates were generated during a session with multiple infrastructure failures:
+- +$1.00 deterministic pricing bug (fixed 1cdf278 mid-session)
+- monitor.js silent crash at 11:10:48 ET (recovered manually)
+- webhook-server.js crash (hardened with supervisor 82681ce)
+- Briefing read-path serving previous-day data
+- SPY/MES alerts misrouted via ES1!/MES1!-labeled payloads early in session
+
+Per-instrument win rates and engine performance breakdowns from this session should NOT be used to inform Decision 4 (per-engine gating) or per-instrument tuning. Wait for 3-5 clean sessions before acting on engine-level data. IWM's 13.7pp gap vs SPY may persist or may evaporate — single-session sample is insufficient.
+
+### 2. Briefing data source architecture rebuilt
+
+Tag: `may-12-briefing-live-data`
+- Briefing now pulls live state via wsServer at render time
+- Fallback to snapshot files with smart STALE check (post-07:00 ET today, not previous-calendar-day comparison)
+- STALE warning now means data is genuinely from before today's pre-market open, not just a snapshot lag
+- Operator can re-enable briefing email distribution starting Wednesday morning
+
+Wednesday startup sequence:
+1. Start `monitor.js` + `wsServer.js` before 07:00 ET
+2. Verify by 08:30 ET briefing trigger, both alive and broadcasting
+3. Email goes out with today's pre-market state, no STALE warning
+
+### 3. Hypothesis rejected: "stale data caused 33 broken trades"
+
+Earlier tonight, an emergency framing claimed stale levels.json data was the root cause of today's 33 broken trades. Code trace disproved this:
+
+- `*-levels.json` consumers (display, context, briefing, MOC engine)
+- Trade dispatch path (`webhook-server.js`, `paperTrading.js`, `signalConfidence.js`, `tier.js`, `theta.js`) reads NO levels.json files
+- Live SPY/QQQ/IWM prices come from Pine webhook payload (entry) and in-memory CDP feed (exit)
+- Trade prices at 15:42-15:43 (737.81, 737.87) match operator's observed live chart range — not stale
+
+Today's actual loss causes were the ones already identified:
+- +$1.00 plague → fixed `1cdf278`
+- $28K phantom IWM → fixed `dfa9b03` + `fabdc14`
+- Late-day theta burns → fixed via Decision 5 gate (`3ad575a`)
+- Whipsaws in chop → Axis 2 pending (Decision 2)
+- Entry timing lag → Axis 1 pending (Decision 1)
+
+The architectural decision queue is unchanged. Wednesday post-close work focus: Axis 1 (Pine sweep-trigger fix). Wednesday during-market focus: SPY on 1min timeframe, verify QQQ trading, validate Decision 5 LATE_DAY_ENTRY_0DTE gate fires as expected.
 
 ## Yesterday's Commits (2026-05-11)
 - `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
