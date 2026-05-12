@@ -189,6 +189,49 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~15:00 ET — MES1! 1M — CONFIRMS timeframe-as-chop-filter with hard cross-instrument data
+
+- **Setup:** MES1! 1M chart, same 14:25-15:00 ET window as the SPY 30sec chop observation just below. Range: HH ~7,412 / LL ~7,400 = 12 MES pts over 35 min. The exact same intraday chop regime.
+- **Indicator behavior on MES 1M (NOT 30sec):**
+  - 1 SELL fired at the top of the range (~14:38 at LH/HH area)
+  - 1 BUY fired at the bottom (~14:52 at LL retest)
+  - **Total: 2 signals in 35 minutes**
+- **Comparative table — same regime, two timeframes:**
+
+  | Chart | Window | Range | Signal count | Outcome |
+  |---|---|---|---|---|
+  | SPY 30sec | 14:25-14:45 (20 min) | 4-6¢ | 6-8 fires | All losers in chop |
+  | MES1! 1M | 14:25-15:00 (35 min) | 12 MES pts | **2 fires** | Top + bottom of range, minimal noise |
+
+- **Operator quote:** *"MES is much cleaner during the afternoon chop"*
+- **What this resolves:** The timeframe-as-chop-filter hypothesis (Observation 3 in HANK-BRIEFING.md, also fix Decision 2 + 3 in `pending-architectural-decisions.md`) was logged 15 min earlier as an intuition with one-timeframe data. This observation provides **hard validation with paired data**. Same regime, two different timeframe choices, dramatically different signal density.
+- **Verdict:** **VALIDATED.** Time-of-day timeframe switching is empirically supported with at least one paired observation. Recommendation θ/A (operator-side regime switching) in the decision register is the right starting answer — the hypothesis works without needing code instrumentation.
+- **Pattern class:** TIMEFRAME-AS-CHOP-FILTER (validation evidence).
+- **Caveats remain:** 
+  - Single-day paired data. Need 3-5 sessions of paired 30sec/1M to be confident the schedule generalizes
+  - Different instruments (SPY vs MES) — MES futures may simply be less choppy than SPY equities in afternoon, independent of timeframe choice. Need same-instrument paired data to fully isolate
+  - 15:00-16:00 ET (power hour) regime still unknown
+
+### Today's two biggest practical findings — summary
+
+Per operator's end-of-session synthesis, the two architectural patterns most directly actionable:
+
+**Finding 1: Signal Timing Lag (sweep vs structural confirmation)** — entries lag the optimal point by 60-90 sec on 30sec; manual operator trading captures this edge by entering at sweep, exiting at structure. HANK currently can't.
+- **Fix priority:** HIGH (recovers operator's edge as paper P&L)
+- **Best option:** Decision 1-A (two-stage signal — T1 at sweep, T2 at confirmation, data-gathering first)
+- **Status:** Deferred to post-close
+
+**Finding 2: Timeframe-as-Chop-Filter (time-of-day rule)** — 30sec excels at directional-move detection (morning) but produces noise during chop (midday). 1m smooths chop without sacrificing real moves much.
+- **Fix priority:** MEDIUM (no code; operator workflow change)
+- **Best option:** Decision 2-A / 3-A (manual timeframe switching on schedule)
+- **Status:** **Validated today** with paired SPY 30sec / MES 1M data
+- **Suggested schedule** (operator hypothesis, single-day data):
+  - 09:30-13:00 ET: 30sec (directional morning)
+  - 13:00-15:30 ET: 1min (afternoon chop)
+  - 15:30-16:00 ET: situation-dependent (power hour)
+
+Both findings will be the focus of post-close decision block.
+
 ### 2026-05-12 ~14:45 ET — SPY 30sec — CHOP detected, timeframe-as-filter solution proposed
 
 - **Event:** Post-rally consolidation. Price chopped 735.99-736.45 for 20 minutes (14:25-14:45). 4-6 cent ranges per bar. LH, HL, LL, HL all visible inside the box — geometrically the same structure-pivot shapes the indicator detects during real reversals. Multiple BUY (14:25, 14:30, 14:42) and SELL (14:30 LH) fires in the chop zone. All would be losing trades.

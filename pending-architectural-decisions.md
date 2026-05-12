@@ -99,6 +99,14 @@ Operator's quote frames the constraint: *"This just cannot be traded, not even b
 
 **Operator decision required:** A / B / C / defer.
 
+### Empirical update (2026-05-12 ~15:00 ET)
+
+Same afternoon-chop window (14:25-15:00 ET) compared across timeframes:
+- SPY 30sec: 6-8 fires in 20 min within a 4-6¢ range — all losing trades
+- MES1! 1M: 2 fires in 35 min within a 12-pt range — top and bottom of range only, minimal noise
+
+Operator-validated, paired-timeframe data supports **option A** as effective without code changes. Promotes A from "recommended starting fix" to "empirically validated starting fix." Caveats: single-day data, different instruments (SPY vs MES) — need 3-5 sessions of same-instrument paired observations before confident generalization.
+
 ---
 
 ## Decision 3 — Time-of-Day Timeframe Rule
@@ -147,6 +155,24 @@ Today's empirical pattern (single data point — needs 3-5 sessions confirmation
 Decisions 2 and 3 are entangled — both speak to "the indicator is wrong for the current regime." If the post-close decision is to ship Decision 2-B (Pine chop detection), Decision 3-B becomes natural composition. Until then, A on both makes sense.
 
 **Operator decision required:** A / B / C / defer.
+
+### Empirical update (2026-05-12 ~15:00 ET) — schedule hypothesis
+
+Operator end-of-session proposed schedule (1-day empirical basis):
+
+| Time | Timeframe | Regime expected |
+|---|---|---|
+| 09:30-13:00 ET | 30sec | Directional morning moves |
+| 13:00-15:30 ET | 1m | Afternoon chop |
+| 15:30-16:00 ET | TBD | Power hour — operator judgment |
+
+This is the **starting schedule** to test in option A. Validation criteria after 3-5 sessions:
+- Did the 30sec window catch real morning moves? (Expected yes, observed today)
+- Did the 1m window avoid chop losses? (Today's MES 1M data says yes — 2 fires vs SPY 30sec's 6-8 in same window)
+- Did the power-hour window need a default or stay operator-judgment? (Today doesn't fully cover yet)
+
+If 5 sessions all show clean separation: A is validated, no need to ship B/C.
+If results are mixed (some chop periods missed): graduate to B (Pine-side detection) or C (parallel alerts).
 
 ---
 
