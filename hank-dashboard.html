@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HANK AI Dashboard</title>
+<style>
+  :root {
+    --bg: #080a0f;
+    --bg2: #0d1117;
+    --bg3: #141924;
+    --border: #1e2733;
+    --green: #00ff88;
+    --red: #ff4444;
+    --yellow: #ffd700;
+    --cyan: #00d4ff;
+    --white: #e8eaf0;
+    --dim: #5a6478;
+    --font: 'Courier New', Courier, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--white); font-family: var(--font); font-size: 15px; padding: 12px; min-height: 100vh; }
+
+  /* HEADER */
+  #header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; }
+  #header .logo { color: var(--cyan); font-size: 20px; font-weight: bold; letter-spacing: 3px; }
+  #header .clock { text-align: center; }
+  #header .date { color: var(--dim); font-size: 13px; }
+  #header .time-et { color: var(--yellow); font-size: 24px; letter-spacing: 2px; }
+  #market-status { font-size: 14px; font-weight: bold; padding: 4px 12px; border-radius: 4px; }
+  .status-open { color: var(--green); border: 1px solid var(--green); background: rgba(0,255,136,0.08); }
+  .status-closed { color: var(--red); border: 1px solid var(--red); background: rgba(255,68,68,0.08); }
+  .status-pre { color: var(--yellow); border: 1px solid var(--yellow); background: rgba(255,215,0,0.08); }
+
+  /* SECTION LABELS */
+  .section-label { color: var(--dim); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; padding-left: 2px; }
+
+  /* INSTRUMENT CARDS */
+  #levels-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+  .inst-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .inst-card .inst-name { color: var(--cyan); font-size: 18px; font-weight: bold; margin-bottom: 6px; }
+  .inst-card .price-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .inst-card .price { font-size: 26px; color: var(--white); }
+  .inst-card .vwap-diff { font-size: 13px; }
+  .inst-card .levels-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 8px; margin-bottom: 8px; }
+  .inst-card .lv { color: var(--dim); font-size: 14px; }
+  .inst-card .lv span { color: #cccccc; display: block; font-size: 14px; }
+  .inst-card .bias-row { display: flex; align-items: center; justify-content: space-between; }
+  .inst-card .bias { font-size: 13px; font-weight: bold; padding: 2px 8px; border-radius: 3px; }
+  .bias-bull { color: var(--green); background: rgba(0,255,136,0.1); }
+  .bias-bear { color: var(--red); background: rgba(255,68,68,0.1); }
+  .bias-neutral { color: var(--yellow); background: rgba(255,215,0,0.1); }
+  .vol-pill { font-size: 13px; padding: 2px 8px; border-radius: 3px; }
+  .vol-green { color: var(--green); background: rgba(0,255,136,0.08); }
+  .vol-yellow { color: var(--yellow); background: rgba(255,215,0,0.08); }
+  .vol-red { color: var(--red); background: rgba(255,68,68,0.08); }
+
+  /* STATS ROW */
+  #stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 10px; }
+  .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; }
+  .stat-card .stat-label { color: var(--dim); font-size: 12px; letter-spacing: 1px; margin-bottom: 4px; }
+  .stat-card .stat-val { font-size: 22px; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neu { color: var(--white); }
+
+  /* TABLES */
+  #positions-section, #closed-section { margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; background: var(--bg2); border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  thead tr { background: var(--bg3); }
+  th { color: #00d4ff; font-size: 13px; letter-spacing: 1px; padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border); font-weight: bold; }
+  td { padding: 8px 10px; border-bottom: 1px solid rgba(30,39,51,0.5); font-size: 14px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .no-data { text-align: center; color: #888888; padding: 20px; font-size: 15px; }
+  .tag { font-size: 12px; padding: 2px 6px; border-radius: 3px; font-weight: bold; }
+  .tag-call { color: var(--green); background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.2); }
+  .tag-put { color: var(--red); background: rgba(255,68,68,0.1); border: 1px solid rgba(255,68,68,0.2); }
+  .tag-open { color: var(--cyan); background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.2); }
+  .tag-win { color: var(--green); background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.2); }
+  .tag-loss { color: var(--red); background: rgba(255,68,68,0.08); border: 1px solid rgba(255,68,68,0.2); }
+  .tag-engine { color: var(--dim); background: var(--bg3); border: 1px solid var(--border); }
+
+  /* SIGNALS */
+  #signals-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+  .signal-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+  .signal-card .sig-type { font-size: 14px; font-weight: bold; color: #00d4ff; letter-spacing: 2px; margin-bottom: 6px; }
+  .signal-card .sig-direction { font-size: 20px; font-weight: bold; margin-bottom: 6px; color: #cccccc; }
+  .sig-direction.sig-none { font-size: 15px; }
+  .signal-card .sig-details { color: #aaaaaa; font-size: 14px; line-height: 1.8; }
+  .sig-calls { color: var(--green); }
+  .sig-puts { color: var(--red); }
+  .sig-none { color: var(--dim); font-style: italic; }
+  .sig-meta { font-size: 13px; color: #666666; margin-top: 4px; }
+
+  /* FOOTER */
+  #footer { text-align: center; color: var(--dim); font-size: 13px; padding: 8px; }
+  #footer span { color: var(--cyan); }
+
+  .blink { animation: blink 1.2s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .err { color: var(--red); font-size: 13px; padding: 6px 10px; background: rgba(255,68,68,0.05); border: 1px solid rgba(255,68,68,0.2); border-radius: 4px; margin-bottom: 6px; display: none; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div id="header">
+  <div class="logo">◈ HANK AI</div>
+  <div class="clock">
+    <div class="date" id="date-display">---</div>
+    <div class="time-et" id="time-display">--:--:--</div>
+    <div style="color:var(--dim);font-size:13px;">NEW YORK</div>
+  </div>
+  <div id="session-indicator" style="font-size:14px;font-weight:bold;letter-spacing:2px;color:var(--dim);">---</div>
+  <div id="market-status" class="status-closed">CLOSED</div>
+</div>
+
+<div id="err-banner" class="err">⚠ Dashboard server not responding — start with: node dashboard-server.js</div>
+<div id="market-closed-banner" style="display:none;background:rgba(255,68,68,0.12);border:1px solid var(--red);color:var(--red);text-align:center;padding:8px;border-radius:6px;margin-bottom:10px;font-weight:bold;letter-spacing:2px;">◉ MARKET CLOSED</div>
+
+<!-- ROW 1: LEVELS -->
+<div class="section-label">LEVELS &amp; MARKET</div>
+<div id="levels-row">
+  <div class="inst-card" id="card-SPY"><div class="inst-name">SPY</div><div class="no-data">Loading…</div></div>
+  <div class="inst-card" id="card-QQQ"><div class="inst-name">QQQ</div><div class="no-data">Loading…</div></div>
+  <div class="inst-card" id="card-IWM"><div class="inst-name">IWM</div><div class="no-data">Loading…</div></div>
+</div>
+
+<!-- ROW 2: STATS -->
+<div class="section-label">ACCOUNT</div>
+<div id="stats-row">
+  <div class="stat-card"><div class="stat-label">BALANCE</div><div class="stat-val neu" id="stat-balance">--</div></div>
+  <div class="stat-card"><div class="stat-label">TODAY P&amp;L</div><div class="stat-val" id="stat-today">--</div></div>
+  <div class="stat-card"><div class="stat-label">ALL-TIME P&amp;L</div><div class="stat-val" id="stat-alltime">--</div></div>
+  <div class="stat-card"><div class="stat-label">WIN RATE (TODAY)</div><div class="stat-val neu" id="stat-winrate">--</div></div>
+  <div class="stat-card"><div class="stat-label">PROFIT FACTOR (TODAY)</div><div class="stat-val neu" id="stat-pf">--</div></div>
+</div>
+
+<!-- ROW 3: OPEN POSITIONS -->
+<div id="positions-section">
+  <div class="section-label">OPEN POSITIONS</div>
+  <table>
+    <thead><tr>
+      <th>INSTRUMENT</th><th>DIRECTION</th><th>STRIKE</th><th>EXPIRY</th><th>ENGINE</th><th>ENTRY</th><th>CURRENT EST</th><th>P&amp;L $</th><th>P&amp;L %</th><th>HOLD TIME</th><th>STATUS</th>
+    </tr></thead>
+    <tbody id="open-tbody"><tr><td colspan="11" class="no-data">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<!-- ROW 4: CLOSED TRADES -->
+<div id="closed-section">
+  <div class="section-label" style="margin-top:10px;">TODAY'S CLOSED TRADES</div>
+  <table>
+    <thead><tr>
+      <th>INSTRUMENT</th><th>DIRECTION</th><th>ENGINE</th><th>ENTRY</th><th>EXIT</th><th>P&amp;L $</th><th>P&amp;L %</th><th>DURATION</th><th>RESULT</th>
+    </tr></thead>
+    <tbody id="closed-tbody"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<!-- ROW 5: SIGNALS -->
+<div class="section-label" style="margin-top:10px;">MOO / MOC SIGNALS</div>
+<div id="signals-row">
+  <div class="signal-card" id="moo-card">
+    <div class="sig-type">MOO — MARKET ON OPEN</div>
+    <div class="sig-direction sig-none">No signal yet</div>
+  </div>
+  <div class="signal-card" id="moc-card">
+    <div class="sig-type">MOC — MARKET ON CLOSE</div>
+    <div class="sig-direction sig-none">No signal yet</div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div id="footer">Last updated: <span id="last-updated">--</span> &nbsp;|&nbsp; Positions &amp; levels refresh every 60s &nbsp;|&nbsp; Stats &amp; signals every 5min</div>
+
+<script>
+const API = 'http://localhost:3000/api';
+let levelsData = null;
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+function tickClock() {
+  const now = new Date();
+  const et = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  }).format(now);
+  const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(now);
+  document.getElementById('time-display').textContent = et;
+  document.getElementById('date-display').textContent = dateStr;
+
+  // Market status
+  const [h, m] = et.split(':').map(Number);
+  const mins = h * 60 + m;
+  const el = document.getElementById('market-status');
+  const isOpen = mins >= 9 * 60 + 30 && mins < 16 * 60;
+  if (isOpen) {
+    el.className = 'status-open'; el.textContent = '● OPEN';
+  } else if ((mins >= 4 * 60 && mins < 9 * 60 + 30) || (mins >= 16 * 60 && mins < 20 * 60)) {
+    el.className = 'status-pre'; el.textContent = '◐ EXT HRS';
+  } else {
+    el.className = 'status-closed'; el.textContent = 'CLOSED';
+  }
+
+  // Session indicator
+  const SESSION_BANDS = [
+    [420, 560, 'PRE-FLIGHT', '#ffd700'],
+    [560, 570, 'MOO', '#00d4ff'],
+    [570, 600, 'BULLET-1', '#00ff88'],
+    [600, 690, 'TREND-TIME', '#00ff88'],
+    [690, 720, 'UK-CLOSE', '#ffd700'],
+    [720, 810, 'MIDDAY', '#5a6478'],
+    [810, 900, 'AFTERNOON', '#00d4ff'],
+    [900, 950, 'PRE-MOC', '#ffd700'],
+    [950, 960, 'MOC', '#ff4444'],
+    [960, 1200, 'CLOSED (EXT)', '#5a6478'],
+  ];
+  let sessName = 'CLOSED', sessColor = '#5a6478';
+  for (const [s, e, name, color] of SESSION_BANDS) {
+    if (mins >= s && mins < e) { sessName = name; sessColor = color; break; }
+  }
+  const sessEl = document.getElementById('session-indicator');
+  if (sessEl) { sessEl.textContent = sessName; sessEl.style.color = sessColor; }
+
+  // Market-closed banner
+  const banner = document.getElementById('market-closed-banner');
+  if (banner) banner.style.display = isOpen ? 'none' : 'block';
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function fmt$(n) {
+  if (n == null) return '--';
+  const s = Math.abs(n).toFixed(2);
+  return (n >= 0 ? '+$' : '-$') + s;
+}
+function fmtPct(n) {
+  if (n == null) return '--';
+  return (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+}
+function colorClass(n) { return n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu'; }
+function holdTime(fillTimeMs) {
+  if (!fillTimeMs) return '--';
+  const diff = Math.floor((Date.now() - fillTimeMs) / 1000);
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+function duration(fillTimeMs, exitTimeMs) {
+  if (!fillTimeMs || !exitTimeMs) return '--';
+  const diff = Math.floor((exitTimeMs - fillTimeMs) / 1000);
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function biasClass(bias) {
+  if (!bias) return 'bias-neutral';
+  const b = bias.toLowerCase();
+  if (b.includes('bull')) return 'bias-bull';
+  if (b.includes('bear')) return 'bias-bear';
+  return 'bias-neutral';
+}
+function volClass(pct) {
+  if (pct >= 0.80) return 'vol-green';
+  if (pct >= 0.50) return 'vol-yellow';
+  return 'vol-red';
+}
+function volIcon(pct) {
+  if (pct >= 0.80) return '🟢';
+  if (pct >= 0.50) return '🟡';
+  return '🔴';
+}
+function isMarketOpen() {
+  const et = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false
+  }).format(new Date());
+  const [h, m] = et.split(':').map(Number);
+  const mins = h * 60 + m;
+  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
+
+// ── Levels ─────────────────────────────────────────────────────────────────
+async function fetchLevels() {
+  try {
+    const r = await fetch(`${API}/levels`);
+    if (!r.ok) throw new Error(r.status);
+    levelsData = await r.json();
+    renderLevels();
+    document.getElementById('err-banner').style.display = 'none';
+  } catch {
+    document.getElementById('err-banner').style.display = 'block';
+  }
+}
+
+function renderInstrumentCard(sym, data) {
+  const card = document.getElementById(`card-${sym}`);
+  if (!data || Object.keys(data).length === 0) {
+    card.innerHTML = `<div class="inst-name">${sym}</div><div class="no-data">No data</div>`;
+    return;
+  }
+  const price = data.current ?? data.price ?? data.last ?? '--';
+  const vwap = data.vwap ?? '--';
+  const bias = data.bias ?? 'neutral';
+  const pdh = data.pdHigh ?? data.pdh ?? '--';
+  const pdl = data.pdLow  ?? data.pdl ?? '--';
+  const pdc = data.pdClose ?? data.pdc ?? '--';
+  const volPct = data.volumePct ?? 1.0;
+  const diff = (typeof price === 'number' && typeof vwap === 'number') ? (price - vwap) : null;
+  const diffStr = diff != null ? `<span class="${colorClass(diff)}">${diff > 0 ? '+' : ''}${diff.toFixed(2)}</span> vs VWAP` : '';
+
+  card.innerHTML = `
+    <div class="inst-name">${sym}</div>
+    <div class="price-row">
+      <span class="price">${typeof price === 'number' ? price.toFixed(2) : price}</span>
+      <span class="vwap-diff" style="font-size:13px;color:var(--dim)">${diffStr}</span>
+    </div>
+    <div class="levels-grid">
+      <div class="lv" style="color:#ff4444">PDH<span>${typeof pdh === 'number' ? pdh.toFixed(2) : pdh}</span></div>
+      <div class="lv" style="color:#00ff88">PDL<span>${typeof pdl === 'number' ? pdl.toFixed(2) : pdl}</span></div>
+      <div class="lv" style="color:#aaaaaa">PDC<span>${typeof pdc === 'number' ? pdc.toFixed(2) : pdc}</span></div>
+      <div class="lv">VWAP<span>${typeof vwap === 'number' ? vwap.toFixed(2) : vwap}</span></div>
+    </div>
+    <div class="bias-row">
+      <span class="bias ${biasClass(bias)}">${bias.toUpperCase()}</span>
+      ${isMarketOpen() ? `<span class="vol-pill ${volClass(volPct)}">${volIcon(volPct)} ${(volPct * 100).toFixed(0)}% vol</span>` : `<span class="vol-pill" style="color:var(--dim);background:var(--bg3);">Vol: N/A</span>`}
+    </div>
+  `;
+}
+
+function renderLevels() {
+  if (!levelsData) return;
+  ['SPY', 'QQQ', 'IWM'].forEach(sym => renderInstrumentCard(sym, levelsData[sym]));
+}
+
+// ── Ledger ─────────────────────────────────────────────────────────────────
+async function fetchLedger() {
+  try {
+    const r = await fetch(`${API}/ledger`);
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    renderStats(data);
+    renderOpenPositions(data);
+    renderClosedTrades(data);
+    document.getElementById('last-updated').textContent = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+  } catch {}
+}
+
+function renderStats(data) {
+  const bal = data.balance ?? 0;
+  const start = data.startBalance ?? 25000;
+  const totalPnl = (data.totalPnL ?? 0);
+  const today = (() => {
+    const et = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    return (data.dailyPnL ?? {})[et] ?? 0;
+  })();
+  // Compute today's W/L + profit-factor from trades[] filtered by ET date.
+  // Previously used cumulative ledger.wins / ledger.losses which span the
+  // entire ledger lifetime (1460W/23L observed 2026-05-12), making the
+  // "WIN RATE" tile useless for intraday assessment. Now today-only.
+  const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  let wins = 0, losses = 0, grossWin = 0, grossLoss = 0;
+  (data.trades ?? []).forEach(t => {
+    if (t.status !== 'CLOSED' || t.pnl == null || !t.exitTime) return;
+    const dt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(t.exitTime));
+    if (dt !== todayET) return;
+    if (t.pnl > 0) { wins++;   grossWin  += t.pnl; }
+    else           { losses++; grossLoss += Math.abs(t.pnl); }
+  });
+  const total = wins + losses;
+  const winRate = total > 0 ? (wins / total * 100).toFixed(1) + '% (' + wins + 'W ' + losses + 'L)' : '--';
+  const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '--';
+
+  document.getElementById('stat-balance').textContent = '$' + bal.toFixed(2);
+  const todayEl = document.getElementById('stat-today');
+  todayEl.textContent = fmt$(today);
+  todayEl.className = 'stat-val ' + colorClass(today);
+  const alltimeEl = document.getElementById('stat-alltime');
+  alltimeEl.textContent = fmt$(totalPnl);
+  alltimeEl.className = 'stat-val ' + colorClass(totalPnl);
+  document.getElementById('stat-winrate').textContent = winRate;
+  document.getElementById('stat-pf').textContent = pf;
+}
+
+function renderOpenPositions(data) {
+  const open = (data.trades ?? []).filter(t => t.status === 'OPEN');
+  const tbody = document.getElementById('open-tbody');
+  if (!open.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="no-data">No open positions</td></tr>';
+    return;
+  }
+  tbody.innerHTML = open.map(t => {
+    const fill = t.fillPrice ?? 0;
+    const inst = t.instrument ?? '--';
+    const estLevels = levelsData?.[inst];
+    const atr = estLevels?.atr ?? 0;
+    const curEst = atr > 0 ? parseFloat((atr * 0.4).toFixed(4)) : fill;
+    const pnl = fill > 0 ? (curEst - fill) * (t.contracts ?? 1) * 100 : 0;
+    const pnlPct = fill > 0 ? ((curEst - fill) / fill * 100) : 0;
+    const dir = (t.signal ?? '').toLowerCase();
+    const dirClass = dir.includes('call') ? 'tag-call' : 'tag-put';
+    return `<tr>
+      <td><b>${inst}</b></td>
+      <td><span class="tag ${dirClass}">${(t.signal ?? '--').toUpperCase()}</span></td>
+      <td>${t.strike ?? '--'}</td>
+      <td>${t.expiry ?? '--'}</td>
+      <td><span class="tag tag-engine">${t.engine ?? '--'}</span></td>
+      <td>${fill > 0 ? '$' + fill.toFixed(4) : '--'}</td>
+      <td>${curEst > 0 ? '$' + curEst.toFixed(4) : '--'}</td>
+      <td class="${colorClass(pnl)}">${fill > 0 ? fmt$(pnl) : '--'}</td>
+      <td class="${colorClass(pnlPct)}">${fill > 0 ? fmtPct(pnlPct) : '--'}</td>
+      <td>${holdTime(t.fillTime)}</td>
+      <td><span class="tag tag-open">OPEN</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderClosedTrades(data) {
+  const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  const closed = (data.trades ?? []).filter(t => {
+    if (t.status !== 'CLOSED') return false;
+    const d = (t.exitTime ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(t.exitTime)) : null) ||
+              (t.fillTime ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(t.fillTime)) : null);
+    return d === etToday;
+  });
+  const tbody = document.getElementById('closed-tbody');
+  if (!closed.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-data">No closed trades today</td></tr>';
+    return;
+  }
+  tbody.innerHTML = closed.map(t => {
+    const fill = t.fillPrice ?? 0;
+    const exit = t.exitPrice ?? 0;
+    const pnl = t.pnl ?? 0;
+    const pnlPct = fill > 0 ? ((exit - fill) / fill * 100) : 0;
+    const dir = (t.signal ?? '').toLowerCase();
+    const dirClass = dir.includes('call') ? 'tag-call' : 'tag-put';
+    const resultClass = pnl >= 0 ? 'tag-win' : 'tag-loss';
+    return `<tr>
+      <td><b>${t.instrument ?? '--'}</b></td>
+      <td><span class="tag ${dirClass}">${(t.signal ?? '--').toUpperCase()}</span></td>
+      <td><span class="tag tag-engine">${t.engine ?? '--'}</span></td>
+      <td>${fill > 0 ? '$' + fill.toFixed(4) : '--'}</td>
+      <td>${exit > 0 ? '$' + exit.toFixed(4) : '--'}</td>
+      <td class="${colorClass(pnl)}">${fmt$(pnl)}</td>
+      <td class="${colorClass(pnlPct)}">${fmtPct(pnlPct)}</td>
+      <td>${duration(t.fillTime, t.exitTime)}</td>
+      <td><span class="tag ${resultClass}">${pnl >= 0 ? 'WIN' : 'LOSS'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Signals ─────────────────────────────────────────────────────────────────
+async function fetchSignals() {
+  try {
+    const r = await fetch(`${API}/signals`);
+    if (!r.ok) throw new Error(r.status);
+    const { moo, moc } = await r.json();
+    renderSignal('moo-card', 'MOO — MARKET ON OPEN', moo);
+    renderSignal('moc-card', 'MOC — MARKET ON CLOSE', moc);
+  } catch {}
+}
+
+function renderSignal(cardId, label, sig) {
+  const card = document.getElementById(cardId);
+  const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  if (cardId === 'moo-card') {
+    const sigDate = sig?.ts ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(sig.ts)) : null;
+    if (!sigDate || sigDate !== etToday) {
+      const lastCheck = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+      card.innerHTML = `<div class="sig-type">${label}</div><div class="sig-direction sig-none">No MOO signal today</div><div class="sig-meta">Last check: ${lastCheck} ET</div>`;
+      return;
+    }
+  } else if (!sig) {
+    card.innerHTML = `<div class="sig-type">${label}</div><div class="sig-direction sig-none">No signal yet</div>`;
+    return;
+  }
+  const dir = (sig.direction ?? '').toUpperCase();
+  const signal = (sig.signal ?? '').toUpperCase();
+  const dirClass = signal.includes('CALL') ? 'sig-calls' : signal.includes('PUT') ? 'sig-puts' : 'neu';
+  const thresh = sig.threshold ?? '--';
+  const time = sig.time ?? '--';
+  const lines = (sig.lines ?? []).join('<br>');
+  card.innerHTML = `
+    <div class="sig-type">${label}</div>
+    <div class="sig-direction ${dirClass}">${dir} ${signal}</div>
+    <div class="sig-details">${lines}</div>
+    <div class="sig-meta">Threshold: ${thresh} &nbsp;|&nbsp; Time: ${time} ET</div>
+  `;
+}
+
+// ── Refresh schedule ────────────────────────────────────────────────────────
+function refreshFast() { fetchLevels(); fetchLedger(); }
+function refreshSlow() { fetchSignals(); fetchLedger(); }
+
+// Initial load
+fetchLevels();
+fetchLedger();
+fetchSignals();
+
+// Fast refresh: levels + open positions every 60s
+setInterval(refreshFast, 60_000);
+// Slow refresh: signals + full ledger every 5min
+setInterval(refreshSlow, 5 * 60_000);
+</script>
+</body>
+</html>
