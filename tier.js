@@ -39,7 +39,11 @@ export const TIERS = {
     minEquity:      25_000,
     maxEquity:      50_000,
     contracts:      { low: 1, mid: 2, high: 3 },
-    maxConcurrent:  2,
+    // Bumped 2026-05-12 from 2 → 3 per operator decision. Reason: SPY+IWM
+    // were filling both slots during RTH, capping QQQ out of every cycle
+    // and starving the per-instrument-quality dataset. T1 daily-loss cap
+    // ($2,500) and per-instrument cap (2) still bound the risk envelope.
+    maxConcurrent:  3,
     dailyLossCap:   2_500,
     perInstrumentCap: 2,
   },
