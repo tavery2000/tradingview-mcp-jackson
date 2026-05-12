@@ -34,7 +34,7 @@ import {
   monitorPosition, portfolioTheta, getBurnZoneData,
   getTradingTimeRemaining,
 } from './theta.js';
-import { jEntry, jExit, jError, jAlert, journal } from './journal.js';
+import { jEntry, jExit, jError, jAlert, jGateBlock, journal } from './journal.js';
 import {
   loadTier, saveTier, getPositionSize, getDailyLossCap, getMaxConcurrent,
   getPerInstrumentCap, checkTierUpEligibility, checkTierDown,
@@ -334,6 +334,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   if (_etSec < 34200 || _etSec >= 57600) {
     const reason = `OUT_OF_HOURS — sendOrder rejected at ${_etHMS} ET (gate: 09:30:00–16:00:00)`;
     orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'OUT_OF_HOURS_SENDORDER', { etHMS: _etHMS });
     console.log(`  ${C.red}🛑 OUT_OF_HOURS — sendOrder rejected: ${_etHMS} ET${C.reset}`);
     return { vetoed: true, reason };
   }
@@ -360,6 +361,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   if (dailyPnL <= -effectiveDailyCap) {
     const reason = `Daily loss cap hit ($${Math.abs(dailyPnL).toFixed(0)} / $${effectiveDailyCap}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'DAILY_LOSS_CAP', { dailyPnL, effectiveDailyCap, tier: tierNum });
     console.log(`  ${C.red}🛑 DAILY LOSS LIMIT — no more trades today${C.reset}`);
     // Track daily-cap hit for tier-down trigger 4
     try {
@@ -379,6 +381,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   if (openTrades.length >= tierMaxConcur) {
     const reason = `Max concurrent positions (${openTrades.length}/${tierMaxConcur}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'MAX_CONCURRENT', { open: openTrades.length, cap: tierMaxConcur, tier: tierNum, openInstruments: openTrades.map(t => t.instrument) });
     return { vetoed: true, reason };
   }
   const inst = consensus.instrument || 'SPY';
@@ -386,6 +389,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   if (sameInst >= tierPerInstCap) {
     const reason = `Per-instrument cap (${sameInst}/${tierPerInstCap} on ${inst}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PER_INSTRUMENT_CAP', { sameInst, cap: tierPerInstCap, instrument: inst, tier: tierNum });
     return { vetoed: true, reason };
   }
 
@@ -417,6 +421,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   if (contracts === 0) {
     const reason = `Below-threshold confidence (final=${finalConf?.toFixed(2)} < 0.65) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'BELOW_THRESHOLD_CONFIDENCE', { finalConf, tier: tierNum });
     return { vetoed: true, reason };
   }
   contracts = Math.min(contracts, MAX_CONTRACTS);
