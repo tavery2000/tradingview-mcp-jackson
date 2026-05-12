@@ -189,6 +189,53 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~15:35 ET — REFINED FINAL SYNTHESIS — three independent axes (not one fix)
+
+The 15:20 hypothesis collapsed three findings into a single synthesized fix. The 15:30 observation refined it. This entry locks the final framing for post-close decision-making.
+
+**Today's findings decompose into THREE INDEPENDENT AXES.** They are orthogonal, not substitutable. Full recovery of operator's discretionary trading edge requires all three addressed — but each can be addressed separately on its own timeline.
+
+| Axis | Layer | Fix mechanism | Independent of |
+|---|---|---|---|
+| **1 — Signal timing lag** | Pine code | Fire BUY/SELL at the pivot extreme with sweep+vol+reversal-candle confluence | Timeframe choice (lag scales with bar size — proven 15:30) |
+| **2 — Chop noise filter** | Operator workflow | Switch timeframe by regime (30sec morning, 1M midday) | Pine trigger logic |
+| **3 — Per-engine gating** | HANK gate logic | Stricter gates for low-WR engines (ZONE/LH/HL); pass-through for high-WR engines (BUY/SELL/STRUCTURE) | Pine code AND timeframe — purely about post-signal handling |
+
+**Critical empirical anchor:** the 15:30 MES1! 1M observation (HL at 15:18, BUY fired at 15:30 — 12-min lag) proved Axis 1 and Axis 2 are independent. Lag scales with bar size; changing bar size doesn't fix lag. The Pine fix (Axis 1) is required regardless of which timeframe the operator picks (Axis 2).
+
+**Operator's proof point:** 15:20 MES1! manual scalp at HL → +24% in 2 min. Indicator IS pointing at the right setup; just fires too late to capture the move. A small precision improvement (Axis 1 Pine fix) would have given HANK this trade with similar P&L.
+
+### Decision priority (operator framing)
+
+| Priority | Axis | Why this priority |
+|---|---|---|
+| HIGH | Axis 1 (Pine code) | Single highest-impact change. Recovers entry-timing edge on every trade. ~10-15 LOC Pine. |
+| MEDIUM | Axis 2 (timeframe discipline) | Operator-side, free, can start tomorrow. Validates further with data each session. |
+| MEDIUM | Axis 3 (engine gating) | Requires today's loss-data analysis to calibrate. **16:02 ET analyzer cron fires in ~25 min and produces per-engine continuation rates** — that's the dataset Axis 3 needs. |
+
+### Why "three axes" beats "one synthesized fix" as a framing
+
+- Each axis has independent ship/no-ship decision criteria
+- Each axis can be rolled back independently if it proves wrong
+- Each axis can be tested independently in replay
+- The matrix of operator-decisions is clearer: which axis to ship first based on engineering cost vs immediate value
+- Composition is explicit: shipping 1 + 2 + 3 yields the full recovery; shipping any subset captures part of it
+
+The earlier "single hypothesis" framing was a useful synthesis but it overcollapsed. The operator's 15:35 refinement re-separates them with the right granularity.
+
+### Status of all today's pattern observations under the 3-axis frame
+
+| Pattern observed today | Maps to Axis |
+|---|---|
+| Trend-context blindness (11:55, 13:37) | Axis 1 (timing fix may incidentally help) AND Axis 3 (engine gating for ZONE) |
+| Sweep-vs-confirmation timing (14:15) | Axis 1 — direct |
+| SIGNAL_REVERSAL whipsaw (14:25 chop) | Axis 2 (chop filter) AND Axis 3 (per-engine SIGNAL_REVERSAL handling) |
+| Chop detection required (14:45) | Axis 2 — direct |
+| Timeframe-as-filter (15:00 paired data) | Axis 2 — direct |
+| Pivot-extreme trigger validation (15:20, 15:30) | Axis 1 — direct |
+
+All 4 of today's pattern observations map cleanly into the 3-axis frame. No remainder.
+
 ### 2026-05-12 ~15:30 ET — MES1! 1M — SIGNAL LAG CONFIRMED ACROSS TIMEFRAMES (separates lag-fix from TF-fix)
 
 **Setup:** MES1! 1M power-hour continuation:

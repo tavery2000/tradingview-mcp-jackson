@@ -10,9 +10,25 @@ Cross-references:
 
 ---
 
-## **PRIMARY POST-CLOSE INVESTIGATION** — Synthesized "Pivot-Extreme Trigger + 1M Timeframe" Hypothesis
+## **FINAL FRAMING — THREE INDEPENDENT AXES (locked 2026-05-12 ~15:35 ET)**
 
-Logged 2026-05-12 ~15:20 ET. **Decisions 1 + 2 + 3 below are likely all facets of this single hypothesis.** Investigate this first; the result determines whether Decisions 1/2/3 need to be implemented separately or are subsumed.
+Today's findings decompose into THREE ORTHOGONAL axes. They are independent fixes that compose. Each maps to one or more of the four decisions below.
+
+| Axis | Layer | Maps to Decision | Priority |
+|---|---|---|---|
+| **1 — Signal timing lag** | Pine code | Decision 1 | **HIGH** — single highest-impact change |
+| **2 — Chop noise filter** | Operator workflow | Decisions 2 + 3 | MEDIUM — free, validates further with data |
+| **3 — Per-engine gating** | HANK gate logic | **Decision 4 (NEW)** | MEDIUM — requires analyzer output to calibrate |
+
+**Critical:** the 15:30 MES1! 1M observation (12-min lag on 1M, same mechanism as 30sec 60-90sec lag) proved Axes 1 and 2 are independent. Lag scales with bar size — changing bar size doesn't fix lag. Each axis must be addressed separately.
+
+Earlier framing (15:20) collapsed Axes 1+2 into "one synthesized hypothesis"; that was wrong. The 15:35 refinement re-separates them with correct granularity.
+
+---
+
+## **PRIMARY POST-CLOSE INVESTIGATION** — Pivot-Extreme Trigger Hypothesis (Axis 1 → Decision 1-D)
+
+Logged 2026-05-12 ~15:20 ET; refined 15:35. The synthesis-as-single-fix framing was wrong, but the **specific Pine fix** (sweep+vol+candle confluence trigger at pivot extreme) is still the highest-value engineering change available — it just addresses Axis 1 only, not all three.
 
 ### The hypothesis
 
@@ -258,17 +274,65 @@ If results are mixed (some chop periods missed): graduate to B (Pine-side detect
 
 ---
 
+## Decision 4 — Per-Engine Gating (Axis 3, NEW — added 2026-05-12 ~15:35 ET)
+
+### The choice
+
+**Should HANK apply different gate strictness to different engines based on their empirical win rate?**
+
+Today's data suggests asymmetric engine performance:
+
+| Engine | Today's observed pattern |
+|---|---|
+| BUY | When it wins, wins big (+$80 on the 13:37 SPY example). Mixed in chop. |
+| SELL | Similar to BUY — structural breaks pay when right |
+| STRUCTURE | Consistent with BUY/SELL, similar reliability |
+| HL / LH | High loss rate today (especially in chop/trend-context-blind scenarios) |
+| ZONE | Highest loss rate today on counter-trend / chop fires |
+| HTF | Single HIGH-confidence fire today; outcome mixed |
+
+Hypothesis: gates should be permissive for high-WR engines (BUY/SELL/STRUCTURE), strict for low-WR engines (ZONE/HL/LH). Could manifest as:
+- Different concurrent-position caps per engine (e.g., HL/LH limited to 1 open, BUY/SELL allowed 2)
+- Different confidence thresholds per engine (e.g., HL needs finalConfidence ≥ 1.2, BUY just ≥ 0.65)
+- Different SIGNAL_REVERSAL behavior per engine (HL/LH positions close faster, BUY positions hold longer)
+
+### Implementation options
+
+**A. Per-engine concurrent-position cap.** Add `engineCaps` map in `tier.js`. ZONE/HL/LH limited to 1; BUY/SELL/STRUCTURE limited to tier.perInstrumentCap. ~15 LOC `tier.js` + `paperTrading.js`.
+- **Pros:** Simple. Per-tier configurable. Composes with existing cap system.
+- **Cons:** Doesn't address quality of individual signals — just bounds them.
+
+**B. Per-engine confidence threshold.** Add `engineMinConfidence` map. ZONE/HL/LH require finalConfidence ≥ 1.2 (HIGH-band only); BUY/SELL ≥ 0.65 (LOW band). ~10 LOC.
+- **Pros:** Directly targets low-WR engines without blocking entirely. Operator can tune per-engine.
+- **Cons:** Confidence in webhook payload is just "HIGH"/"MEDIUM" labels — would need to map to numeric ranges in webhook-server.js.
+
+**C. Per-engine SIGNAL_REVERSAL handling.** ZONE/HL/LH positions auto-close on any opposite signal (current behavior). BUY/SELL/STRUCTURE positions require multi-engine opposite confirmation. ~20 LOC webhook-server.js.
+- **Pros:** Addresses the SIGNAL_REVERSAL whipsaw pattern directly. Matches operator's observation that BUY signals are reliable.
+- **Cons:** More complex. Per-engine policy logic.
+
+### Recommendation
+
+**B first** (per-engine confidence threshold). Lowest implementation cost, directly leverages the existing confidence-band system from `tier.js`, easy to roll back per-engine.
+
+**16:02 ET analyzer output is needed to calibrate the thresholds.** Without per-engine continuation-rate data, we'd be guessing at the cutoffs. Wait for tonight's `per-instrument-signal-quality-2026-05-12.md` output before deciding cutoff values.
+
+**Operator decision required:** A / B / C / defer.
+
+---
+
 ## Status of all today's pattern observations
 
-| # | Pattern | Decision register | Recommended starting fix |
-|---|---|---|---|
-| 1 | Trend-context blindness (false BUY/SELL on bull/bear flags) | Not formalized in this doc — see `smc-pro-calibration-log.md` and pattern entry there | Defer until ≥1 paired 1M/30sec session of data exists |
-| 2 | Signal timing lag (sweep vs confirmation) | **Decision 1 above** | A (two-stage signal) |
-| 3 | SIGNAL_REVERSAL whipsaw on chop | Not formalized — see calibration log | ε (multi-engine opposite confirmation) — entangled with Decision 2 |
-| 4 | Chop detection | **Decision 2 above** | A (operator-side timeframe switch) |
-| 5 | Time-of-day timeframe | **Decision 3 above** | A (manual switching as data-gathering) |
+| # | Pattern | Axis | Decision register | Recommended starting fix |
+|---|---|---|---|---|
+| 1 | Trend-context blindness | Axis 1 / Axis 3 | Decision 1 + Decision 4 | A on each |
+| 2 | Signal timing lag (sweep vs confirmation) | Axis 1 | **Decision 1** | A (two-stage signal) — primary engineering work post-close |
+| 3 | SIGNAL_REVERSAL whipsaw on chop | Axis 2 / Axis 3 | Decision 2 + Decision 4 | Axis 2 via Decision 2-A; Axis 3 via Decision 4 |
+| 4 | Chop detection | Axis 2 | **Decision 2** | A (operator-side timeframe switch) — validated today |
+| 5 | Time-of-day timeframe | Axis 2 | **Decision 3** | A (manual switching) — validated today |
+| 6 | Pivot-extreme trigger validation (15:20 + 15:30) | Axis 1 | **Decision 1** | Primary investigation #1 |
+| 7 | Per-engine WR asymmetry (15:35 frame) | Axis 3 | **Decision 4** | B (per-engine confidence threshold) — needs 16:02 analyzer output to calibrate |
 
-Patterns 1 and 3 are not in this doc yet because they're either entangled with Decisions 1-3 (3 with 1) or premature without more data (1 needs paired-TF data).
+All 7 patterns map cleanly into the 3-axis frame. No remainder.
 
 ---
 
