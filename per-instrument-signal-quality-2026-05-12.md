@@ -1,5 +1,24 @@
 # Per-Instrument Signal Quality — 2026-05-12
 
+> **⚠ DATA VALIDITY CAVEAT (added 2026-05-12 22:00 ET):**
+>
+> This report was generated during a session with multiple infrastructure
+> failures: +$1.00 pricing bug (fixed 1cdf278), monitor.js crash + stale
+> spy-levels.json early in session (fixed cfe6aa2), webhook-server.js
+> crash + 4 deliberate restarts, misrouted SPY/MES alerts before per-chart
+> Pine instrument override (fixed 12f5e50).
+>
+> **The per-instrument win rates, continuation rates, and engine
+> breakdowns below MUST NOT be used to inform Decision 4 (per-engine
+> gating) or per-instrument threshold tuning.** "IWM is laggard" /
+> "QQQ leads" / engine-by-engine numbers are noise contaminated by
+> the day's infrastructure issues. Re-measure under clean-session
+> conditions (≥1 day with no mid-session code restarts) before treating
+> these numbers as calibration input.
+>
+> The report is retained as historical record of today's session and
+> as a reference for the analyzer's methodology, not as decision input.
+
 **Run:** 2026-05-12T20:21:36.465Z
 **Source journal:** `logs/journal/journal-2026-05-12.jsonl`
 **Total records in journal:** 6217

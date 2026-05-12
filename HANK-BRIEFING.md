@@ -374,6 +374,14 @@ Today's findings decompose into THREE INDEPENDENT axes — not one fix. The 15:3
 - Architectural-observation logging during live trading was high-value — produced the three-axis frame and Decision 5 cleanly.
 - Pricing-math investigations should run first when symptoms are extreme (-$99 / -$70 in 2 min); often the math is right and the strategy needs adjusting (today's case).
 
+### Post-session addendum — 2026-05-12 22:00 ET
+
+1. **Today's signal-quality data is INVALID for calibration use.** The 392-signal per-instrument analyzer report (`per-instrument-signal-quality-2026-05-12.md`) was generated during a session with multiple infrastructure failures: +$1.00 pricing bug (1cdf278), monitor.js crash and stale spy-levels.json early in session (cfe6aa2), webhook-server.js crash and 4 deliberate restarts, misrouted SPY/MES alerts before per-chart override (12f5e50). Per-instrument win rates and continuation rates **must NOT be used to inform Decision 4 (per-engine gating) or per-instrument tuning** until clean session data from a stable-infrastructure day is available. "IWM is laggard" / "QQQ leads" / engine-breakdown numbers are noise until re-measured under clean conditions.
+
+2. **Briefing data source architecture rebuilt** (tag `may-12-briefing-live-data`, commit `eab5b46`). Briefing now pulls live state via wsServer (port 8080), falls back to snapshot files with smart STALE check (post-07:00 ET today, not previous-calendar-day). Operator can re-enable email distribution Wednesday morning per the startup sequence in this document.
+
+3. **Stale-data-causing-trade-losses hypothesis** was investigated tonight and **REJECTED**. Code trace confirmed `*-levels.json` files are consumed by display/context paths only (briefing.js, dashboard-server.js, daily-bias.js, moc-engine.js, l2.js, monitors as writers) — NOT by the trade dispatch path (webhook-server.js / paperTrading.js / signalConfidence.js / tier.js read zero levels files). Today's losses trace cleanly to identified, already-fixed bugs (`1cdf278` +$1.00 plague, `dfa9b03`/`fabdc14` IWM phantom, `3ad575a` HARD_EXIT theta burn) plus pending architectural decisions (Axis 1 timing lag, Axis 2 chop filter, Axis 3 per-engine gating).
+
 ## Yesterday's Commits (2026-05-11)
 - `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
 - `ffd0d8d` docs(briefing): May 11 EOD update — Webull intel + 3-stage testing ladder
