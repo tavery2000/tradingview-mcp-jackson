@@ -70,7 +70,7 @@ function etTimeString() {
   return new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false });
 }
 
-const VALID_INSTRUMENTS = new Set(['SPY','QQQ','IWM','ES','NQ','ES1!','NQ1!']);
+const VALID_INSTRUMENTS = new Set(['SPY','QQQ','IWM','ES','NQ','ES1!','NQ1!','MES','MNQ','MES1!','MNQ1!']);
 const VALID_DIRECTIONS  = new Set(['CALLS','PUTS']);
 const VALID_CONFIDENCES = new Set(['HIGH','MEDIUM','LOW']);
 
