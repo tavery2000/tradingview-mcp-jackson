@@ -162,6 +162,33 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 
 - **Pattern class:** validation / multi-fire correctness sample.
 
+### 2026-05-12 ~08:35 ET — ES1! 1M — BUY fired early at HL ~7,405 (drew down to 7,398 before resuming)
+
+- **Event:** Indicator fired BUY at HL pivot ~7,405. Price subsequently dropped to LL ~7,398 (operator-marked "blue diamond" as the preferred entry) before resuming the rally into the 7,420 zone.
+- **Indicator state:** §14 `bullHLraw` fired on the HL pivot confirmation. No subsequent §10 zone-break or §13 CHoCH at the LL since the bounce produced no fresh confirmed pivot before resumption.
+- **Operator read:** Should have waited for the LL bounce (blue diamond) before entering — would have captured ~22 pts of move vs ~15 pts from the actual HL fire (7 pt drawdown absorbed first).
+- **Verdict:** §14 collateral cost — known design trade-off. Same class as the §17 ~10:25 ET ES1! example logged 2026-05-11: §14 fires earlier than the optimal entry by design, accepting drawdown risk in exchange for not missing the move when no subsequent retracement occurs (the §15 bull trap case showed this same hold logic being correct).
+- **Pattern class:** §14 collateral cost (recurrence — second observation, paired with the 2026-05-11 10:25 example).
+- **Reference:** `timeframe-behavior-analysis.md` §14, §15 (validation), §17 (collateral).
+
+### 2026-05-12 ~08:35 ET — ES1! 1M — false SELL on inverted hammer in uptrend ~7,418
+
+- **Event:** Indicator fired SELL at ~7,418 on a candle the operator identifies as an inverted hammer. Price continued upward to 7,420+ — no follow-through on the SELL.
+- **Indicator state:** Specific trigger not yet identified — could be §10 supply-rejection (wick up into bear OB + close back below zone bottom), §13 CHoCH SELL (close < lastUnbrokenLow), or §14 LH early-entry. Forensic identification requires Pine state at bar close, which isn't journaled.
+- **Operator read:** Inverted hammer in established uptrend should bias to continuation, not reversal — the long upper wick is buying pressure absorbed by sellers, but the close near low followed by next-bar continuation invalidates the "reversal" interpretation. Indicator's reversal triggers don't currently factor candlestick context.
+- **Verdict:** **potential new pattern class — filter gap on candlestick context**. NOT yet escalated to a §19 section in `timeframe-behavior-analysis.md` because: (a) the specific Pine trigger that fired needs identification, (b) one observation isn't a threshold for architectural action. Flag for forensic review if pattern recurs.
+- **Pattern class:** filter-gap (candidate, unverified).
+- **Reference:** none yet — would be §19 if escalated.
+
+### 2026-05-12 ~08:35 ET — NQ1! 1M — multiple floating signals without clear structural anchor
+
+- **Event:** Operator observed several signal labels (BUY at LL ~29,120, SELL at ~29,250, BUY at HL ~29,210, SELL at ~29,335 LH) appearing on NQ1! chart without the structural setup the operator expected.
+- **Operator hypothesis:** TradingView chart-reset behavior — when TV re-renders a chart (zoom, refresh, instrument switch), Pine `var` state machines can replay history and place labels at bars that wouldn't have triggered alerts in real-time. Visual artifact, not a webhook fire.
+- **Verdict:** **flagged for verification only.** Key question: did any of these "floating" labels generate webhook POSTs? If yes, the disconnect is real (alert state vs chart state divergence). If no (labels visible but no webhook traffic), it's purely a TV render artifact and the autonomous pipeline is unaffected.
+- **How to verify:** check the webhook server console output / ngrok inspector at 08:35 ET for any inbound NQ1! payloads. If none received, this is render-only.
+- **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
+- **Reference:** none — verification step before classification.
+
 ---
 
 ## Running Tally
@@ -175,12 +202,14 @@ By pattern class, all-time:
 | §11 (per-instrument asymmetry) | ✓ Closed | 0 | Subsumed by §1–§8 |
 | §12 (LIVE intra-bar timing) | ✓ Shipped 2026-05-10 | 0 | `liveBullBreakRaw`/`liveBearBreakRaw` |
 | §13 (detection–signal gate gap) | ✓ Shipped 2026-05-10 | 0 | Event-type-aware sensitivity tiers |
-| §14 (HL/LH early-entry) | ✓ Shipped 2026-05-11 | 0 | `bullHLraw`/`bearLHraw` in `bullBreak` chain |
+| §14 (HL/LH early-entry) | ✓ Shipped 2026-05-11 | **2 collateral-cost observations** | 2026-05-11 10:25 ES SELL @ top; 2026-05-12 08:35 ES BUY @ HL drew-down 7pts before resuming. Both confirm §14 fires earlier than optimal entry by design (paired with §15 win to keep balanced) |
 | §15 (filter validation — bull trap) | ✓ Logged | 0 | Design working — silence on weak evidence |
 | §16 (trend-state pollution) | ✓ Path A (HTF filter) + Path C (auto-recovery) shipped 2026-05-11 | 0 | |
 | §17 (HTF filter collateral cost) | ✓ Path C shipped 2026-05-11 | 1 re-occurrence 20:25 ET 2026-05-11 — needs HTF state confirmation | Path C should mitigate but may not have triggered if no broken-pivot reclaim happened |
 | **§18 (demand-zone-breakdown — NEW)** | — | **1 (open)** | First observed 2026-05-11 20:35 ET MES1! |
-| Config issues (TV alert + webhook allow-list) | — | **2 (open)** | MES1! TV alert not configured; MES1! not in webhook allow-list |
+| **Filter-gap (candlestick context — CANDIDATE)** | — | **1 (open, unverified)** | 2026-05-12 08:35 ES SELL on inverted hammer in uptrend. Specific Pine trigger not yet identified. Would escalate to §19 on recurrence. |
+| **TV-render-artifact (suspected)** | — | **1 (verification pending)** | 2026-05-12 08:35 NQ1! floating signals — operator hypothesis is chart-reset replay. Verify by checking webhook server logs for inbound NQ1! payloads at 08:35 ET |
+| Config issues (TV alert + webhook allow-list) | MES1! TV alert wired ✓ 2026-05-11; MES1!/MNQ1! webhook allow-list wired ✓ 2026-05-12 c73b666 | **1 (open)** | MNQ1! TV alert still pending operator setup |
 
 ---
 
