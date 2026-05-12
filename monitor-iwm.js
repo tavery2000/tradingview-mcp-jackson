@@ -946,14 +946,31 @@ async function executeSwingEntry(swingState) {
   const reqId = orderGate.createRequest({ signal, engine: 'SWING' });
   const fill  = await sendOrder({ signal, engine:'SWING', confidence:'HIGH', finalConfidence: stack.finalConfidence, multipliers: stack.breakdown, instrument:'IWM', strike, expiry, entryPrice:optionMid, contracts:1 }, reqId, null);
   if (!fill.vetoed) {
-    activeSwing.IWM = { requestId: reqId, status: 'OPEN', strike, expiry, optionEntry: optionMid };
+    // Capture `entry` (underlying price) alongside optionEntry — executeSwingExit
+    // needs this to convert underlying-target exit prices back to option space.
+    // Fix paired with the bug correction in executeSwingExit below.
+    activeSwing.IWM = { requestId: reqId, status: 'OPEN', entry: price, strike, expiry, optionEntry: optionMid };
     console.log(`  [SWING] IWM ${signal} $${strike} ${expiry} — paper entry $${optionMid?.toFixed(2)}`);
   }
 }
 
 function executeSwingExit(swingState) {
   if (!closePosition || !activeSwing.IWM.requestId || activeSwing.IWM.status !== 'OPEN') return;
-  closePosition(activeSwing.IWM.requestId, swingState.exitPrice, swingState.exitReason);
+
+  // BUG FIX 2026-05-12: swingState.exitPrice is the UNDERLYING IWM price at
+  // target/stop, NOT an option premium. Passing it directly to closePosition
+  // caused phantom $28K profits when underlying (~282) was treated as option
+  // exit price vs entry (~0.12). Mirror the SPY fix at monitor.js:2282-2298 —
+  // convert underlying move to option-space using a delta approximation.
+  const active = activeSwing.IWM;
+  const SWING_DELTA     = 0.50;
+  const underlyingMove  = (swingState.exitPrice ?? active.entry) - (active.entry ?? 0);
+  const dirMult         = swingState.direction === 'LONG' ? 1 : -1;
+  const optionEst       = Math.max(0.01, (active.optionEntry ?? 0.10) + underlyingMove * dirMult * SWING_DELTA);
+  const optionExitPrice = parseFloat(optionEst.toFixed(4));
+
+  closePosition(active.requestId, optionExitPrice, swingState.exitReason);
+  console.log(`  [SWING] IWM closed — ${swingState.exitReason} | underlying $${swingState.exitPrice?.toFixed(2)} → option est $${optionExitPrice}`);
   activeSwing.IWM = { requestId: null, status: null };
 }
 
