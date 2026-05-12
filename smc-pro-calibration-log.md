@@ -189,6 +189,30 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~11:55 ET — SPY 30sec — FALSE BUY on bear-flag consolidation
+
+- **Event:** Post-NY mid-morning. Earlier sequence: HH ~11:45-11:50 → SELL at LH ~733.50 ~11:54 (correct fade). Indicator then fired **BUY at ~732.85 (~11:55)** in what looked structurally like an HL pivot. Price did NOT continue up — actually dropped to 732.60. Operator-marked with red-down arrow as a fake signal.
+- **Indicator behavior:** §14 HL early-entry fired on what was actually a bear-flag consolidation rather than a reversal HL. The small green bars between the SELL and the BUY trigger formed the HL geometry that §14 detects, but the larger context (clear downtrend continuation after a clean SELL fire 90 seconds earlier) said "bear flag = continuation," not "reversal."
+- **Operator's read:** *"HTF filter SHOULD catch this — flag = continuation = should require break of LH before firing BUY."*
+- **Operator action:** Did NOT take. Manual chart-read correctly identified as fake. (Tape-reader vs indicator: tape-reader won.)
+- **Diagnosis (preliminary):** Three possibilities, can't disambiguate without HTF state at fire time:
+  - **(a)** HTF filter OFF on this chart — §14 fires unconditionally on any HL/LH. Operator chose Path A (HTF filter ON) on 2026-05-11 to mitigate §16, but the SPY 30sec chart may have been reset / setting may not have stuck.
+  - **(b)** HTF filter ON but HTF bias wasn't Bearish at 11:55 — HTF (1H by default) lags by minutes, and the morning rally + recent chop could leave HTF showing Bullish even though the immediate 30sec trend is down. This is the §17 collateral-cost mirror image: where §17 was "HTF filter blocks legitimate reversals," this case would be "HTF filter ALLOWS what it shouldn't because the lag works against us."
+  - **(c)** §14 has a gap: HL-pivot detection is purely geometric (lower low, higher pivot) — doesn't differentiate bear-flag consolidation from reversal-HL. Adding a context filter (e.g., "fire HL only if N bars since last SELL is large enough that we're not still in the same down leg") would catch this case.
+- **Verdict:** **FALSE BUY — bear-flag consolidation misread.** Single observation; not yet a pattern threshold. If recurs, escalates to a §19 or §20 entry in `timeframe-behavior-analysis.md` depending on which of (a)/(b)/(c) the forensic shows.
+- **Pattern class:** §14 false-fire (candidate) / context-filter-gap.
+- **Reference:** `timeframe-behavior-analysis.md` §14 (HL early-entry), §16/§17 (HTF filter trade-offs).
+
+### 2026-05-12 ~11:55 ET — Pine instrument override deployment status — RESOLVED via journal evidence
+
+- **Operator observation:** Alert toast at ~11:55 ET showed *"Alert on ES1!"* with `"instrument":"ES1!"` in payload. Operator interpreted as Pine override fix (`12f5e50`) not yet active.
+- **Resolution from journal data (pine-alert.inbound records, post-`82681ce` deployment at 11:54 ET):**
+  - SPY chart is correctly emitting `instrument: SPY` on every alert (verified 11:57+ records: SPY at $732.xx, the actual SPY price range).
+  - ES1! records ARE present in the journal but all have prices in the $7370s range — that's the actual ES1! futures price level. **Those are legitimate ES1! signals from the ES1! chart, NOT mislabeled SPY signals.**
+  - The "Alert on ES1!" toast the operator saw at 11:55 ET was the ES1! chart's alert firing near-simultaneously with the SPY chart's BUY. Both charts have active alerts; both produce toast notifications. Operator's two charts' toasts overlapped in attention window.
+- **Verdict:** **Override deployed correctly. No mislabel.** Each chart fires alerts with its own instrument label. The Pine fix (`12f5e50`) + webhook inbound logging (`82681ce`) together prevented the original mislabel AND made the verification deterministic in ≤5 minutes.
+- **Pattern class:** config verification — resolved as working-as-designed. Surface visual artifact (two toasts overlapping), not an actual bug.
+
 ### 2026-05-12 ~10:30 ET — MES1! 1M — partial coverage of 27-pt breakdown leg
 
 - **Event:** Post-NY-open. HH ~7,415 → LH ~7,412 (operator-marked) → dump to LL ~7,385 over ~30 minutes (-27 MES pts). Then BUY at LL bounce ~7,385 (operator circled with red arrow).
