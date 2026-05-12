@@ -16,15 +16,17 @@ that's the webhook's job now.
 
 ## File Locations
 C:\Users\tomav\tradingview-mcp-jackson\
-- **smc-pro-futures.pine**  — Pine v5 SMC indicator (BOS, CHoCH, sweeps, HL/LH, FVG, alerts)
-- **webhook-server.js**     — Pine alert receiver (port 9001, POST /pine-alert)
+- **smc-pro-futures.pine**  — Pine v5 SMC indicator (BOS, CHoCH, sweeps, HL/LH, FVG, alerts) + per-chart instrument override
+- **webhook-server.js**     — Pine alert receiver (port 9001, POST /pine-alert). Hardened 2026-05-12: uncaughtException + unhandledRejection handlers, inbound-alert journaling, sendOrder try/catch
+- **webhook-supervisor.js** — Auto-restart wrapper for webhook-server.js. **Run this instead of webhook-server.js directly** — catches deaths, logs cause, respawns within 2s
 - **monitor.js**            — Mag6 + SPY context refresher (CDP via port 9222)
 - **monitor-qqq.js**        — QQQ standalone monitor (W3 components + chart engines)
 - **monitor-iwm.js**        — IWM standalone monitor (Mag-3 components + chart engines)
-- **paperTrading.js**       — sendOrder / closePosition / exits / tier sizing
+- **paperTrading.js**       — sendOrder / closePosition / exits / tier sizing. Hardened 2026-05-12: defensive simulateFill (handles partial quote objects), underlyingPrice trade-record alias, every sendOrder veto path emits jGateBlock
 - **signalConfidence.js**   — applyMultipliers + gate helpers + booster math
 - **multipliers.js**        — stackConfidence (base × time × bias × macro4H)
-- **journal.js**            — jSignal/jGateBlock/jEntry/jExit append-only audit log
+- **journal.js**            — jSignal/jGateBlock/jEntry/jExit/jAlert/jError append-only audit log
+- **tier.js**               — Tier sizing + dailyLossCap + maxConcurrent (T1 bumped 2→3 on 2026-05-12)
 - **news.js**               — Financial Juice RSS, SEC EDGAR, TTS alerts
 - **moc-engine.js**         — MOC trading engine (15:50 confirmation, 15:59 hard exit)
 - **moo-moc.js**            — MOO/MOC FJ imbalance producer (writes moc-data.json)
@@ -36,11 +38,18 @@ C:\Users\tomav\tradingview-mcp-jackson\
 - **theta.js**              — Theta/IV engine
 - **dashboard-server.js**   — Web UI server (port 3000)
 
+Ops tooling (added 2026-05-12):
+- **reconcile-ledger.js**   — Read/write tool that detects and corrects underlying-as-option-exit-price bug in paper-ledger.json. Idempotent (skips already-reconciled trades). Writes timestamped backup before mutating
+- **analyze-signals.js**    — Per-instrument signal-quality EOD analyzer (16:02 cron). Reads journal + ledger, emits `per-instrument-signal-quality-{YYYY-MM-DD}.md`
+- **_test_hierarchy.js**    — 65 assertions covering chart-engine set, boosters, gates
+
 Setup / reference docs:
 - **TV-ALERT-SETUP.md**     — One-time per-chart TV alert configuration checklist
 - **signal-hierarchy-plan.md** — Original Tuesday chart-first migration plan (pre-Path 2)
 - **signal-hierarchy-current-state.md** — Live audit + E.5/E.6 decisions
-- **_test_hierarchy.js**    — 65 assertions covering chart-engine set, boosters, gates
+- **smc-pro-calibration-log.md** — Operator-driven empirical calibration journal (one entry per session observation)
+- **paper-trading-pnl-investigation-2026-05-12.md** — Forensic on the IWM +$28K phantom (fixed dfa9b03 + fabdc14)
+- **options-pricing-pnl-investigation-2026-05-12.md** — Forensic on the +$1.00 SIGNAL_REVERSAL pattern (fixed 1cdf278)
 
 ## Dashboard
 http://localhost:3000
@@ -48,10 +57,11 @@ http://localhost:3000
 ## How to Start
 
 **Pine-as-Primary pipeline (required):**
-- Window A: `node webhook-server.js`         — Pine alert receiver (port 9001)
+- Window A: `node webhook-supervisor.js`     — Auto-restarting Pine alert receiver wrapper (NOT `webhook-server.js` directly). Supervises a child webhook-server.js process, respawns within 2s on any death, logs cause to `logs/webhook-supervisor.log`. Use this — `webhook-server.js` directly is operationally fragile (died 3x during 2026-05-12 session, each time costing ~30 min of dispatch outage before manual restart)
 - Window B: `ngrok http 9001`                — public HTTPS tunnel to webhook
 - TV alerts must be configured per `TV-ALERT-SETUP.md` (one alert per chart, 
   condition = "Any alert() function call", webhook URL = current ngrok URL)
+- Per-chart Pine override: indicator settings → "Webhook Payload" → "Instrument override" — set explicitly per chart (SPY chart → SPY, ES1! chart → ES1!, etc.) to prevent syminfo.ticker mislabel observed 2026-05-12 ~11:40 ET
 
 **Monitors (context + exits, no dispatch under PINE_PRIMARY):**
 - Window 1: `node monitor.js`
@@ -113,9 +123,9 @@ LIVE signals use `alert.freq_once_per_bar` (intra-bar fires); all others use
 
 ## Trading Rules
 - Instruments: SPY, QQQ, IWM, ES1!, NQ1!, MES1!, MNQ1! (full allow-list in `webhook-server.js:73`: SPY/QQQ/IWM/ES/NQ/ES1!/NQ1!/MES/MNQ/MES1!/MNQ1! — both bare and continuous-front-month forms accepted)
-- Account: $25,000 paper
-- Max positions: 2 concurrent (3 when W3 ≥ 4)
-- Max per instrument: 1 open
+- Account: $25,000 paper (T1 Foundation tier)
+- **Max positions: 3 concurrent (T1, bumped from 2 on 2026-05-12 — allows SPY+QQQ+IWM to run in parallel)**
+- Max per instrument: 2 open
 - Max daily loss: $2,500
 - RTH gate: trades only between 09:30 and 15:45 ET (defense-in-depth in
   paperTrading.sendOrder + webhook-server.js)
@@ -178,15 +188,68 @@ Three rounds of Webull support specs failed against `api.webull.com` with our ve
 - Backup remote → `file:///C:/Users/tomav/hank-backup.git` (autonomous backup)
 - Today's work lives on branch `pine-primary` on the fork (25 commits ahead of fork's main, which still tracks Lewis's upstream)
 
-**Tags:**
-- `pre-task-7` — rollback point before today's hierarchy work
+**Tags (chronological, newest last):**
+- `pre-task-7` — rollback before hierarchy work
 - `may-9-hygiene` — prior week
-- `may-11-hierarchy` — finish Path 2 dispatch strip + macro4H journal plumbing
-- `may-11-pine-primary` — Pine-as-Primary, webhook owns all chart-engine dispatch
+- `may-11-hierarchy` — Path 2 dispatch strip + macro4H plumbing
+- `may-11-pine-primary` — Pine-as-Primary, webhook owns dispatch
 - `may-11-webull-uat-cleanup` — drop UAT endpoint, prod-only
-- `may-11-webull-live-prestage` — live order placement scaffolding per 2026-05-11 Webull spec (HEAD)
+- `may-11-webull-live-prestage` — live order placement scaffolding per Webull spec
+- `may-12-spy-levels-write-fix` — `_spyVolumePct` typo fix (file never wrote since first commit)
+- `may-12-emergency-dispatch-fix` — webhook-supervisor.js auto-restart wrapper
+- `may-12-webhook-server-crash-fix` — three webhook-server.js hardenings (uncaught handlers, inbound journal, sendOrder try/catch)
+- `may-12-pine-instrument-override` — per-chart instrument override input (prevents syminfo.ticker mislabel)
+- `may-12-signal-reversal-pnl-fix` — defensive simulateFill + underlyingPrice trade alias (fixes deterministic +$1.00 exits)
+- `may-12-veto-journaling` — jGateBlock on every sendOrder veto path (visibility into MAX_CONCURRENT / DAILY_LOSS_CAP / etc.)
+- `may-12-tier1-maxconcur-3` — T1 maxConcurrent bumped 2 → 3 (HEAD)
 
-## Today's Commits (2026-05-11)
+## Today's Commits (2026-05-12)
+
+Ten commits today, all addressing pipeline stability / observability / P&L accuracy. None are "feature work" — all are hardening or bug fixes uncovered during live trading hours.
+
+- `2f28ab3` config(tier): T1 maxConcurrent 2 → 3 (allow SPY+QQQ+IWM parallel)
+- `4881865` fix(paperTrading): journal every sendOrder veto via jGateBlock (visibility)
+- `1cdf278` fix(paperTrading): defensive simulateFill + underlyingPrice trade alias (fixes +$1.00 deterministic exits)
+- `c11a38a` docs(calibration): SPY false BUY at 11:55 + override-toast resolved
+- `12f5e50` feat(pine): per-chart instrument override input (prevents syminfo.ticker mislabel)
+- `82681ce` fix(webhook): three hardenings (uncaughtException, inbound journal, sendOrder try/catch)
+- `d012e47` feat(ops): webhook-supervisor.js auto-restart wrapper
+- `cfe6aa2` fix(monitor): spy-levels.json `_spyVolumePct` typo (file silent for weeks)
+- `fabdc14` tools: reconcile-ledger.js + paper-trading P&L investigation
+- `dfa9b03` fix(swing): underlying→option conversion in monitor-iwm.js/monitor-qqq.js executeSwingExit (fixes IWM +$28K phantom)
+
+### Bugs uncovered and fixed today
+
+| # | Bug | Symptom | Root cause | Fix |
+|---|---|---|---|---|
+| 1 | IWM SWING exit underlying-as-option | +$28,246.93 phantom on a 1-contract paper trade | `monitor-iwm.js:956` passed `swingState.exitPrice` (underlying price) to `closePosition` which treats it as option premium. monitor.js had the SPY fix at line 2287-2298; never propagated to QQQ/IWM | `dfa9b03` ports the SWING_DELTA=0.50 conversion. `fabdc14` reconciles the ledger |
+| 2 | spy-levels.json never updates | Briefing/dashboard/ASK-HANK reading 5-day-stale SPY data | `_spyVolumePct` (extra "ume") typo at `monitor.js:2943-2944`; ReferenceError silently swallowed by wrapping try/catch | `cfe6aa2` — use the correct `_spyVolPct` |
+| 3 | webhook-server.js silently dies | Multi-minute dispatch outages, manual restart required each time | Process exits with no journal trail (terminal-close, OS event, or silent throw) | `d012e47` adds webhook-supervisor.js (auto-restart). `82681ce` adds uncaughtException/unhandledRejection/sendOrder-try-catch handlers so future deaths log to journal |
+| 4 | TV alert payload mislabel | SPY chart emitted `"instrument":"ES1!"` in webhook payload | `syminfo.ticker` resolution between chart and alert context | `12f5e50` adds per-chart override input (defaults to AUTO, operator sets explicitly per chart) |
+| 5 | +$1.00 deterministic SIGNAL_REVERSAL exits | Every webhook SIGNAL_REVERSAL exit closed at exactly +$1.00, regardless of underlying direction | Two compounding: simulateFill produced NaN→null fillPrice from partial `{mid}` quote object; SIGNAL_REVERSAL read `oppositeOpen.underlyingPrice` which didn't exist (actual field is `entryUnderlying`) | `1cdf278` — defensive simulateFill + underlyingPrice alias on trade record |
+| 6 | sendOrder vetoes invisible | "Why didn't QQQ fire?" took probe-and-guess to answer | sendOrder veto paths returned `{vetoed:true, reason}` to caller but didn't journal | `4881865` — jGateBlock on all 5 veto paths with structured detail (open instruments, caps, tier) |
+
+### Today's operational pattern — Code-fix → child-restart cycle
+
+Most fixes to paperTrading.js / webhook-server.js required restarting the webhook child process (which has the JS modules in memory) for the fix to activate. Pattern:
+1. Make code change, commit, push
+2. `Stop-Process` the webhook-server.js child (find via `Get-Process node`)
+3. Supervisor catches the death within 2s, respawns with fresh module imports = fix loaded
+4. Verify with a probe POST to `/pine-alert` or wait for next real signal
+
+This cycle happened 4 times today. Each restart created ~2-5s of dispatch downtime. No alternative — Node modules don't hot-reload.
+
+### Today's recurring blind spot — operator over-attribution
+
+Three "EMERGENCY: fix N stacked bugs" tasks today contained bugs that were already fixed or weren't bugs:
+- IWM +$28K bug was real (fix held)
+- spy-levels.json was real (one-line typo)
+- The +$1.00 was real and got fixed
+- BUT "QQQ DEAD," "SPY position stuck," "fixes were too aggressive" — all journal-verifiable as NOT-bugs before code changes were attempted
+
+Pattern: stress-bundling 3 things, two of which need verification not fixing. Resolution: run journal diagnostics first, push back on misattributions, fix what's actually real. The veto-journaling hardening (`4881865`) is largely about preventing this in the future — "why didn't this fire?" should resolve via `grep GATE_BLOCK` not via 30 minutes of cross-instrument investigation.
+
+## Yesterday's Commits (2026-05-11)
 - `c73b666` chore(webhook): add MES/MNQ to instrument allow-list (enables Micro E-mini futures payloads per project_1k_scaleup_plan)
 - `ffd0d8d` docs(briefing): May 11 EOD update — Webull intel + 3-stage testing ladder
 - `b5d4443` feat(webull): pre-stage live order placement per 2026-05-11 spec (HMAC-SHA256 for trade scope, trade-token flow, body schema migration to flat camelCase with tickerId, lookupOptionContractTickerId helper, --trade-token-login CLI)
