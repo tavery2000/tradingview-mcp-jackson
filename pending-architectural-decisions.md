@@ -67,6 +67,29 @@ Either way: empirical answer using today's data, no risk of premature implementa
 - Pivot-extreme entry on 30sec gets trapped but on 1M works → confirms timeframe-as-trap-filter, hypothesis valid with TF caveat
 - Pivot-extreme entry works on both timeframes → strongest result, ship the change and update default TF guidance
 
+### Refinement from 15:30 ET MES1! 1M observation
+
+The 15:30 observation (MES1! HL at 15:18, BUY fired at 15:30 — 12-minute gap on **1M**) refines the synthesis:
+
+**The lag is NOT a timeframe choice.** Same lag mechanism, different absolute time:
+- 30sec: 60-90 sec lag (2-3 bars from sweep to CHoCH fire)
+- 1M: 3-12 min lag (3-12 bars from pivot to CHoCH fire — scales with bar size)
+
+**Implication:** Decisions 1, 2, 3 are **orthogonal**, not substitutable:
+
+| Decision | Axis | Composes with others? |
+|---|---|---|
+| 1 (timing lag) | Pine pivot-extreme trigger | Yes — independent of timeframe |
+| 2 (chop filter) | Operator workflow / Pine input | Yes — independent of trigger |
+| 3 (time-of-day) | Operator workflow | Composes with 2 |
+
+The synthesis collapses **WHERE the change is made** (Pine code + operator workflow), not **WHETHER each axis needs addressing**. The Pine fix (sweep + volume + reversal-candle confluence trigger at the pivot extreme) is required regardless of timeframe choice. The 1M timeframe is useful for chop filtering but does NOT solve the lag.
+
+**Updated recommendation:**
+- Ship Decision 1 fix (pivot-extreme trigger with confluence) as a Pine code change — primary post-close engineering work
+- Adopt Decision 2-A + 3-A (operator-side timeframe switching by schedule) as a workflow — no code, validates today's chop-filter hypothesis with more data
+- Together they recover both the entry-timing edge AND the chop-noise filter
+
 ---
 
 ## Decision 1 — Signal Timing Lag (Sweep vs Confirmation)

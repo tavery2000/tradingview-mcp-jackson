@@ -189,6 +189,55 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~15:30 ET — MES1! 1M — SIGNAL LAG CONFIRMED ACROSS TIMEFRAMES (separates lag-fix from TF-fix)
+
+**Setup:** MES1! 1M power-hour continuation:
+- HL formed ~15:18 ET at 7,408 (operator-circled)
+- Price ran 7,408 → 7,420 = +12 MES pts
+- BUY fired ~15:30 ET at 7,415 — **12 minutes after HL formed, 7+ pts of move already gone**
+
+**Operator quote:** *"Now the buy signal just fired and look how long that took."*
+
+**Critical architectural insight:** This is on **1M**, not 30sec. The earlier sweep-lag observation (14:15, SPY 30sec, 60-90sec lag) was the SAME mechanism — just on a different timeframe. The lag scales WITH the bar size: longer bars → longer absolute lag.
+
+**Cross-timeframe validation table:**
+
+| TF | Observation | Lag mechanism | Absolute lag |
+|---|---|---|---|
+| 30sec | SPY 14:10 sweep (blue diamond) vs BUY (14:13) | bullCHOraw waits for close > lastUnbrokenHigh, ~2-3 bars post-sweep | 60-90 sec |
+| 1M | MES 15:18 HL vs BUY (15:30) | Same mechanism — pivot confirmation + structural close, ~3-12 bars post-extreme | 3-12 min |
+
+**The lag is NOT a timeframe choice.** It's Pine signal-trigger logic firing at structural confirmation rather than at the pivot extreme. **Timeframe affects chop filtering. Pivot-extreme firing affects entry timing. They are orthogonal axes.**
+
+### Refined synthesis (from 15:20 SPY+MES → 15:30 MES update)
+
+The earlier synthesized hypothesis collapsed three findings into "fire at pivot extreme + 1M timeframe." The 15:30 observation refines that:
+
+| Concern | Fix axis | Independent? |
+|---|---|---|
+| Signal timing lag | Pine pivot-extreme trigger | Yes — independent of timeframe |
+| Chop noise | Operator timeframe choice (30sec vs 1M) | Yes — independent of trigger |
+| Combined effect | Both fixes compose: precise entry on appropriate TF | — |
+
+**Implication:** the Pine fix (sweep+vol+candle confluence trigger at the pivot extreme) is required regardless of which timeframe the operator picks. The timeframe choice remains useful for chop filtering but does not solve the lag. Decision 1 in the register is independent of Decisions 2/3 — they ALL need to be addressed, just via separate levers.
+
+### 2026-05-12 ~15:20 ET — MES1! 1M — operator +24% on the manual setup, indicator labeled it but late (PROOF POINT)
+
+**Setup:** MES1! 1M power-hour. Operator-marked HL at ~7,408 (entry zone) → HH at ~7,422 (red dot exit), ~14 MES pts in ~2 min.
+
+**Trade taken (operator):** MES CALLS at HL formation, exited at HH, +24% gain.
+
+**Indicator behavior on this trade:** BUY label fired at the HL at ~15:00 (the second BUY in a recent HL/HL sequence) — but at the late-confirmation point, not at the structural HL bar itself.
+
+**Operator quote:** *"Those are the trades Hank missed but we're getting much better."*
+
+**Why this is a proof point for the synthesized hypothesis:**
+- Indicator IS pointing in the right direction (BUY, correctly)
+- Indicator IS firing on the correct structural setup (HL formation)
+- Gap is purely WHERE on the bar pattern Hank fires — 2-3 bars late vs the structural extreme bar
+- A small precision improvement (pivot-extreme trigger) would have given HANK this trade with similar P&L
+- This validates that the synthesis isn't about WHETHER to fire — it's about WHEN, at the same setups Hank already detects correctly
+
 ### 2026-05-12 ~15:20 ET — SPY 1M + MES 1M — SYNTHESIZED HYPOTHESIS: pivot-extreme trigger + 1M timeframe
 
 **Setup observed:** SPY 1M + MES 1M afternoon comparison window 12:00-15:25 ET.
