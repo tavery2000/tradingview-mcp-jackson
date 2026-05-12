@@ -337,7 +337,17 @@ All 8 patterns map cleanly into the 3-axis frame. No remainder.
 
 ---
 
-## Decision 5 — HARD_EXIT Near-Close Behavior (NEW — added 2026-05-12 ~16:00 ET)
+## Decision 5 — HARD_EXIT Near-Close Behavior (NEW — added 2026-05-12 ~16:00 ET — **SHIPPED 2026-05-12 ~16:35 ET**)
+
+### Resolution
+
+**Investigated (Option B) and shipped (Option A) in same session.**
+
+- **Pricing math investigation:** Black-Scholes pricing chain in `monitor.js:3013-3026` → `theta.js:98` verified correct. Frozen entryIV used as σ (slightly punitive vs real-market vol ramp into close, but qualitatively right). Manual BS calc for the PUTS HTF trade (S=737.81, K=737, T=2min, σ=1.08) returned ~$0.35; simulator returned $0.497 — same ballpark, consistent with slight underlying movement at exit. **No bug.** Losses are real theta-burn on near-ATM 0DTE entered 15-16 min before close. Hypothesis 1 (artifact) REJECTED; Hypothesis 2 (real-loss-from-late-entry) CONFIRMED.
+
+- **Gate shipped (Option A):** `webhook-server.js` — LATE_DAY_ENTRY_0DTE gate at 15:30 ET cutoff for SPY/QQQ/IWM. Placed AFTER SIGNAL_REVERSAL block so opposite-direction alerts can still close existing positions through the window. Futures (ES/NQ/MES/MNQ) excluded — different expiry mechanics, no daily theta-to-zero collapse.
+
+Commit hash: (filled by commit) — `feat(webhook): LATE_DAY_ENTRY_0DTE gate at 15:30 ET — close Decision 5`
 
 ### The choice
 

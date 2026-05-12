@@ -191,6 +191,22 @@ async function handlePineAlert(req, res) {
     jError('WEBHOOK', 'SIGNAL_REVERSAL_LEDGER_READ', { error: e.message });
   }
 
+  // LATE_DAY_ENTRY_0DTE gate — block new entries on 0DTE ETF options after 15:30 ET.
+  // Why: theta burn on near-ATM 0DTE in the final 30 min produces deterministic
+  // HARD_EXIT losses (see 2026-05-12 15:42-15:43 -$169.19, BS math verified correct).
+  // Placed AFTER SIGNAL_REVERSAL so opposite-direction alerts can still close
+  // existing positions through this window; only new entries are blocked.
+  const ZERO_DTE_INSTRUMENTS = new Set(['SPY', 'QQQ', 'IWM']);
+  if (ZERO_DTE_INSTRUMENTS.has(instrument)) {
+    const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+    const [h, m] = t.split(':').map(Number);
+    const etMins = h * 60 + m;
+    if (etMins >= 15 * 60 + 30) {
+      jGateBlock(engine, instrument, direction, 'LATE_DAY_ENTRY_0DTE', { etTime: etTimeString(), etMins, cutoffMins: 15 * 60 + 30 });
+      return send(res, 200, { ok: false, reason: 'LATE_DAY_ENTRY_0DTE', et: etTimeString() });
+    }
+  }
+
   // Select contract (strike + expiry)
   let strike = null, expiry = null;
   if (selectContract) {
