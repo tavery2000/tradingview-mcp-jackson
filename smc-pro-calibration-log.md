@@ -189,6 +189,20 @@ Brevity is fine — one paragraph per entry is the default. Reserve the full for
 - **Pattern class:** TV-render-artifact (suspected) / signal-state-divergence (verification pending).
 - **Reference:** none — verification step before classification.
 
+### 2026-05-12 ~09:15 ET — SPY 30sec vs 1min — TIMEFRAME COMPARISON
+
+- **Event:** Operator compared SPY signal density across two timeframes over a ~2 hour window. 30sec chart showed multiple BUY/SELL fires, caught the 08:30 ET LL major reversal cleanly, and produced more chop-transition signals aligned with VWAP±1σ bands. 1min chart in same window showed fewer signals and missed several of the chop transitions; the 08:30 LL bounce was still detected but with less granularity.
+- **Operator read:** *"SPY catches signals better on 30sec as opposed to 1min."*
+- **Pre-existing assumption (now under challenge):** Earlier this session (response to operator's "should I change chart interval?"), the recommendation was to keep all charts on 1M because (a) §1-§8 adaptive pivot is calibrated for 1M-5M and 15M-30M (30sec falls below the calibration band, inheriting `pivotLenEff=3` → 90sec structural lookback, theorized to be too noisy), and (b) all multi-hour validation work (including the 2026-05-11 EOD ~80% accuracy sample on MES1!) was on 1M.
+- **Observation contradicts the theory:** SPY 30sec is NOT producing noise per operator's read — it's catching legitimate chop transitions and major reversals. The 90sec structural lookback works for SPY despite being below the §1-§8 calibration band. Likely reason: SPY's tick size + intraday volume profile suit shorter lookback; the structure is recognizable at finer granularity. Doesn't necessarily generalize to QQQ/IWM or futures.
+- **Verdict:** **TIMEFRAME-PER-INSTRUMENT optimization signal.** Pairs directly with today's data-collection objective (per-instrument-signal-quality analyzer @ 16:00). If tonight's analyzer confirms SPY signal accuracy is high at 30sec, the right answer is per-instrument chart configuration rather than uniform 1M across the board.
+- **Pattern class:** timeframe-per-instrument (open — connects to per-instrument-Pine question).
+- **Cross-reference:** Today's noon decision; tonight's per-instrument-signal-quality analyzer output.
+- **Action items captured:**
+  1. Tonight's analyzer should include SPY 30sec data if operator runs SPY on 30sec for the RTH session
+  2. Compare per-instrument: SPY 30sec metrics vs QQQ 1min vs IWM 1min vs ES1!/NQ1!/MES1! 1min
+  3. The "should chart interval match instrument?" question becomes empirically answerable
+
 ---
 
 ## Running Tally
@@ -209,6 +223,7 @@ By pattern class, all-time:
 | **§18 (demand-zone-breakdown — NEW)** | — | **1 (open)** | First observed 2026-05-11 20:35 ET MES1! |
 | **Filter-gap (candlestick context — CANDIDATE)** | — | **1 (open, unverified)** | 2026-05-12 08:35 ES SELL on inverted hammer in uptrend. Specific Pine trigger not yet identified. Would escalate to §19 on recurrence. |
 | **TV-render-artifact (suspected)** | — | **1 (verification pending)** | 2026-05-12 08:35 NQ1! floating signals — operator hypothesis is chart-reset replay. Verify by checking webhook server logs for inbound NQ1! payloads at 08:35 ET |
+| **Timeframe-per-instrument** | — | **1 (open — connects to noon decision)** | 2026-05-12 09:15 SPY 30sec > 1min in operator observation. Contradicts earlier "keep on 1M" generic recommendation. Empirically verifiable via tonight's analyzer if operator runs SPY on 30sec through RTH |
 | Config issues (TV alert + webhook allow-list) | MES1! TV alert wired ✓ 2026-05-11; MES1!/MNQ1! webhook allow-list wired ✓ 2026-05-12 c73b666 | **1 (open)** | MNQ1! TV alert still pending operator setup |
 
 ---
