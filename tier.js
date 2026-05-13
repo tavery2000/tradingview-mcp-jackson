@@ -39,11 +39,18 @@ export const TIERS = {
     minEquity:      25_000,
     maxEquity:      50_000,
     contracts:      { low: 1, mid: 2, high: 3 },
-    // Bumped 2026-05-12 from 2 → 3 per operator decision. Reason: SPY+IWM
-    // were filling both slots during RTH, capping QQQ out of every cycle
-    // and starving the per-instrument-quality dataset. T1 daily-loss cap
-    // ($2,500) and per-instrument cap (2) still bound the risk envelope.
-    maxConcurrent:  3,
+    // Bumped 2026-05-12 from 2 → 3 per operator decision (SPY+IWM filling
+    // both slots, starving QQQ). Bumped again 2026-05-13 from 3 → 6 per
+    // per-instrument investigation: QQQ+NQ1! were grabbing all 3 slots at
+    // 09:30 and starving SPY/IWM/ES1!/MES1! out of every RTH cycle (224 of
+    // 225 Pine alerts blocked). Risk envelope still bounded by:
+    //   - perInstrumentCap = 2 (no instrument can own >2 slots)
+    //   - dailyLossCap = $2,500 realized (DAILY_LOSS_CAP gate)
+    //   - reserve-aware cap = $2,500 committed (DAILY_LOSS_CAP_RESERVE gate
+    //     added 2026-05-13 — sums realized + worst-case unrealized across
+    //     all opens + new entry, uses correct instrument multipliers).
+    // Notional-exposure cap layered on top is deferred to weekend review.
+    maxConcurrent:  6,
     dailyLossCap:   2_500,
     perInstrumentCap: 2,
   },
