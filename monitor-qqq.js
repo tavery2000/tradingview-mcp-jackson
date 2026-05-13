@@ -1175,6 +1175,14 @@ async function poll() {
     } catch {}
   }
 
+  // 2026-05-13: write macro4H to shared state file for webhook-server.js
+  // counter-trend gate. NQ family (QQQ/NQ1!/MNQ1!) reads from macro4h-qqq.json.
+  try {
+    writeFileSync(join(__dirname, 'macro4h-qqq.json'), JSON.stringify({
+      instrument: 'QQQ', macro4H: _qqqMacro4H, ts: Date.now(), time: getETString(),
+    }));
+  } catch {}
+
   // Journal — QQQ-scoped poll snapshot + signals
   try {
     jPoll({

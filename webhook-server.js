@@ -41,6 +41,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { orderGate, sendOrder, closePosition } from './paperTrading.js';
 import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
+import { evaluateCounterTrend }               from './signalConfidence.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -207,6 +208,43 @@ async function handlePineAlert(req, res) {
     }
   }
 
+  // ── Counter-trend gate (2026-05-13) ─────────────────────────────────────
+  // Reads macro4h-{spy|qqq|iwm}.json (per-monitor poll cycle) for the
+  // instrument's family. SPY/ES1!/MES1! → spy, QQQ/NQ1!/MNQ1! → qqq, IWM → iwm.
+  // Stale files (>5 min old) fall back to UNKNOWN which never trips the gate.
+  // Mode = off | down_weight (default) | block — set via COUNTER_TREND_MODE env.
+  let _macro4H    = 'UNKNOWN';
+  let _macro4HSrc = 'no-lookup';
+  try {
+    const family =
+      instrument === 'SPY'  || instrument === 'ES1!' || instrument === 'MES1!' ? 'spy' :
+      instrument === 'QQQ'  || instrument === 'NQ1!' || instrument === 'MNQ1!' ? 'qqq' :
+      instrument === 'IWM'                                                       ? 'iwm' : null;
+    if (family) {
+      const file = join(__dirname, `macro4h-${family}.json`);
+      const data = JSON.parse(readFileSync(file, 'utf8'));
+      const ageMin = (Date.now() - (data.ts ?? 0)) / 60000;
+      if (ageMin > 5) {
+        _macro4HSrc = `stale:${ageMin.toFixed(1)}min`;
+      } else {
+        _macro4H    = data.macro4H ?? 'UNKNOWN';
+        _macro4HSrc = `${family}:${ageMin.toFixed(1)}min`;
+      }
+    } else {
+      _macro4HSrc = `no-family-mapping:${instrument}`;
+    }
+  } catch (e) {
+    _macro4HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
+  }
+
+  const ctGate = evaluateCounterTrend(_macro4H, direction, engine);
+  if (ctGate.action === 'block') {
+    jGateBlock(engine, instrument, direction, 'COUNTER_TREND_BLOCK', {
+      macro4H: _macro4H, macro4HSrc: _macro4HSrc, mode: 'block',
+    });
+    return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H });
+  }
+
   // Select contract (strike + expiry)
   let strike = null, expiry = null;
   if (selectContract) {
@@ -220,21 +258,29 @@ async function handlePineAlert(req, res) {
     }
   }
 
-  // Build consensus — Pine-driven, minimal
+  // Build consensus — Pine-driven, minimal. finalConfidence baked with
+  // counter-trend multiplier so paperTrading.sendOrder tier sizing sees the
+  // adjusted band naturally. action='down_weight' typically takes MEDIUM
+  // (1.0 × 0.6 = 0.6) below the 0.65 threshold → BELOW_THRESHOLD_CONFIDENCE
+  // veto; HIGH (1.5 × 0.6 = 0.9) survives as low-band 1-contract sizing.
+  const _baseConf = confidence === 'HIGH' ? 1.5 : 1.0;
   const consensus = {
-    signal:           direction,
+    signal:                 direction,
     engine,
     confidence,
-    finalConfidence:  confidence === 'HIGH' ? 1.5 : 1.0,
+    finalConfidence:        _baseConf * ctGate.multiplier,
     instrument,
     strike,
     expiry,
-    entryPrice:       optEst,
-    underlyingPrice:  price,
-    contracts:        1,
-    pineAlert:        true,
+    entryPrice:             optEst,
+    underlyingPrice:        price,
+    contracts:              1,
+    pineAlert:              true,
     alertName,
     vwap,
+    macro4H:                _macro4H,
+    counterTrendAction:     ctGate.action,
+    counterTrendMultiplier: ctGate.multiplier,
   };
 
   // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
@@ -323,6 +369,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  const _ctMode = process.env.COUNTER_TREND_MODE || 'down_weight';
+  const _ctMult = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║
@@ -335,8 +383,9 @@ server.listen(PORT, () => {
 ║    POST /pine-close  — close paper trade from Pine alert             ║
 ║    GET  /health      — sanity check                                  ║
 ║                                                                      ║
+║  Counter-trend gate: ${String(_ctMode + (_ctMode === 'down_weight' ? ` × ${_ctMult}` : '')).padEnd(48)}║
 ║  Started ${etTimeString()} ET                                                 ║
 ╚══════════════════════════════════════════════════════════════════════╝
 `);
-  jAlert('INFO', 'Pine webhook server started', { port: PORT });
+  jAlert('INFO', 'Pine webhook server started', { port: PORT, counterTrendMode: _ctMode, counterTrendDownweight: _ctMult });
 });

@@ -2870,6 +2870,14 @@ async function poll() {
     } catch {}
   }
 
+  // 2026-05-13: write macro4H to shared state file for webhook-server.js
+  // counter-trend gate. SPY family (SPY/ES1!/MES1!) reads from macro4h-spy.json.
+  try {
+    writeFileSync(join(__dirname, 'macro4h-spy.json'), JSON.stringify({
+      instrument: 'SPY', macro4H: _spyMacro4H, ts: Date.now(), time: getETString(),
+    }));
+  } catch {}
+
   // Triple engine: TREND + FADE + STRUCTURE
   const trendSig     = trendEngine(bulls, bears, spy, spySummary, isChop, w3Score, spy.tick);
   const fadeSig      = isTradingHours() ? fadeEngine(spy) : null;

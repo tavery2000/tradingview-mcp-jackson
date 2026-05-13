@@ -1191,6 +1191,14 @@ async function poll() {
     } catch {}
   }
 
+  // 2026-05-13: write macro4H to shared state file for webhook-server.js
+  // counter-trend gate. IWM (no futures family) reads from macro4h-iwm.json.
+  try {
+    writeFileSync(join(__dirname, 'macro4h-iwm.json'), JSON.stringify({
+      instrument: 'IWM', macro4H: _iwmMacro4H, ts: Date.now(), time: getETString(),
+    }));
+  } catch {}
+
   // Journal — IWM-scoped poll snapshot + actionable signal records
   try {
     jPoll({

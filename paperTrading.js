@@ -83,6 +83,20 @@ function getContractMultiplier(instrument) {
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
 }
 
+// Surface counter-trend gate config at module load (2026-05-13).
+// Gate runs in webhook-server.js but this prints in every paperTrading-importing
+// process so the active configuration is visible without operator hunting env vars.
+{
+  const _ctMode = process.env.COUNTER_TREND_MODE || 'down_weight';
+  const _ctRaw  = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
+  const _ctMult = Number.isFinite(_ctRaw) && _ctRaw > 0 && _ctRaw <= 1.0 ? _ctRaw : 0.6;
+  const _ctDesc = _ctMode === 'off'         ? 'OFF (gate disabled)'
+                : _ctMode === 'block'       ? 'BLOCK (hard reject opposing-4H signals)'
+                : _ctMode === 'down_weight' ? `DOWN_WEIGHT × ${_ctMult.toFixed(2)} (opposing-4H signals)`
+                :                             `UNKNOWN mode='${_ctMode}' — treating as down_weight × ${_ctMult.toFixed(2)}`;
+  console.log(`  [paperTrading] Counter-trend gate: ${_ctDesc}`);
+}
+
 function acquireLock() {
   for (let i = 0; i < 20; i++) {
     try { openSync(LOCK_FILE, 'wx'); return true; } catch {}

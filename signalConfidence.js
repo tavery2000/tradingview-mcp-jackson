@@ -268,6 +268,38 @@ export function gateMacro4H(signal, ctx) {
   return noop;
 }
 
+// ─── Counter-trend gate (2026-05-13) — env-configurable soft/hard ───────
+// Reads COUNTER_TREND_MODE = off | down_weight | block (default down_weight).
+// Returns one of:
+//   { action: 'pass',        multiplier: 1.0 }
+//   { action: 'down_weight', multiplier: <COUNTER_TREND_DOWNWEIGHT or 0.6> }
+//   { action: 'block' }
+// FADE engine exempted (counter-trend by design). RANGING / UNKNOWN never trigger.
+// Webhook-server.js wires this between LATE_DAY_ENTRY_0DTE and sendOrder so the
+// down_weight path multiplies consensus.finalConfidence before tier sizing —
+// HIGH (1.5) × 0.6 → 0.9 still trades but at low band; MEDIUM (1.0) × 0.6 → 0.6
+// hits the below-threshold gate in paperTrading and becomes a no-trade.
+export function evaluateCounterTrend(macro4H, direction, engine) {
+  const pass = { action: 'pass', multiplier: 1.0 };
+  if (!direction) return pass;
+  if (engine === 'FADE') return pass;
+
+  const mode = process.env.COUNTER_TREND_MODE || 'down_weight';
+  if (mode === 'off') return pass;
+
+  const isCounter =
+    (macro4H === 'UP'   && direction === 'PUTS') ||
+    (macro4H === 'DOWN' && direction === 'CALLS');
+  if (!isCounter) return pass;
+
+  if (mode === 'block') return { action: 'block', multiplier: 0 };
+
+  // down_weight (default)
+  const raw = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
+  const mult = Number.isFinite(raw) && raw > 0 && raw <= 1.0 ? raw : 0.6;
+  return { action: 'down_weight', multiplier: mult };
+}
+
 // ─── VWAP wrong-side gate ───────────────────────────────────────────────
 // Unified ±0.15% tolerance band per E.6. Block when price is on the wrong
 // side of VWAP by more than the tolerance; pivots through VWAP at bar-flip
