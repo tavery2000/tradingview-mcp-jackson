@@ -52,6 +52,37 @@ const MAX_CONTRACTS  = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
 
+// Per-instrument contract multiplier for $-risk math.
+// Equity options 100x. Futures options use CME contract multipliers:
+// ES=$50, NQ=$20, MES=$5, MNQ=$2. Unknown instruments default to 100 (safe).
+// NOTE: realized P&L in simulateFill / closePosition currently uses 100x for
+// all instruments — that's a known bug producing the +$5,170 NQ phantom on
+// 2026-05-13. Fix deferred to weekend; this multiplier is used only for the
+// reserve-aware cap below, where being correct is the safe direction.
+function getContractMultiplier(instrument) {
+  const i = (instrument || '').toUpperCase().replace('1!', '');
+  if (i === 'SPY' || i === 'QQQ' || i === 'IWM') return 100;
+  if (i === 'ES')  return 50;
+  if (i === 'NQ')  return 20;
+  if (i === 'MES') return 5;
+  if (i === 'MNQ') return 2;
+  return 100;
+}
+
+// Surface effective daily-loss cap at module load. Each monitor process that
+// imports paperTrading.js prints once. Misalignment between env-default and
+// tier config hid for weeks until 2026-05-13 — this line prevents recurrence.
+{
+  const _ts = loadTier();
+  const _tierCap = getDailyLossCap(_ts.tier);
+  const _envCap  = MAX_DAILY_LOSS;
+  const _eff     = Math.min(_tierCap, _envCap > 0 ? _envCap : _tierCap);
+  const _src     = _tierCap === _envCap ? 'tier=env'
+                 : _eff === _tierCap    ? `tier T${_ts.tier} (env=$${_envCap} higher)`
+                 :                        `env (tier T${_ts.tier}=$${_tierCap} higher)`;
+  console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
+}
+
 function acquireLock() {
   for (let i = 0; i < 20; i++) {
     try { openSync(LOCK_FILE, 'wx'); return true; } catch {}
@@ -425,6 +456,35 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason };
   }
   contracts = Math.min(contracts, MAX_CONTRACTS);
+
+  // ── Soft unrealized-aware daily-loss cap (2026-05-13) ────────────────
+  // The DAILY_LOSS_CAP check above sees only realized P&L. With Option B
+  // (up to 6 concurrent positions), unrealized drawdown can be much wider
+  // than realized at any moment — total transient equity dip can blow past
+  // the cap before any close fires. This reserve gate adds the worst-case
+  // loss across (a) existing OPEN positions and (b) THIS new entry, treating
+  // each as if it would exit at STOP_0.5X (-50% of entry premium). If the
+  // sum of realized + reserved >= cap, veto.
+  const STOP_RATIO = 0.5;
+  const _wcl = (entry, qty, inst) =>
+    Math.max(0, (entry || 0) * (qty || 1) * getContractMultiplier(inst) * STOP_RATIO);
+  const _reservedExisting = (ledger.trades || [])
+    .filter(t => t.status === 'OPEN')
+    .reduce((s, t) => s + _wcl(t.fillPrice ?? t.limitPrice ?? 0, t.contracts ?? 1, t.instrument), 0);
+  const _reservedNew = _wcl(consensus.entryPrice ?? 0, contracts, consensus.instrument);
+  const _committedLoss = Math.max(0, -dailyPnL) + _reservedExisting + _reservedNew;
+  if (_committedLoss >= effectiveDailyCap) {
+    const reason = `Daily-loss reserve exhausted (committed $${_committedLoss.toFixed(0)} / cap $${effectiveDailyCap}) [T${tierNum}]`;
+    orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'DAILY_LOSS_CAP_RESERVE', {
+      dailyPnL, reservedExisting: parseFloat(_reservedExisting.toFixed(2)),
+      reservedNew: parseFloat(_reservedNew.toFixed(2)),
+      committedLoss: parseFloat(_committedLoss.toFixed(2)),
+      effectiveDailyCap, tier: tierNum,
+    });
+    console.log(`  ${C.red}🛑 RESERVE CAP — committed $${_committedLoss.toFixed(0)} >= $${effectiveDailyCap}${C.reset}`);
+    return { vetoed: true, reason };
+  }
 
   const order = {
     requestId,
@@ -1583,8 +1643,14 @@ export function generateDailyReport() {
 //   { session, w3Score, SPY: { price, vwap, delta, tick, bias }, QQQ: {...}, IWM: {...} }
 
 export function startLiveTrading(wsPort = 8080) {
+  const _ts = loadTier();
+  const _tierCap = getDailyLossCap(_ts.tier);
+  const _eff     = Math.min(_tierCap, MAX_DAILY_LOSS > 0 ? MAX_DAILY_LOSS : _tierCap);
+  const _src     = _tierCap === MAX_DAILY_LOSS ? 'tier=env'
+                 : _eff === _tierCap           ? `tier T${_ts.tier}`
+                 :                               `env (tier T${_ts.tier}=$${_tierCap})`;
   console.log(`\n  ⬡ HANK LIVE PAPER TRADER`);
-  console.log(`  Mode: ${TRADING_MODE} | Balance: $${PAPER_BALANCE.toLocaleString()} | Loss limit: $${MAX_DAILY_LOSS}`);
+  console.log(`  Mode: ${TRADING_MODE} | Balance: $${PAPER_BALANCE.toLocaleString()} | Daily loss cap: $${_eff.toLocaleString()} (${_src})`);
   console.log(`  Connecting to wsServer ws://localhost:${wsPort}...`);
   console.log(`  Decision log → ${_sessionLogPath()}\n`);
 
