@@ -43,12 +43,50 @@ function getETString() {
 // KEY FIX: Use trading minutes not calendar days
 // Standard B-S assumes 24/7/365 — wrong for 0DTE options
 
+// Per-instrument close time (ET minutes-of-day). Cleaned up 2026-05-13
+// from the original SPX-vs-not-SPX binary. ETF options 16:00, SPX index
+// options 16:15, CME futures options 16:00 default.
+//
+// OPERATOR_VERIFY (CME spec): the futures-option entries below assume the
+// PM-settled daily/weekly contracts HANK currently trades on E-mini and
+// Micro E-mini products, which settle at 16:00 ET. AM-settled monthly
+// contracts on the same underlyings expire at 09:30 ET; if those are
+// introduced, add specific entries here. Source: CME Group product specs
+// for ES/NQ/MES/MNQ options.
+const _INSTRUMENT_CLOSE_MIN = {
+  'SPX':   16 * 60 + 15,  // CBOE SPX index options
+  'SPY':   16 * 60,       // SPY ETF options
+  'QQQ':   16 * 60,       // QQQ ETF options
+  'IWM':   16 * 60,       // IWM ETF options
+  'ES':    16 * 60,       // CME E-mini S&P 500 PM-settled options
+  'NQ':    16 * 60,       // CME E-mini Nasdaq-100 PM-settled options
+  'MES':   16 * 60,       // CME Micro E-mini S&P 500 PM-settled options
+  'MNQ':   16 * 60,       // CME Micro E-mini Nasdaq-100 PM-settled options
+  // Continuous-front-month suffix variants (same close as their base)
+  'ES1!':  16 * 60,
+  'NQ1!':  16 * 60,
+  'MES1!': 16 * 60,
+  'MNQ1!': 16 * 60,
+};
+
+// Map any underlying string to a known instrument key. Falls back to SPY
+// for unknown tickers (matches the pre-2026-05-13 default behavior).
+function _resolveInstrumentKey(s) {
+  if (!s) return 'SPY';
+  const k = s.toString().toUpperCase();
+  if (_INSTRUMENT_CLOSE_MIN[k] != null) return k;
+  // Strip '1!' continuous-front-month suffix and retry
+  const stripped = k.replace('1!', '');
+  if (_INSTRUMENT_CLOSE_MIN[stripped] != null) return stripped;
+  // Pre-2026-05-13 caller convention: 'SPX' substring check
+  if (k.includes('SPX')) return 'SPX';
+  return 'SPY';
+}
+
 function getTradingTimeRemaining(instrument = 'SPX') {
   const now   = getETMins();
-
-  // SPX (index options) trade until 16:15 ET
-  // SPY / ETF options hard stop at 16:00 ET
-  const close = instrument === 'SPX' ? 16 * 60 + 15 : 16 * 60;
+  const key   = _resolveInstrumentKey(instrument);
+  const close = _INSTRUMENT_CLOSE_MIN[key] ?? 16 * 60;
 
   const minsRemaining = Math.max(0, close - now);
 
@@ -57,7 +95,7 @@ function getTradingTimeRemaining(instrument = 'SPX') {
   // when sqrt(T) → 0 causing Gamma/Vega to explode
   const T = Math.max(minsRemaining / (365 * 24 * 60), 0.00001);
 
-  return { T, minsRemaining, close };
+  return { T, minsRemaining, close, instrument: key };
 }
 
 // ─── Normal Distribution ──────────────────────────────────
@@ -232,9 +270,9 @@ function monitorPosition(position, currentOptionPrice, currentUnderlyingPrice) {
     riskFreeRate = 0.05,
   } = position;
 
-  // Instrument-aware time remaining
-  const instrument = underlying?.includes('SPX') ? 'SPX' : 'SPY';
-  const { T, minsRemaining } = getTradingTimeRemaining(instrument);
+  // Instrument-aware time remaining (2026-05-13: replaces SPX-vs-not-SPX binary)
+  const instrument = _resolveInstrumentKey(underlying);
+  const { T, minsRemaining, close: closeMins } = getTradingTimeRemaining(instrument);
 
   // Calculate current IV from live market price
   const currentIV = getIV(
@@ -280,10 +318,10 @@ function monitorPosition(position, currentOptionPrice, currentUnderlyingPrice) {
   const vegaDrag     = greeks.vega * (ivChange * 100) * 100 * contracts;
   const vegaAlert    = vegaDrag < -50 && pnlPct > 100;
 
-  // Hard exit timing
-  const hardExitMins = instrument === 'SPX'
-    ? Math.max(0, (16 * 60 + 14) - getETMins())  // SPX: exit by 16:14
-    : Math.max(0, (15 * 60 + 59) - getETMins());  // SPY: exit by 15:59
+  // Hard exit timing — 1 minute before the instrument's close time
+  // (2026-05-13: cleaned up from SPX-vs-not-SPX binary to use _INSTRUMENT_CLOSE_MIN
+  // via the closeMins value returned from getTradingTimeRemaining above).
+  const hardExitMins = Math.max(0, (closeMins - 1) - getETMins());
 
   // MOC specific: hard exit at 15:59
   const isMOCWindow  = getETMins() >= 15 * 60 + 50;
