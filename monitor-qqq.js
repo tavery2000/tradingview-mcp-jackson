@@ -885,7 +885,7 @@ async function calcPreMarketLevels() {
     await evalOn(`(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('1D');}catch(e){}})()`);
     await sleep(2000);
     const bars = await evalOn(JS_DAILY_BARS);
-    await evalOn(`(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('30S');}catch(e){}})()`);
+    await evalOn(`(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('1');}catch(e){}})()`);
     await sleep(1500);
     if (!bars || bars.length < 2) return null;
     // Detect whether today's daily bar exists — TradingView may not create it until 09:30 ET.

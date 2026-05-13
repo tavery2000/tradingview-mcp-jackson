@@ -61,6 +61,17 @@ try {
   console.log(`  [L2] not loaded (${e.message.slice(0, 60)}) — L2 panel will show awaiting data`);
 }
 
+// WebSocket broadcast server — hosts wsServer in-process so the TICK broadcast
+// block downstream can set global.wsBroadcast. briefing.js / dashboard connect
+// as clients on :8080. Graceful degrade: broadcast block no-ops if start fails.
+try {
+  const ws = await import('./wsServer.js');
+  ws.start(8080);
+  console.log('  [WS] wsServer hosted in-process on :8080');
+} catch (e) {
+  console.log(`  [WS] not started (${e.message.slice(0, 60)}) — broadcasts will no-op`);
+}
+
 // Paper trading engine — sendOrder() / closePosition() / OrderGate
 // TRADING_MODE=PAPER (default) — simulated fills, no real capital
 // TRADING_MODE=LIVE  — real Webull orders (when ready)
@@ -3252,7 +3263,7 @@ async function calcPreMarketLevelsForClient(client) {
     await evalOn(client, `(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('1D');}catch(e){}})()`);
     await sleep(2000);
     const dailyBars = await evalOn(client, JS_DAILY_BARS);
-    await evalOn(client, `(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('30S');}catch(e){}})()`);
+    await evalOn(client, `(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('1');}catch(e){}})()`);
     await sleep(1500);
     if (!dailyBars || dailyBars.length < 2) return null;
     const fmt = d => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d);
@@ -3306,7 +3317,7 @@ async function calcPreMarketLevels() {
       (function() {
         try {
           var api = window.TradingViewApi._activeChartWidgetWV.value();
-          api.setResolution('30S');
+          api.setResolution('1');
         } catch(e) {}
       })()`);
 

@@ -4,14 +4,16 @@ echo.
 echo  ============================================================
 echo  HANK Trading Terminal — Startup Sequence
 echo  ============================================================
-echo  Window 1: MOO/MOC Engine     (FJ imbalance — start first)
-echo  Window 2: SPY Monitor        (Mag-6 + SPY + wsServer :8765)
-echo  Window 3: QQQ Monitor        (W3 + QQQ standalone)
-echo  Window 4: IWM Monitor        (Mag-3 + IWM standalone)
-echo  Window 5: News Terminal       (RSS + SEC + TTS + MOC writer)
-echo  Window 6: MOC Engine          (15:50 confirmation + hard exit)
-echo  Window 7: Morning Briefing    (08:30 ET daily brief)
-echo  Window 8: Dashboard Server    (http://localhost:3000)
+echo  Window 1:  Webhook Supervisor (Pine alert receiver :9001 — auto-restart)
+echo  Window 2:  ngrok Tunnel       (yiddish-composure-amusing → :9001)
+echo  Window 3:  MOO/MOC Engine     (FJ imbalance — start first)
+echo  Window 4:  SPY Monitor        (Mag-6 + SPY + wsServer :8765)
+echo  Window 5:  QQQ Monitor        (W3 + QQQ standalone)
+echo  Window 6:  IWM Monitor        (Mag-3 + IWM standalone)
+echo  Window 7:  News Terminal      (RSS + SEC + TTS + MOC writer)
+echo  Window 8:  MOC Engine         (15:50 confirmation + hard exit)
+echo  Window 9:  Morning Briefing   (08:30 ET daily brief)
+echo  Window 10: Dashboard Server   (http://localhost:3000)
 echo  ============================================================
 echo.
 echo  Prerequisites:
@@ -26,58 +28,74 @@ echo.
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 1: MOO/MOC Engine ──────────────────────────────────────────────────
+:: ── Window 1: Webhook Supervisor ─────────────────────────────────────────────
+:: Pine alert receiver wrapper (port 9001). Auto-restart on crash, logs cause
+:: to logs/webhook-supervisor.log. Must be up before ngrok forwards to it.
+start "HANK Webhook" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK WEBHOOK SUPERVISOR && echo  Pine alert receiver on :9001  ^|  Auto-restart on crash && echo. && node webhook-supervisor.js"
+
+timeout /t 2 /nobreak > nul
+
+:: ── Window 2: ngrok Tunnel ───────────────────────────────────────────────────
+:: Reserved domain → :9001. NOT supervise-restarted (would loop on domain conflict).
+:: stderr visible in window; ngrok inspector at http://localhost:4040.
+start "HANK ngrok" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NGROK TUNNEL && echo  yiddish-composure-amusing.ngrok-free.dev → :9001 && echo  Inspector: http://localhost:4040 && echo. && ngrok http --domain=yiddish-composure-amusing.ngrok-free.dev 9001"
+
+timeout /t 2 /nobreak > nul
+
+:: ── Window 3: MOO/MOC Engine ──────────────────────────────────────────────────
 :: Start first — must be up before 09:20 ET to capture MOO imbalance
 start "HANK MOO/MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOO/MOC ENGINE && echo  MOO window 09:20-09:29  MOC window 15:50-15:59 && echo. && node moo-moc.js"
 
-:: ── Window 2: SPY Monitor ─────────────────────────────────────────────────────
+:: ── Window 4: SPY Monitor ─────────────────────────────────────────────────────
 :: Hosts wsServer on :8765. QQQ + IWM monitors connect to it. Start before them.
 start "HANK SPY" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK SPY MONITOR  ^|  Mag-6 + SPY && echo  wsServer broadcasting on ws://localhost:8765 && echo. && node monitor.js"
 
 timeout /t 6 /nobreak > nul
 
-:: ── Window 3: QQQ Monitor ─────────────────────────────────────────────────────
+:: ── Window 5: QQQ Monitor ─────────────────────────────────────────────────────
 start "HANK QQQ" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK QQQ MONITOR  ^|  W3 + QQQ && echo. && node monitor-qqq.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 4: IWM Monitor ─────────────────────────────────────────────────────
+:: ── Window 6: IWM Monitor ─────────────────────────────────────────────────────
 start "HANK IWM" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK IWM MONITOR  ^|  Mag-3 + IWM && echo. && node monitor-iwm.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 5: News Terminal ───────────────────────────────────────────────────
+:: ── Window 7: News Terminal ───────────────────────────────────────────────────
 start "HANK News" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NEWS TERMINAL && echo  RSS + SEC filings + TTS + MOC data writer && echo. && node news.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 6: MOC Engine ──────────────────────────────────────────────────────
+:: ── Window 8: MOC Engine ──────────────────────────────────────────────────────
 :: Arms 15:45. Reads moc-data.json + wsServer TICK. Hard exit 15:59.
 start "HANK MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOC ENGINE && echo  Arms 15:45  Snapshot 15:50  Trigger 15:51  Exit 15:59 && echo. && node moc-engine.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 7: Morning Briefing ────────────────────────────────────────────────
+:: ── Window 9: Morning Briefing ────────────────────────────────────────────────
 start "HANK Briefing" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK BRIEFING ENGINE && echo  Daily brief at 08:30 ET && echo. && node briefing.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 8: Dashboard Server ──────────────────────────────────────────────
+:: ── Window 10: Dashboard Server ──────────────────────────────────────────────
 start "HANK Dashboard" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK DASHBOARD SERVER && echo  Open: http://localhost:3000 && echo. && node dashboard-server.js"
 
 echo.
 echo  ============================================================
-echo  All 8 HANK engines launched.
+echo  All 10 HANK engines launched.
 echo.
 echo  Startup order:
-echo    1. MOO/MOC   (FJ imbalance — MOO fires at 09:20, MOC at 15:50)
-echo    2. SPY        (wsServer :8765 + Mag-6 CDP — 6s head start)
-echo    3. QQQ        (W3 standalone)
-echo    4. IWM        (Mag-3 standalone)
-echo    5. News       (RSS + MOC data writer)
-echo    6. MOC        (reads moc-data.json + wsServer)
-echo    7. Briefing   (ready for 08:30 ET)
-echo    8. Dashboard  (http://localhost:3000)
+echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
+echo    2.  ngrok     (yiddish-composure-amusing → :9001, 2s after webhook)
+echo    3.  MOO/MOC   (FJ imbalance — MOO fires at 09:20, MOC at 15:50)
+echo    4.  SPY       (wsServer :8765 + Mag-6 CDP — 6s head start)
+echo    5.  QQQ       (W3 standalone)
+echo    6.  IWM       (Mag-3 standalone)
+echo    7.  News      (RSS + MOC data writer)
+echo    8.  MOC       (reads moc-data.json + wsServer)
+echo    9.  Briefing  (ready for 08:30 ET)
+echo    10. Dashboard (http://localhost:3000)
 echo  ============================================================
 echo.
 pause
