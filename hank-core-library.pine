@@ -1,0 +1,654 @@
+//@version=5
+// =====================================================================
+// HANK Core Library — Shared SMC Pro logic for family scripts
+// =====================================================================
+// Built by HANK (NYC2000). Mechanical split from smc-pro-futures.pine
+// 2026-05-13 — all shared SMC computation lives here, family scripts
+// hold inputs + alerts + sensitivity gates.
+//
+// Family scripts:
+//   hank-spy-family.pine  (SPY / ES1! / MES1!)
+//   hank-nq-family.pine   (QQQ / NQ1! / MNQ1!)
+//   hank-iwm.pine         (IWM only)
+//
+// FIRST-TIME PUBLISH FLOW (operator, post-close only):
+//   1. Open this file in TradingView Pine Editor.
+//   2. "Save" → name it `hank_core` (must match the library() call below).
+//   3. "Publish library" → choose Private. Note your username appears in
+//      the resulting path: `username/hank_core/1`.
+//   4. Open each hank-*-family.pine file. Verify the `import` line at the
+//      top matches your TradingView username. Default assumes `tavery2000`.
+//      Edit if needed.
+//   5. "Add to Chart" on each family script. Compile errors are expected
+//      first time — known risk areas are flagged inline below.
+//
+// LIBRARY UPDATE FLOW:
+//   1. Edit this file. Save in Pine Editor.
+//   2. "Publish library" → next version (e.g. 2).
+//   3. Update every family script's `import` line: `/hank_core/1` → `/2`.
+//   4. Re-paste each family script. Without the version bump, family
+//      scripts will keep using the old library.
+//
+// KNOWN PINE V5 RISKS (untested — flag first compile errors here):
+//   A. UDT field mutation via library function — `var core.SMCState st`
+//      on family side, library mutates `st.field := ...`. Should persist
+//      per reference semantics. Failure mode: state resets every bar →
+//      BOS/CHoCH fires repeatedly.
+//   B. `request.security(.. , core.htfBiasFn(htfPivotLen))` — library
+//      functions inside request.security may have context-binding edge
+//      cases. Failure mode: htfBias always returns "Neutral".
+//   C. Drawing functions (`label.new`, `line.new`, `box.new`) inside
+//      library — should work. Failure mode: missing labels/boxes.
+//
+// If compile fails irrecoverably, fallback is three standalone copies of
+// smc-pro-futures.pine (no library) — bulletproof but not DRY.
+// =====================================================================
+
+library("hank_core", overlay=true)
+
+// =====================================================================
+// SMCState UDT — all stateful pivot/structure/zone/signal trackers
+// =====================================================================
+// Family script declares `var SMCState st = newState()` once. Library
+// functions take `st` by reference and mutate its fields. Pine v5 UDT
+// references survive across bars when wrapped in `var`.
+
+export type SMCState
+    // Pivot / structure
+    float prevSwingHigh    = na
+    float prevSwingLow     = na
+    float lastUnbrokenHigh = na
+    float lastUnbrokenLow  = na
+    int   lastUnbrokenHiBar = na
+    int   lastUnbrokenLoBar = na
+    int   trend            = 0
+    // Drawing collections (must be array<T>; default na so newState() initializes)
+    array<label> structLabels
+    array<line>  bosLines
+    array<line>  chochLines
+    array<label> bosLabels
+    array<label> chochLabels
+    array<box>   bullOBs
+    array<box>   bearOBs
+    array<box>   bullFVGs
+    array<box>   bearFVGs
+    // Sweep
+    int   lastBullSweepBar = na
+    int   lastBearSweepBar = na
+    array<label> sweepLabels
+    // Signal cooldown
+    int   lastBuyBar  = na
+    int   lastSellBar = na
+    // Live intra-bar latches (reset on each new bar)
+    bool  liveBullFiredThisBar = false
+    bool  liveBearFiredThisBar = false
+    // §16/§17 Path C — false-CHoCH auto-recovery trackers
+    float falseBullCHOprice = na
+    int   falseBullCHObar   = na
+    float falseBearCHOprice = na
+    int   falseBearCHObar   = na
+    // Session zones
+    array<label> sessLabels
+
+// Factory — initializes all array fields. Family script must use this:
+//   var core.SMCState st = core.newState()
+// rather than `SMCState.new()` directly, otherwise array fields stay na.
+export newState() =>
+    s = SMCState.new()
+    s.structLabels := array.new<label>()
+    s.bosLines     := array.new<line>()
+    s.chochLines   := array.new<line>()
+    s.bosLabels    := array.new<label>()
+    s.chochLabels  := array.new<label>()
+    s.bullOBs      := array.new<box>()
+    s.bearOBs      := array.new<box>()
+    s.bullFVGs     := array.new<box>()
+    s.bearFVGs     := array.new<box>()
+    s.sweepLabels  := array.new<label>()
+    s.sessLabels   := array.new<label>()
+    s
+
+// =====================================================================
+// PRUNING HELPERS — drop oldest when array exceeds maxN
+// =====================================================================
+
+export pruneLabels(array<label> arr, int maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        label.delete(old)
+
+export pruneLines(array<line> arr, int maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        line.delete(old)
+
+export pruneBoxes(array<box> arr, int maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        box.delete(old)
+
+// =====================================================================
+// PIVOT LENGTH — adaptive per timeframe (§1-§8 fix)
+// =====================================================================
+
+export pivotLenEff(bool adaptive, int baseLen) =>
+    adaptive ?
+         (timeframe.period == "1"  or timeframe.period == "3"  or timeframe.period == "5"  ? 3 :
+          timeframe.period == "15" or timeframe.period == "30"                              ? 5 :
+          baseLen) :
+         baseLen
+
+// =====================================================================
+// STRUCTURE LABELS (HH/HL/LH/LL) + raw HL/LH signals
+// =====================================================================
+// Returns [bullHLraw, bearLHraw] — early-structure raw signals computed
+// BEFORE the prev-swing state update (which is updateSwingState below).
+// Order matters: caller must invoke drawStructureLabels first, then
+// updateSwingState, before BOS/CHoCH detection.
+
+export drawStructureLabels(SMCState st, float ph, float pl, int pivotLen,
+                            int maxStructLabels, bool showStruct, bool enableHLBuy,
+                            color clrBull, color clrBear) =>
+    if not na(ph) and showStruct
+        pivBar = bar_index - pivotLen
+        txt    = na(st.prevSwingHigh) or ph > st.prevSwingHigh ? "HH" : "LH"
+        col    = txt == "HH" ? clrBull : clrBear
+        lbl    = label.new(x=pivBar, y=ph, text=txt, color=color.new(#000000, 100),
+             textcolor=col, style=label.style_label_down, size=size.small,
+             yloc=yloc.abovebar)
+        array.push(st.structLabels, lbl)
+        pruneLabels(st.structLabels, maxStructLabels * 2)
+
+    if not na(pl) and showStruct
+        pivBar = bar_index - pivotLen
+        txt    = na(st.prevSwingLow) or pl > st.prevSwingLow ? "HL" : "LL"
+        col    = txt == "HL" ? clrBull : clrBear
+        lbl    = label.new(x=pivBar, y=pl, text=txt, color=color.new(#000000, 100),
+             textcolor=col, style=label.style_label_up, size=size.small,
+             yloc=yloc.belowbar)
+        array.push(st.structLabels, lbl)
+        pruneLabels(st.structLabels, maxStructLabels * 2)
+
+    // §14 early-structure raw signals — must come BEFORE updateSwingState
+    bullHLraw = enableHLBuy and not na(pl) and not na(st.prevSwingLow)  and pl > st.prevSwingLow
+    bearLHraw = enableHLBuy and not na(ph) and not na(st.prevSwingHigh) and ph < st.prevSwingHigh
+    [bullHLraw, bearLHraw]
+
+// =====================================================================
+// SWING STATE UPDATE — prev*Swing*, lastUnbroken*
+// =====================================================================
+
+export updateSwingState(SMCState st, float ph, float pl, int pivotLen) =>
+    if not na(ph)
+        st.prevSwingHigh     := ph
+        st.lastUnbrokenHigh  := ph
+        st.lastUnbrokenHiBar := bar_index - pivotLen
+    if not na(pl)
+        st.prevSwingLow      := pl
+        st.lastUnbrokenLow   := pl
+        st.lastUnbrokenLoBar := bar_index - pivotLen
+
+// =====================================================================
+// BOS / CHoCH DETECTION (on confirmed bar close)
+// =====================================================================
+// Returns [bullBOSraw, bearBOSraw, bullCHOraw, bearCHOraw].
+// Mutates trend, lastUnbroken*, falseCHO* trackers, bos/chochLines/Labels.
+
+export detectBOSCHO(SMCState st, bool enableAutoRecovery,
+                     bool showBOSLines, bool showCHoCHLines,
+                     color clrBull, color clrBear) =>
+    bullBOSraw = false
+    bearBOSraw = false
+    bullCHOraw = false
+    bearCHOraw = false
+
+    if barstate.isconfirmed
+        // Upside break of last unbroken high
+        if not na(st.lastUnbrokenHigh) and close > st.lastUnbrokenHigh
+            if st.trend == -1
+                bullCHOraw := true
+                if enableAutoRecovery
+                    st.falseBullCHOprice := st.lastUnbrokenHigh
+                    st.falseBullCHObar   := bar_index
+                st.trend := 1
+            else
+                bullBOSraw := true
+                st.trend := 1
+            if (bullBOSraw and showBOSLines) or (bullCHOraw and showCHoCHLines)
+                ln = line.new(x1=st.lastUnbrokenHiBar, y1=st.lastUnbrokenHigh,
+                     x2=bar_index, y2=st.lastUnbrokenHigh,
+                     color=clrBull,
+                     style=bullCHOraw ? line.style_solid : line.style_dashed,
+                     width=1)
+                lbl = label.new(x=bar_index, y=st.lastUnbrokenHigh,
+                     text=bullCHOraw ? "CHoCH" : "BOS",
+                     color=color.new(#000000, 100),
+                     textcolor=clrBull, style=label.style_label_left,
+                     size=size.tiny)
+                if bullCHOraw
+                    array.push(st.chochLines, ln)
+                    array.push(st.chochLabels, lbl)
+                    pruneLines(st.chochLines, 12)
+                    pruneLabels(st.chochLabels, 12)
+                else
+                    array.push(st.bosLines, ln)
+                    array.push(st.bosLabels, lbl)
+                    pruneLines(st.bosLines, 12)
+                    pruneLabels(st.bosLabels, 12)
+            st.lastUnbrokenHigh  := na
+            st.lastUnbrokenHiBar := na
+
+        // Downside break of last unbroken low
+        if not na(st.lastUnbrokenLow) and close < st.lastUnbrokenLow
+            if st.trend == 1
+                bearCHOraw := true
+                if enableAutoRecovery
+                    st.falseBearCHOprice := st.lastUnbrokenLow
+                    st.falseBearCHObar   := bar_index
+                st.trend := -1
+            else
+                bearBOSraw := true
+                st.trend := -1
+            if (bearBOSraw and showBOSLines) or (bearCHOraw and showCHoCHLines)
+                ln = line.new(x1=st.lastUnbrokenLoBar, y1=st.lastUnbrokenLow,
+                     x2=bar_index, y2=st.lastUnbrokenLow,
+                     color=clrBear,
+                     style=bearCHOraw ? line.style_solid : line.style_dashed,
+                     width=1)
+                lbl = label.new(x=bar_index, y=st.lastUnbrokenLow,
+                     text=bearCHOraw ? "CHoCH" : "BOS",
+                     color=color.new(#000000, 100),
+                     textcolor=clrBear, style=label.style_label_left,
+                     size=size.tiny)
+                if bearCHOraw
+                    array.push(st.chochLines, ln)
+                    array.push(st.chochLabels, lbl)
+                    pruneLines(st.chochLines, 12)
+                    pruneLabels(st.chochLabels, 12)
+                else
+                    array.push(st.bosLines, ln)
+                    array.push(st.bosLabels, lbl)
+                    pruneLines(st.bosLines, 12)
+                    pruneLabels(st.bosLabels, 12)
+            st.lastUnbrokenLow  := na
+            st.lastUnbrokenLoBar := na
+
+    [bullBOSraw, bearBOSraw, bullCHOraw, bearCHOraw]
+
+// =====================================================================
+// AUTO-RECOVERY (§16/§17 Path C — undo trend mutation on false CHoCH)
+// =====================================================================
+// If a CHoCH fires and within autoRecoveryBars price closes back through
+// the broken pivot in the ORIGINAL direction, revert the trend state.
+// Restores symmetry so the next legitimate signal can fire without
+// waiting for HTF to catch up.
+
+export checkAutoRecovery(SMCState st, int autoRecoveryBars, int pivotLen) =>
+    if barstate.isconfirmed
+        if not na(st.falseBullCHOprice) and (bar_index - st.falseBullCHObar) <= autoRecoveryBars
+            if close < st.falseBullCHOprice
+                st.trend            := -1
+                st.lastUnbrokenHigh  := st.falseBullCHOprice
+                st.lastUnbrokenHiBar := st.falseBullCHObar - pivotLen
+                st.falseBullCHOprice := na
+                st.falseBullCHObar   := na
+
+        if not na(st.falseBearCHOprice) and (bar_index - st.falseBearCHObar) <= autoRecoveryBars
+            if close > st.falseBearCHOprice
+                st.trend             := 1
+                st.lastUnbrokenLow   := st.falseBearCHOprice
+                st.lastUnbrokenLoBar := st.falseBearCHObar - pivotLen
+                st.falseBearCHOprice := na
+                st.falseBearCHObar   := na
+
+        // Expire stale trackers outside the window
+        if not na(st.falseBullCHObar) and (bar_index - st.falseBullCHObar) > autoRecoveryBars
+            st.falseBullCHOprice := na
+            st.falseBullCHObar   := na
+        if not na(st.falseBearCHObar) and (bar_index - st.falseBearCHObar) > autoRecoveryBars
+            st.falseBearCHOprice := na
+            st.falseBearCHObar   := na
+
+// =====================================================================
+// LIQUIDITY SWEEPS — ATR-gated penetration with reclaim close
+// =====================================================================
+// Bull sweep: low pierced prevSwingLow by >=0.25*ATR, close back above
+// Bear sweep: high pierced prevSwingHigh by >=0.25*ATR, close back below
+
+export detectSweep(SMCState st, float atr14, bool showSweeps,
+                    color clrBull, color clrBear) =>
+    bullSweepRaw = false
+    bearSweepRaw = false
+
+    if barstate.isconfirmed and not na(atr14)
+        sweepThr = 0.25 * atr14
+
+        if not na(st.prevSwingLow) and low <= st.prevSwingLow - sweepThr and close > st.prevSwingLow
+            bullSweepRaw := true
+            st.lastBullSweepBar := bar_index
+            if showSweeps
+                lbl = label.new(x=bar_index, y=st.prevSwingLow,
+                     text="◆", color=color.new(#000000, 100),
+                     textcolor=clrBull, style=label.style_label_up,
+                     size=size.tiny, yloc=yloc.belowbar)
+                array.push(st.sweepLabels, lbl)
+                pruneLabels(st.sweepLabels, 20)
+
+        if not na(st.prevSwingHigh) and high >= st.prevSwingHigh + sweepThr and close < st.prevSwingHigh
+            bearSweepRaw := true
+            st.lastBearSweepBar := bar_index
+            if showSweeps
+                lbl = label.new(x=bar_index, y=st.prevSwingHigh,
+                     text="◆", color=color.new(#000000, 100),
+                     textcolor=clrBear, style=label.style_label_down,
+                     size=size.tiny, yloc=yloc.abovebar)
+                array.push(st.sweepLabels, lbl)
+                pruneLabels(st.sweepLabels, 20)
+
+    [bullSweepRaw, bearSweepRaw]
+
+// =====================================================================
+// FAIR VALUE GAPS — 3-candle imbalance + mitigation
+// =====================================================================
+// Bullish: high[2] < low[0]   (gap = [high[2], low[0]])
+// Bearish: low[2]  > high[0]  (gap = [high[0], low[2]])
+// Mitigation: close trades through gap → delete
+
+export detectFVG(SMCState st, float atr14, bool showFVGs,
+                  int zoneOpacity, color clrBull, color clrBear) =>
+    fvgExtend = 80
+
+    if barstate.isconfirmed and not na(atr14) and showFVGs
+        if high[2] < low[0]
+            topY = low[0]
+            botY = high[2]
+            gap  = topY - botY
+            if gap >= 0.3 * atr14
+                b = box.new(left=bar_index - 2, top=topY,
+                     right=bar_index + fvgExtend, bottom=botY,
+                     bgcolor=color.new(clrBull, zoneOpacity),
+                     border_color=color.new(clrBull, 80),
+                     border_width=1)
+                array.push(st.bullFVGs, b)
+                pruneBoxes(st.bullFVGs, 3)
+
+        if low[2] > high[0]
+            topY = low[2]
+            botY = high[0]
+            gap  = topY - botY
+            if gap >= 0.3 * atr14
+                b = box.new(left=bar_index - 2, top=topY,
+                     right=bar_index + fvgExtend, bottom=botY,
+                     bgcolor=color.new(clrBear, zoneOpacity),
+                     border_color=color.new(clrBear, 80),
+                     border_width=1)
+                array.push(st.bearFVGs, b)
+                pruneBoxes(st.bearFVGs, 3)
+
+    // Mitigation
+    if barstate.isconfirmed and array.size(st.bullFVGs) > 0
+        for i = array.size(st.bullFVGs) - 1 to 0
+            b   = array.get(st.bullFVGs, i)
+            bot = box.get_bottom(b)
+            if low <= bot
+                box.delete(b)
+                array.remove(st.bullFVGs, i)
+
+    if barstate.isconfirmed and array.size(st.bearFVGs) > 0
+        for i = array.size(st.bearFVGs) - 1 to 0
+            b   = array.get(st.bearFVGs, i)
+            top = box.get_top(b)
+            if high >= top
+                box.delete(b)
+                array.remove(st.bearFVGs, i)
+
+// =====================================================================
+// ORDER BLOCKS — last opposing candle before displacement bar
+// =====================================================================
+// Bullish OB = most recent bearish candle BEFORE a bullish displacement
+// (body >= 1.5 * ATR, close > open). Mirror for bearish.
+
+export detectOB(SMCState st, float atr14, bool showOBs,
+                 int zoneOpacity, color clrBull, color clrBear) =>
+    obExtend = 100
+
+    displacementBull = barstate.isconfirmed and not na(atr14) and close > open and (close - open) >= 1.5 * atr14
+    displacementBear = barstate.isconfirmed and not na(atr14) and close < open and (open - close) >= 1.5 * atr14
+
+    if displacementBull and showOBs
+        int obIdx = na
+        for k = 1 to 5
+            if close[k] < open[k]
+                obIdx := k
+                break
+        if not na(obIdx)
+            b = box.new(left=bar_index - obIdx, top=high[obIdx],
+                 right=bar_index + obExtend, bottom=low[obIdx],
+                 bgcolor=color.new(clrBull, zoneOpacity),
+                 border_color=color.new(clrBull, 70),
+                 border_width=1)
+            array.push(st.bullOBs, b)
+            pruneBoxes(st.bullOBs, 2)
+
+    if displacementBear and showOBs
+        int obIdx = na
+        for k = 1 to 5
+            if close[k] > open[k]
+                obIdx := k
+                break
+        if not na(obIdx)
+            b = box.new(left=bar_index - obIdx, top=high[obIdx],
+                 right=bar_index + obExtend, bottom=low[obIdx],
+                 bgcolor=color.new(clrBear, zoneOpacity),
+                 border_color=color.new(clrBear, 70),
+                 border_width=1)
+            array.push(st.bearOBs, b)
+            pruneBoxes(st.bearOBs, 2)
+
+    // Mitigation — close through the body → delete
+    if barstate.isconfirmed and array.size(st.bullOBs) > 0
+        for i = array.size(st.bullOBs) - 1 to 0
+            b   = array.get(st.bullOBs, i)
+            bot = box.get_bottom(b)
+            if close < bot
+                box.delete(b)
+                array.remove(st.bullOBs, i)
+
+    if barstate.isconfirmed and array.size(st.bearOBs) > 0
+        for i = array.size(st.bearOBs) - 1 to 0
+            b   = array.get(st.bearOBs, i)
+            top = box.get_top(b)
+            if close > top
+                box.delete(b)
+                array.remove(st.bearOBs, i)
+
+// =====================================================================
+// HTF BIAS — pivot tracking on higher timeframe
+// =====================================================================
+// Pure function. Called from family script via request.security:
+//   htfBias = request.security(syminfo.tickerid, htfTf, core.htfBiasFn(htfPivotLen), ...)
+// Uses internal var arrays — `var` inside a library function still
+// persists across bars per Pine v5 semantics.
+
+export htfBiasFn(int htfPivotLen) =>
+    var array<float> hHs = array.new<float>()
+    var array<float> hLs = array.new<float>()
+    htfPh = ta.pivothigh(htfPivotLen, htfPivotLen)
+    htfPl = ta.pivotlow(htfPivotLen,  htfPivotLen)
+    if not na(htfPh)
+        array.unshift(hHs, htfPh)
+        if array.size(hHs) > 3
+            array.pop(hHs)
+    if not na(htfPl)
+        array.unshift(hLs, htfPl)
+        if array.size(hLs) > 3
+            array.pop(hLs)
+    bias = "Neutral"
+    if array.size(hHs) >= 2 and array.size(hLs) >= 2
+        hh = array.get(hHs, 0) > array.get(hHs, 1)
+        hl = array.get(hLs, 0) > array.get(hLs, 1)
+        ll = array.get(hLs, 0) < array.get(hLs, 1)
+        lh = array.get(hHs, 0) < array.get(hHs, 1)
+        bias := hh and hl ? "Bullish" : ll and lh ? "Bearish" : "Neutral"
+    bias
+
+// =====================================================================
+// ZONE-BREAK TRIGGERS (§10 — wick-into-zone + close-through with rejection)
+// =====================================================================
+// Returns [bullZoneBreakRaw, bearZoneBreakRaw]. Pure detection — does not
+// mutate state. Family script applies sensitivity/cooldown/HTF gates.
+
+export detectZoneBreak(SMCState st, float atr14, bool enableZoneBreak,
+                        float zbWickMult) =>
+    bullZoneBreakRaw = false
+    bearZoneBreakRaw = false
+
+    if enableZoneBreak and barstate.isconfirmed and not na(atr14)
+        if array.size(st.bullOBs) > 0
+            for i = 0 to array.size(st.bullOBs) - 1
+                b = array.get(st.bullOBs, i)
+                zoneTop = box.get_top(b)
+                touched  = low <= zoneTop
+                brokeUp  = close > zoneTop
+                rejected = (close - low) >= zbWickMult * atr14
+                if touched and brokeUp and rejected
+                    bullZoneBreakRaw := true
+                    break
+
+        if array.size(st.bearOBs) > 0
+            for i = 0 to array.size(st.bearOBs) - 1
+                b = array.get(st.bearOBs, i)
+                zoneBot = box.get_bottom(b)
+                touched   = high >= zoneBot
+                brokeDown = close < zoneBot
+                rejected  = (high - close) >= zbWickMult * atr14
+                if touched and brokeDown and rejected
+                    bearZoneBreakRaw := true
+                    break
+
+    [bullZoneBreakRaw, bearZoneBreakRaw]
+
+// =====================================================================
+// LIVE INTRA-BAR TRIGGERS (§12 — fire BEFORE bar close on displacement)
+// =====================================================================
+// Gated on barstate.isrealtime so historical bars never trigger (no
+// backtest contamination). Multi-condition filter + per-bar latch.
+// Returns [liveBullBreakRaw, liveBearBreakRaw].
+
+export detectLiveBreak(SMCState st, float atr14, bool enableLiveSignals,
+                        float liveVolMult, float liveDispMult, float liveExtremeRatio) =>
+    if barstate.isnew
+        st.liveBullFiredThisBar := false
+        st.liveBearFiredThisBar := false
+
+    liveBullBreakRaw = false
+    liveBearBreakRaw = false
+
+    if enableLiveSignals and barstate.isrealtime and not na(atr14)
+        avgVol        = ta.sma(volume, 20)
+        volSpike      = not na(avgVol) and volume >= liveVolMult * avgVol
+        barRange      = high - low
+        displaced     = barRange >= liveDispMult * atr14
+        closeNearHigh = barRange > 0 and (close - low) / barRange > liveExtremeRatio
+        closeNearLow  = barRange > 0 and (high - close) / barRange > liveExtremeRatio
+
+        if not st.liveBullFiredThisBar and not na(st.lastUnbrokenHigh) and close > st.lastUnbrokenHigh and volSpike and displaced and closeNearHigh
+            liveBullBreakRaw         := true
+            st.liveBullFiredThisBar  := true
+
+        if not st.liveBearFiredThisBar and not na(st.lastUnbrokenLow) and close < st.lastUnbrokenLow and volSpike and displaced and closeNearLow
+            liveBearBreakRaw         := true
+            st.liveBearFiredThisBar  := true
+
+    [liveBullBreakRaw, liveBearBreakRaw]
+
+// =====================================================================
+// NEAR-ZONE CHECKS (for sensitivity confluence)
+// =====================================================================
+// "Near a zone" = price within 0.5 * ATR of any active OB/FVG of matching
+// direction. Used by family-script sensitivity logic.
+
+export nearBullZone(SMCState st, float atr14) =>
+    result = false
+    if not na(atr14)
+        band = 0.5 * atr14
+        if array.size(st.bullOBs) > 0
+            for i = 0 to array.size(st.bullOBs) - 1
+                b  = array.get(st.bullOBs, i)
+                t  = box.get_top(b)
+                bo = box.get_bottom(b)
+                if low <= t + band and low >= bo - band
+                    result := true
+        if not result and array.size(st.bullFVGs) > 0
+            for i = 0 to array.size(st.bullFVGs) - 1
+                b  = array.get(st.bullFVGs, i)
+                t  = box.get_top(b)
+                bo = box.get_bottom(b)
+                if low <= t + band and low >= bo - band
+                    result := true
+    result
+
+export nearBearZone(SMCState st, float atr14) =>
+    result = false
+    if not na(atr14)
+        band = 0.5 * atr14
+        if array.size(st.bearOBs) > 0
+            for i = 0 to array.size(st.bearOBs) - 1
+                b  = array.get(st.bearOBs, i)
+                t  = box.get_top(b)
+                bo = box.get_bottom(b)
+                if high >= bo - band and high <= t + band
+                    result := true
+        if not result and array.size(st.bearFVGs) > 0
+            for i = 0 to array.size(st.bearFVGs) - 1
+                b  = array.get(st.bearFVGs, i)
+                t  = box.get_top(b)
+                bo = box.get_bottom(b)
+                if high >= bo - band and high <= t + band
+                    result := true
+    result
+
+// =====================================================================
+// PAYLOAD JSON — must produce byte-identical output to original Pine
+// =====================================================================
+// webhook-server.js consumes this format verbatim. Do not modify without
+// matching change to webhook validatePayload().
+
+export payloadJSON(string instrumentOverride, string direction, string engine, string confidence) =>
+    instStr = instrumentOverride == "AUTO" ? syminfo.ticker : instrumentOverride
+    '{"instrument":"' + instStr + '","direction":"' + direction +
+      '","engine":"' + engine + '","confidence":"' + confidence +
+      '","price":' + str.tostring(close, "#.##") +
+      ',"alertName":"' + engine + ' ' + direction + '"}'
+
+// =====================================================================
+// SESSION DETECTION (America/New_York time)
+// =====================================================================
+// Returns [inAsia, inLondon, inNYpre, inNYopen, inNYclose] bool tuple.
+// Family script uses for bgcolor() and drawSessionEntry() calls.
+
+export detectSessions(bool sAsia, bool sLondon, bool sNYpre, bool sNYopen, bool sNYclose) =>
+    TZ = "America/New_York"
+    asiaSessStr    = "1800-2200:12345"   // Sun-Thu evenings
+    londonSessStr  = "0300-0500:23456"   // Mon-Fri
+    nyPreSessStr   = "0700-0930:23456"
+    nyOpenSessStr  = "0930-1030:23456"
+    nyCloseSessStr = "1600-1615:23456"
+
+    inAsia    = sAsia    and not na(time(timeframe.period, asiaSessStr,    TZ))
+    inLondon  = sLondon  and not na(time(timeframe.period, londonSessStr,  TZ))
+    inNYpre   = sNYpre   and not na(time(timeframe.period, nyPreSessStr,   TZ))
+    inNYopen  = sNYopen  and not na(time(timeframe.period, nyOpenSessStr,  TZ))
+    inNYclose = sNYclose and not na(time(timeframe.period, nyCloseSessStr, TZ))
+
+    [inAsia, inLondon, inNYpre, inNYopen, inNYclose]
+
+export drawSessionEntry(SMCState st, bool curIn, bool prevIn, string name, color col) =>
+    if curIn and not prevIn
+        ph2 = ta.highest(20)
+        lbl = label.new(x=bar_index, y=ph2, text=name,
+             color=color.new(#000000, 100), textcolor=col,
+             style=label.style_label_down, size=size.tiny,
+             yloc=yloc.abovebar)
+        array.push(st.sessLabels, lbl)
+        pruneLabels(st.sessLabels, 25)  // 5 labels x 5 sessions = 25

@@ -1,0 +1,362 @@
+//@version=5
+// =====================================================================
+// HANK SMC Pro — NQ Family (QQQ / NQ1! / MNQ1!)
+// =====================================================================
+// Mechanical split from smc-pro-futures.pine 2026-05-13. Defaults match
+// the single-script source exactly. NO BEHAVIORAL CHANGE intended —
+// calibration is a future, separate task.
+//
+// Family scope: QQQ equity options + Nasdaq-100 futures (NQ1!, MNQ1!).
+// Use this on QQQ charts, NQ1! charts, MNQ1! charts. The
+// instrumentOverride input below is restricted to the NQ-family
+// allow-list to prevent accidental mislabeling on the wrong chart.
+//
+// FIRST PASTE FLOW:
+//   1. Publish hank-core-library.pine as private library FIRST.
+//   2. Verify the `import` line below matches your TradingView username.
+//      Default assumes `tavery2000`. Change if needed.
+//   3. Save → "Add to Chart".
+//   4. Compare side-by-side with smc-pro-futures.pine on the same chart
+//      for 30+ bars. Alerts should match identically.
+// =====================================================================
+
+import tavery2000/hank_core/1 as core
+
+indicator(title="HANK SMC Pro — NQ Family", shorttitle="SMC-NQ", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// =====================================================================
+// INPUTS
+// =====================================================================
+
+// --- General ---
+gGeneral        = "General"
+pivotLen        = input.int(5,        "Pivot length",            minval=2, maxval=50, group=gGeneral)
+adaptivePivot   = input.bool(true,    "Adaptive pivot per TF",    group=gGeneral, tooltip="When ON: 3 on 1M-5M, 5 on 15M-30M, else uses 'Pivot length' above. When OFF: 'Pivot length' applied to all timeframes. (§1-§8 fix for pivot-length × bar-time asymmetry.)")
+sensitivity     = input.string("Balanced", "Signal sensitivity", options=["Conservative", "Balanced", "Aggressive"], group=gGeneral)
+signalCooldown  = input.int(20,       "Signal cooldown (bars)",  minval=0, group=gGeneral)
+maxStructLabels = input.int(4,        "Max structure labels",    minval=1, maxval=20, group=gGeneral)
+
+// --- Display ---
+gDisplay      = "Display"
+showStruct    = input.bool(true,  "Structure HH/HL/LH/LL labels", group=gDisplay)
+showBOSLines  = input.bool(false, "BOS lines",                    group=gDisplay)
+showCHoCHLines= input.bool(true,  "CHoCH lines",                  group=gDisplay)
+showOBs       = input.bool(true,  "Order Blocks",                 group=gDisplay)
+showFVGs      = input.bool(true,  "Fair Value Gaps",              group=gDisplay)
+showSweeps    = input.bool(true,  "Liquidity Sweeps",             group=gDisplay)
+showSignals   = input.bool(true,  "BUY / SELL signals",           group=gDisplay)
+showSessions  = input.bool(true,  "Session zones",                group=gDisplay)
+
+// --- Visual ---
+gVisual      = "Visual"
+zoneOpacity  = input.int(60, "Zone opacity (0=solid, 100=invisible)", minval=0, maxval=100, group=gVisual, tooltip="Fill transparency for supply/demand zones and order blocks (FVG + OB boxes). Lower = darker / more visible. Default 60 (was 88-92 hardcoded). Border thickness unchanged.")
+
+// --- HTF & Dashboard ---
+gHTF         = "HTF & Dashboard"
+htfMode      = input.string("Auto", "HTF mode",        options=["Auto", "Manual"], group=gHTF)
+htfManual    = input.timeframe("60", "HTF (Manual)",   group=gHTF)
+htfPivotLen  = input.int(5,         "HTF pivot length", minval=2, maxval=50, group=gHTF)
+useHTFFilter = input.bool(false,    "Filter signals by HTF bias", group=gHTF, tooltip="Only fire signals aligned with the HTF trend.")
+
+// --- Zone-break signals (§10) ---
+gZoneBreak       = "Zone-break signals"
+enableZoneBreak  = input.bool(true,  "Enable zone-break signals",     group=gZoneBreak, tooltip="Fire BUY/SELL when price wicks into a zone and closes through to the opposite side (rejected supply/demand). Catches setups that the structural-break path misses.")
+zbWickMult       = input.float(0.5,  "Rejection wick (× ATR)",        minval=0.0, step=0.05, group=gZoneBreak, tooltip="Minimum wick magnitude as fraction of ATR(14). Lower = more sensitive.")
+
+// --- Live intra-bar triggers (§12) ---
+gLive             = "Live intra-bar triggers"
+enableLiveSignals = input.bool(true,  "Enable LIVE intra-bar signals", group=gLive, tooltip="Fires hollow LIVE markers BEFORE bar close on displacement breaks with volume confirmation. Confirmed BUY/SELL still fires at close. Tune thresholds below if noisy.")
+liveVolMult       = input.float(1.8,  "Volume spike (× SMA20)",        minval=0.5, step=0.1, group=gLive, tooltip="Higher = stricter. Tightened 2026-05-11 from 1.5 → 1.8 to suppress noise fires on intraday chop.")
+liveDispMult      = input.float(1.4,  "Displacement (× ATR)",          minval=0.5, step=0.1, group=gLive, tooltip="Higher = stricter. Tightened 2026-05-11 from 1.2 → 1.4 — only fire on clearly displaced bars.")
+liveExtremeRatio  = input.float(0.7,  "Close-near-extreme ratio",      minval=0.5, maxval=0.95, step=0.05, group=gLive, tooltip="Close must be in top/bottom (1 - ratio) of bar range. Higher = stricter.")
+
+// --- Early-structure triggers (§14) ---
+gEarly      = "Early-structure triggers"
+enableHLBuy = input.bool(true, "Enable HL→BUY / LH→SELL early-entry", group=gEarly, tooltip="Fire BUY when an HL pivot confirms above prior low; SELL when an LH pivot confirms below prior high. Catches continuation pullback completions AND early reversal turns. Subject to HTF filter, sensitivity gate, and cooldown.")
+
+// --- Auto-recovery (§16/§17 Path C) ---
+gAutoRecovery       = "Auto-recovery"
+enableAutoRecovery  = input.bool(true, "Enable auto-recovery on false CHoCH", group=gAutoRecovery, tooltip="When a CHoCH fires and within N bars price closes back through the broken pivot in the original direction, revert the trend state. Restores symmetry so the next legitimate signal can fire without waiting for HTF to catch up. Addresses §16 trend-state pollution and §17 HTF-filter collateral cost.")
+autoRecoveryBars    = input.int(5, "Auto-recovery window (bars)", minval=1, maxval=20, group=gAutoRecovery, tooltip="Bars after CHoCH fire to check for price reclaim. 5 on 1M = 5 min window. Raise for longer windows on higher timeframes.")
+
+// --- Webhook payload (NQ-family allow-list) ---
+gWebhook           = "Webhook Payload"
+instrumentOverride = input.string("AUTO", "Instrument override",
+     options=["AUTO","QQQ","NQ1!","MNQ1!"], group=gWebhook,
+     tooltip="NQ-family allow-list. Default AUTO uses Pine's syminfo.ticker. Set explicitly per chart (QQQ on QQQ chart, NQ1! on NQ1! chart, etc.) to prevent webhook payload mislabel. Must match webhook-server.js VALID_INSTRUMENTS exactly.")
+
+// --- Sessions ---
+gSessions = "Sessions"
+sAsia     = input.bool(true, "Asia 18:00-22:00 ET (Sun-Thu)",     group=gSessions)
+sLondon   = input.bool(true, "London 03:00-05:00 ET",             group=gSessions)
+sNYpre    = input.bool(true, "NY pre 07:00-09:30 ET",             group=gSessions)
+sNYopen   = input.bool(true, "NY open 09:30-10:30 ET",            group=gSessions)
+sNYclose  = input.bool(true, "NY close 16:00-16:15 ET",           group=gSessions)
+
+// --- Colors ---
+gColors    = "Colors"
+clrBull    = input.color(#26C6DA,                "Bullish core",     group=gColors)
+clrBear    = input.color(#EF5350,                "Bearish core",     group=gColors)
+clrMuted   = input.color(#7F8FA0,                "Neutral / muted",  group=gColors)
+clrAsia    = input.color(color.new(#9575CD, 96), "Asia zone",        group=gColors)
+clrLondon  = input.color(color.new(#5C6BC0, 96), "London zone",      group=gColors)
+clrNYpre   = input.color(color.new(#FFB74D, 96), "NY pre zone",      group=gColors)
+clrNYopen  = input.color(color.new(#66BB6A, 95), "NY open zone",     group=gColors)
+clrNYclose = input.color(color.new(#EF5350, 95), "NY close zone",    group=gColors)
+
+// =====================================================================
+// STATE — single SMCState container, library-owned schema
+// =====================================================================
+
+var core.SMCState st = core.newState()
+
+// =====================================================================
+// PIVOT BASELINE
+// =====================================================================
+
+pivotLenEffVal = core.pivotLenEff(adaptivePivot, pivotLen)
+ph    = ta.pivothigh(pivotLenEffVal, pivotLenEffVal)
+pl    = ta.pivotlow(pivotLenEffVal,  pivotLenEffVal)
+atr14 = ta.atr(14)
+
+// =====================================================================
+// STRUCTURE LABELS + HL/LH raw signals (BEFORE swing-state update)
+// =====================================================================
+
+[bullHLraw, bearLHraw] = core.drawStructureLabels(st, ph, pl, pivotLenEffVal,
+     maxStructLabels, showStruct, enableHLBuy, clrBull, clrBear)
+
+core.updateSwingState(st, ph, pl, pivotLenEffVal)
+
+// =====================================================================
+// BOS / CHoCH + AUTO-RECOVERY
+// =====================================================================
+
+[bullBOSraw, bearBOSraw, bullCHOraw, bearCHOraw] =
+     core.detectBOSCHO(st, enableAutoRecovery, showBOSLines, showCHoCHLines, clrBull, clrBear)
+
+core.checkAutoRecovery(st, autoRecoveryBars, pivotLenEffVal)
+
+// =====================================================================
+// LIQUIDITY SWEEPS
+// =====================================================================
+
+[bullSweepRaw, bearSweepRaw] = core.detectSweep(st, atr14, showSweeps, clrBull, clrBear)
+
+// =====================================================================
+// FVG + OB
+// =====================================================================
+
+core.detectFVG(st, atr14, showFVGs, zoneOpacity, clrBull, clrBear)
+core.detectOB(st, atr14, showOBs, zoneOpacity, clrBull, clrBear)
+
+// =====================================================================
+// HTF BIAS
+// =====================================================================
+
+htfTf = htfMode == "Auto" ?
+     (timeframe.period == "1"  or timeframe.period == "3"  or timeframe.period == "5"  ? "60"  :
+      timeframe.period == "15" or timeframe.period == "30"                              ? "240" :
+      timeframe.period == "60" or timeframe.period == "120" or timeframe.period == "240" ? "D"   :
+      "D") :
+     htfManual
+
+htfBias = request.security(syminfo.tickerid, htfTf, core.htfBiasFn(htfPivotLen),
+     lookahead=barmerge.lookahead_off)
+
+// =====================================================================
+// ZONE-BREAK (§10) + LIVE INTRA-BAR (§12)
+// =====================================================================
+
+[bullZoneBreakRaw, bearZoneBreakRaw] = core.detectZoneBreak(st, atr14, enableZoneBreak, zbWickMult)
+[liveBullBreakRaw, liveBearBreakRaw] = core.detectLiveBreak(st, atr14,
+     enableLiveSignals, liveVolMult, liveDispMult, liveExtremeRatio)
+
+// =====================================================================
+// SIGNAL SENSITIVITY (per-family tunable — stays in family script)
+// =====================================================================
+
+RECENT_SWEEP_BARS = 10
+
+bullBreak = bullBOSraw or bullCHOraw or bullZoneBreakRaw or bullHLraw
+bearBreak = bearBOSraw or bearCHOraw or bearZoneBreakRaw or bearLHraw
+
+bullSweepRecent = not na(st.lastBullSweepBar) and (bar_index - st.lastBullSweepBar) <= RECENT_SWEEP_BARS
+bearSweepRecent = not na(st.lastBearSweepBar) and (bar_index - st.lastBearSweepBar) <= RECENT_SWEEP_BARS
+
+nearBullZ = core.nearBullZone(st, atr14)
+nearBearZ = core.nearBearZone(st, atr14)
+
+buyTrigger  = false
+sellTrigger = false
+
+if barstate.isconfirmed
+    if sensitivity == "Conservative"
+        buyTrigger  := (bullCHOraw and (bullSweepRecent or nearBullZ)) or
+                       (bullBOSraw and bullSweepRecent and nearBullZ) or
+                       bullZoneBreakRaw or
+                       (bullHLraw and (bullSweepRecent or nearBullZ))
+        sellTrigger := (bearCHOraw and (bearSweepRecent or nearBearZ)) or
+                       (bearBOSraw and bearSweepRecent and nearBearZ) or
+                       bearZoneBreakRaw or
+                       (bearLHraw and (bearSweepRecent or nearBearZ))
+    else if sensitivity == "Balanced"
+        buyTrigger  := bullCHOraw or
+                       (bullBOSraw and (bullSweepRecent or nearBullZ)) or
+                       bullZoneBreakRaw or
+                       bullHLraw
+        sellTrigger := bearCHOraw or
+                       (bearBOSraw and (bearSweepRecent or nearBearZ)) or
+                       bearZoneBreakRaw or
+                       bearLHraw
+    else
+        buyTrigger  := bullBreak
+        sellTrigger := bearBreak
+
+    if buyTrigger and not na(st.lastBuyBar) and (bar_index - st.lastBuyBar) < signalCooldown
+        buyTrigger := false
+    if sellTrigger and not na(st.lastSellBar) and (bar_index - st.lastSellBar) < signalCooldown
+        sellTrigger := false
+
+    if useHTFFilter
+        if buyTrigger and htfBias != "Bullish"
+            buyTrigger := false
+        if sellTrigger and htfBias != "Bearish"
+            sellTrigger := false
+
+buyTriggerHTF  = buyTrigger  and htfBias == "Bullish"
+sellTriggerHTF = sellTrigger and htfBias == "Bearish"
+
+// =====================================================================
+// SIGNAL RENDERING
+// =====================================================================
+
+if buyTrigger and showSignals
+    yOff = na(atr14) ? 0.0 : atr14 * 0.5
+    label.new(x=bar_index, y=low - yOff, text="BUY",
+         color=color.new(clrBull, 0), textcolor=color.white,
+         style=label.style_label_up, size=size.normal)
+    st.lastBuyBar := bar_index
+
+if sellTrigger and showSignals
+    yOff = na(atr14) ? 0.0 : atr14 * 0.5
+    label.new(x=bar_index, y=high + yOff, text="SELL",
+         color=color.new(clrBear, 0), textcolor=color.white,
+         style=label.style_label_down, size=size.normal)
+    st.lastSellBar := bar_index
+
+plotshape(buyTrigger  and showSignals, title="BUY arrow",  style=shape.triangleup,
+     location=location.belowbar, color=clrBull, size=size.tiny)
+plotshape(sellTrigger and showSignals, title="SELL arrow", style=shape.triangledown,
+     location=location.abovebar, color=clrBear, size=size.tiny)
+
+plotshape(liveBullBreakRaw and showSignals, title="LIVE BUY",  style=shape.circle,
+     location=location.belowbar, color=clrBull, size=size.tiny, text="L", textcolor=color.white)
+plotshape(liveBearBreakRaw and showSignals, title="LIVE SELL", style=shape.circle,
+     location=location.abovebar, color=clrBear, size=size.tiny, text="L", textcolor=color.white)
+
+// =====================================================================
+// SESSION ZONES
+// =====================================================================
+
+[inAsia, inLondon, inNYpre, inNYopen, inNYclose] =
+     core.detectSessions(sAsia, sLondon, sNYpre, sNYopen, sNYclose)
+
+bgcolor(showSessions and inAsia    ? clrAsia    : na, title="Asia session")
+bgcolor(showSessions and inLondon  ? clrLondon  : na, title="London session")
+bgcolor(showSessions and inNYpre   ? clrNYpre   : na, title="NY pre session")
+bgcolor(showSessions and inNYopen  ? clrNYopen  : na, title="NY open session")
+bgcolor(showSessions and inNYclose ? clrNYclose : na, title="NY close session")
+
+if showSessions
+    core.drawSessionEntry(st, inAsia,    inAsia[1],    "Asia",     clrMuted)
+    core.drawSessionEntry(st, inLondon,  inLondon[1],  "London",   clrMuted)
+    core.drawSessionEntry(st, inNYpre,   inNYpre[1],   "NY pre",   clrMuted)
+    core.drawSessionEntry(st, inNYopen,  inNYopen[1],  "NY open",  clrBull)
+    core.drawSessionEntry(st, inNYclose, inNYclose[1], "NY close", clrBear)
+
+// =====================================================================
+// CDP COUNTERS
+// =====================================================================
+
+var int buyFireCount        = 0
+var int sellFireCount       = 0
+var int bullZoneBreakCount  = 0
+var int bearZoneBreakCount  = 0
+var int bullHLCount         = 0
+var int bearLHCount         = 0
+var int liveBuyCount        = 0
+var int liveSellCount       = 0
+
+if buyTrigger
+    buyFireCount := buyFireCount + 1
+if sellTrigger
+    sellFireCount := sellFireCount + 1
+if bullZoneBreakRaw
+    bullZoneBreakCount := bullZoneBreakCount + 1
+if bearZoneBreakRaw
+    bearZoneBreakCount := bearZoneBreakCount + 1
+if bullHLraw
+    bullHLCount := bullHLCount + 1
+if bearLHraw
+    bearLHCount := bearLHCount + 1
+if liveBullBreakRaw
+    liveBuyCount := liveBuyCount + 1
+if liveBearBreakRaw
+    liveSellCount := liveSellCount + 1
+
+plot(buyFireCount,        title="BuyFireCount",       color=color.new(color.green,  100), display=display.data_window)
+plot(sellFireCount,       title="SellFireCount",      color=color.new(color.red,    100), display=display.data_window)
+plot(bullZoneBreakCount,  title="BullZoneBreakCount", color=color.new(color.green,  100), display=display.data_window)
+plot(bearZoneBreakCount,  title="BearZoneBreakCount", color=color.new(color.red,    100), display=display.data_window)
+plot(bullHLCount,         title="BullHLCount",        color=color.new(color.green,  100), display=display.data_window)
+plot(bearLHCount,         title="BearLHCount",        color=color.new(color.red,    100), display=display.data_window)
+plot(liveBuyCount,        title="LiveBuyCount",       color=color.new(color.green,  100), display=display.data_window)
+plot(liveSellCount,       title="LiveSellCount",      color=color.new(color.red,    100), display=display.data_window)
+
+// =====================================================================
+// ALERT() FUNCTION CALLS
+// =====================================================================
+
+if buyTrigger
+    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'BUY',  'MEDIUM'), alert.freq_once_per_bar_close)
+if sellTrigger
+    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'SELL', 'MEDIUM'), alert.freq_once_per_bar_close)
+if buyTriggerHTF
+    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'HTF',  'HIGH'), alert.freq_once_per_bar_close)
+if sellTriggerHTF
+    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'HTF',  'HIGH'), alert.freq_once_per_bar_close)
+if bullZoneBreakRaw
+    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
+if bearZoneBreakRaw
+    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
+if bullHLraw
+    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'HL',   'MEDIUM'), alert.freq_once_per_bar_close)
+if bearLHraw
+    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'LH',   'MEDIUM'), alert.freq_once_per_bar_close)
+if liveBullBreakRaw
+    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
+if liveBearBreakRaw
+    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
+
+// =====================================================================
+// ALERTCONDITIONS
+// =====================================================================
+
+alertcondition(bullBOSraw,       "Bullish BOS",            "SMC: Bullish BOS")
+alertcondition(bearBOSraw,       "Bearish BOS",            "SMC: Bearish BOS")
+alertcondition(bullCHOraw,       "Bullish CHoCH",          "SMC: Bullish CHoCH (trend reversal up)")
+alertcondition(bearCHOraw,       "Bearish CHoCH",          "SMC: Bearish CHoCH (trend reversal down)")
+alertcondition(bullSweepRaw,     "Bullish Liquidity Sweep","SMC: Bullish liquidity sweep")
+alertcondition(bearSweepRaw,     "Bearish Liquidity Sweep","SMC: Bearish liquidity sweep")
+alertcondition(bullZoneBreakRaw, "Bullish Zone Break",     "SMC: Bullish zone-break rejection")
+alertcondition(bearZoneBreakRaw, "Bearish Zone Break",     "SMC: Bearish zone-break rejection")
+alertcondition(liveBullBreakRaw, "LIVE Bullish Break",     "SMC: LIVE bullish break (intra-bar)")
+alertcondition(liveBearBreakRaw, "LIVE Bearish Break",     "SMC: LIVE bearish break (intra-bar)")
+alertcondition(bullHLraw,        "Bullish HL early-entry", "SMC: Bullish HL pivot — early continuation/reversal entry")
+alertcondition(bearLHraw,        "Bearish LH early-entry", "SMC: Bearish LH pivot — early continuation/reversal entry")
+alertcondition(buyTrigger,       "BUY signal",             "SMC: BUY signal")
+alertcondition(sellTrigger,      "SELL signal",            "SMC: SELL signal")
+alertcondition(buyTriggerHTF,    "HTF-aligned BUY",        "SMC: HTF-aligned BUY")
+alertcondition(sellTriggerHTF,   "HTF-aligned SELL",       "SMC: HTF-aligned SELL")
