@@ -52,6 +52,10 @@ showSweeps    = input.bool(true,  "Liquidity Sweeps",             group=gDisplay
 showSignals   = input.bool(true,  "BUY / SELL signals",           group=gDisplay)
 showSessions  = input.bool(true,  "Session zones",                group=gDisplay)
 
+// --- Visual ---
+gVisual      = "Visual"
+zoneOpacity  = input.int(60, "Zone opacity (0=solid, 100=invisible)", minval=0, maxval=100, group=gVisual, tooltip="Fill transparency for supply/demand zones and order blocks (FVG + OB boxes). Lower = darker / more visible. Default 60 (was 88-92 hardcoded). Border thickness unchanged.")
+
 // --- HTF & Dashboard ---
 gHTF         = "HTF & Dashboard"
 htfMode      = input.string("Auto", "HTF mode",        options=["Auto", "Manual"], group=gHTF)
@@ -411,7 +415,7 @@ if barstate.isconfirmed and not na(atr14) and showFVGs
         if gap >= 0.3 * atr14
             b = box.new(left=bar_index - 2, top=topY,
                  right=bar_index + fvgExtend, bottom=botY,
-                 bgcolor=color.new(clrBull, 92),
+                 bgcolor=color.new(clrBull, zoneOpacity),
                  border_color=color.new(clrBull, 80),
                  border_width=1)
             array.push(bullFVGs, b)
@@ -425,7 +429,7 @@ if barstate.isconfirmed and not na(atr14) and showFVGs
         if gap >= 0.3 * atr14
             b = box.new(left=bar_index - 2, top=topY,
                  right=bar_index + fvgExtend, bottom=botY,
-                 bgcolor=color.new(clrBear, 92),
+                 bgcolor=color.new(clrBear, zoneOpacity),
                  border_color=color.new(clrBear, 80),
                  border_width=1)
             array.push(bearFVGs, b)
@@ -470,7 +474,7 @@ if displacementBull and showOBs
     if not na(obIdx)
         b = box.new(left=bar_index - obIdx, top=high[obIdx],
              right=bar_index + obExtend, bottom=low[obIdx],
-             bgcolor=color.new(clrBull, 88),
+             bgcolor=color.new(clrBull, zoneOpacity),
              border_color=color.new(clrBull, 70),
              border_width=1)
         array.push(bullOBs, b)
@@ -485,7 +489,7 @@ if displacementBear and showOBs
     if not na(obIdx)
         b = box.new(left=bar_index - obIdx, top=high[obIdx],
              right=bar_index + obExtend, bottom=low[obIdx],
-             bgcolor=color.new(clrBear, 88),
+             bgcolor=color.new(clrBear, zoneOpacity),
              border_color=color.new(clrBear, 70),
              border_width=1)
         array.push(bearOBs, b)
