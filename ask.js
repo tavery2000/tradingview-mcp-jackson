@@ -297,6 +297,49 @@ function answerMoc() {
   return out.join('\n');
 }
 
+function answerTheta() {
+  const t = readJsonSafe('portfolio-theta.json');
+  if (!t) return 'portfolio-theta.json not found — is theta-monitor.js running?';
+  const out = [];
+  const burnLabel = t.burnZone?.current?.label ?? '—';
+  const thetaMin = t.portfolioThetaPerMin ?? 0;
+  const thetaPerHour = thetaMin * 60;
+  const feeds = t.feeds || {};
+  const wsMark = feeds.ws === true ? 'on' : 'OFF';
+  const cdpMark = feeds.cdp === true ? 'on' : feeds.cdp === false ? 'OFF' : '—';
+  out.push(`PORTFOLIO THETA  (${t.time ?? '—'} ET, ${ageStr(t.ts)})`);
+  out.push(`  burn zone     ${burnLabel}    paying ${fmtMoney(thetaMin)}/min  (~${fmtMoney(thetaPerHour)}/hr)`);
+  out.push(`  positions     ${t.positionCount ?? 0}    feeds  ws=${wsMark} cdp=${cdpMark}`);
+
+  if (!t.positions || !t.positions.length) {
+    out.push('', 'No open positions.');
+    return out.join('\n');
+  }
+
+  out.push('', 'POSITION CARDS');
+  for (const p of t.positions) {
+    if (p.error) {
+      out.push(`  [${p.instrument} ${p.engine ?? '—'} ${p.signal}]  ${p.contracts ?? 1} contract — ${p.error} (synthetic)`);
+      continue;
+    }
+    const synthMark = p.synthetic ? '  ⚠ synthetic' : '';
+    const ivMark    = p.ivCrushing ? '  ⚠ IV CRUSH' : '';
+    const exitMark  = p.exitNow ? '  ⚠ EXIT NOW' : p.exitWarn ? '  ⚠ exit warn' : '';
+    const pnl       = p.pnl ?? 0;
+    const pnlSign   = pnl >= 0 ? '+' : '';
+    const g         = p.greeks || {};
+    const ivCurPct  = (p.currentIV ?? 0) * 100;
+    const ivEntPct  = (p.entryIV   ?? 0) * 100;
+    const ivChPct   = (p.ivChange  ?? 0) * 100;
+    out.push('');
+    out.push(`  [${p.instrument} ${p.engine ?? '—'} ${p.signal}]  ${p.contracts} contract  strike ${fmtPrice(p.strike)}${synthMark}`);
+    out.push(`    entry ${fmtPrice(p.entryPrice)}  →  est ${fmtPrice(p.currentEstOption)}  (${pnlSign}${(p.pnlPct ?? 0).toFixed(1)}%, ${fmtMoney(pnl)})${ivMark}`);
+    out.push(`    delta ${(g.delta ?? 0).toFixed(3)}    theta/min ${(p.thetaPerMin ?? 0).toFixed(3)}    IV ${ivCurPct.toFixed(1)}% (entry ${ivEntPct.toFixed(1)}%, ${ivChPct >= 0 ? '+' : ''}${ivChPct.toFixed(1)})`);
+    out.push(`    held ${(p.minsHeld ?? 0).toFixed(0)} min    hardExit in ${(p.hardExitMins ?? 0).toFixed(0)} min    burn ${p.burnZone?.label ?? p.burnRate ?? '—'}${exitMark}`);
+  }
+  return out.join('\n');
+}
+
 function helpText() {
   return [
     'HANK ASK — local-state Q&A (no internet, no LLM, file reads only)',
@@ -311,6 +354,7 @@ function helpText() {
     '  tier                      account tier state + eligibility',
     '  flow [sym]                options-flow 0DTE verdict (default SPY)',
     '  moc                       MOC ALERT entries + hank_stats.moc summary',
+    '  theta / greeks / burn     portfolio theta + per-position greeks/burn-zone',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
@@ -351,6 +395,7 @@ export function answerQuestion(text) {
   if (/\b(tier|equity|hwm)\b/.test(lo))            return answerTier();
   if (/\b(flow|chain|option)/.test(lo))            return answerFlow('SPY');
   if (/\b(moc|imbalance|close)\b/.test(lo))        return answerMoc();
+  if (/\b(theta|greeks|burn)\b/.test(lo))          return answerTheta();
 
   // Symbol-only fallback
   if (sym) return answerInstrument(sym);

@@ -1489,6 +1489,9 @@ button:disabled { opacity: 0.4; cursor: default; }
     <div class="nav-tab" data-tab="trade" onclick="switchTab('trade',this)">
       <span class="nav-icon">▲</span> TRADE
     </div>
+    <div class="nav-tab" data-tab="theta" onclick="switchTab('theta',this)">
+      <span class="nav-icon">θ</span> THETA
+    </div>
     <div class="nav-tab" data-tab="settings" onclick="switchTab('settings',this)">
       <span class="nav-icon">⚙</span> SETTINGS
     </div>
@@ -3094,6 +3097,47 @@ button:disabled { opacity: 0.4; cursor: default; }
   </div>
 </div><!-- end tab-settings -->
 
+<!-- ══════════════════ TAB: THETA / 0DTE RISK SURFACE ════════════════ -->
+<!-- Added 2026-05-13 alongside theta-monitor.js. Renders /api/theta data
+     (portfolio-theta.json written by theta-monitor every 5s).
+     Reuses renderPositionCards from pollTheta — same cards as AUTONOMOUS
+     tab, plus a portfolio summary header. -->
+<div class="tab-panel" id="tab-theta">
+  <div style="padding:20px;overflow-y:auto;height:100%;">
+    <div style="display:flex;gap:16px;margin-bottom:20px;">
+      <div class="panel" style="flex:1;">
+        <div class="ph"><span class="pt">PORTFOLIO θ</span></div>
+        <div class="pb" style="text-align:center;padding:18px 8px;">
+          <div id="theta-portfolio-pmin" style="color:var(--red);font-weight:bold;font-size:22px;">θ 0.00/min</div>
+          <div id="theta-portfolio-phr" style="color:#888;font-size:12px;margin-top:6px;">paying ~$0/hr</div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1;">
+        <div class="ph"><span class="pt">BURN ZONE</span></div>
+        <div class="pb" style="text-align:center;padding:18px 8px;">
+          <div id="theta-burn-label" style="font-weight:bold;font-size:22px;">—</div>
+          <div id="theta-burn-progress" style="color:#888;font-size:12px;margin-top:6px;">—</div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1;">
+        <div class="ph"><span class="pt">POSITIONS</span></div>
+        <div class="pb" style="text-align:center;padding:18px 8px;">
+          <div id="theta-position-count" style="font-weight:bold;font-size:22px;">0</div>
+          <div id="theta-feeds" style="color:#888;font-size:12px;margin-top:6px;">feeds —</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:0;">
+      <div class="ph"><span class="pt">POSITION CARDS</span></div>
+      <div class="pb">
+        <div id="posCardsTheta">
+          <div style="color:#444;font-style:italic;font-size:12px;">No open positions</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- end content -->
 </div><!-- end main-area -->
 </div><!-- end shell -->
@@ -3919,16 +3963,47 @@ async function pollTheta() {
 
   renderPositionCards(positions);
   renderMocStrip(positions);
+
+  // 2026-05-13: populate dedicated THETA-tab summary (added with theta-monitor.js)
+  const tpm = document.getElementById('theta-portfolio-pmin');
+  const tph = document.getElementById('theta-portfolio-phr');
+  const tbl = document.getElementById('theta-burn-label');
+  const tbp = document.getElementById('theta-burn-progress');
+  const tpc = document.getElementById('theta-position-count');
+  const tfd = document.getElementById('theta-feeds');
+  if (tpm) tpm.textContent = `θ ${thetaPerMin >= 0 ? '+' : ''}${thetaPerMin.toFixed(2)}/min`;
+  if (tph) tph.textContent = `paying ~$${(thetaPerMin * 60).toFixed(2)}/hr`;
+  if (tbl) {
+    const label = firstBurn?.label ?? j.burnZone?.current?.label ?? '—';
+    tbl.textContent = label;
+    if (firstBurn?.color) tbl.style.color = firstBurn.color;
+  }
+  if (tbp) {
+    const prog = j.burnZone?.current?.progress;
+    tbp.textContent = prog != null ? `${(prog * 100).toFixed(0)}% through zone` : '—';
+  }
+  if (tpc) tpc.textContent = String(j.positionCount ?? 0);
+  if (tfd) {
+    const f = j.feeds || {};
+    tfd.textContent = `feeds  ws=${f.ws === true ? 'on' : 'OFF'}  cdp=${f.cdp === true ? 'on' : f.cdp === false ? 'OFF' : '—'}`;
+  }
 }
 
 function renderPositionCards(positions) {
-  const wrap = document.getElementById('posCards');
-  if (!wrap) return;
+  // 2026-05-13: render to both AUTONOMOUS tab (#posCards) and dedicated
+  // THETA tab (#posCardsTheta). Both panels exist in DOM at all times;
+  // CSS .tab-panel:not(.active){display:none} hides the inactive one.
+  const wraps = [
+    document.getElementById('posCards'),
+    document.getElementById('posCardsTheta'),
+  ].filter(Boolean);
+  if (!wraps.length) return;
   if (!positions.length) {
-    wrap.innerHTML = '<div style="color:#444;font-style:italic;font-size:12px;">No open positions</div>';
+    const empty = '<div style="color:#444;font-style:italic;font-size:12px;">No open positions</div>';
+    for (const w of wraps) w.innerHTML = empty;
     return;
   }
-  wrap.innerHTML = positions.map(p => {
+  const html = positions.map(p => {
     const pnl = p.pnl ?? 0;
     const pnlPct = p.pnlPct ?? 0;
     const pnlCls = pnl >= 0 ? 'bull' : 'bear';
@@ -3972,6 +4047,7 @@ function renderPositionCards(positions) {
         ${p.vegaAlert && !p.ivCrushing ? '<div style="color:var(--yellow);font-size:11px;margin-top:4px;">⚠ VEGA DRAG</div>' : ''}
       </div>`;
   }).join('');
+  for (const w of wraps) w.innerHTML = html;
 }
 
 function renderMocStrip(positions) {
