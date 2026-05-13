@@ -394,3 +394,46 @@ After a decision:
 If a fix proves wrong: this doc captures the original alternatives, making rollback or pivot to B/C low-effort.
 
 *Created 2026-05-12 EOD pending post-close review.*
+
+---
+
+## Open Hypothesis — Pine Configuration Drift Across Charts (logged 2026-05-13)
+
+**Not a decision yet.** Observation worth investigating during the weekend Electron session.
+
+### Pattern
+
+Across multiple sessions (Tuesday + Wednesday confirmed), Pine signal-firing latency is **consistently asymmetric across instruments on identical setups**:
+
+| Pair | Leader (fires earlier) | Lagger (fires later) |
+|---|---|---|
+| ES vs NQ | **NQ** | ES |
+| SPY vs QQQ | **QQQ** | SPY |
+
+The lagging instruments are consistent (ES, SPY). The leaders are consistent (NQ, QQQ). Today's 09:47 SPY LL → 09:55 BUY (8-min gap, entire bounce missed by HANK while operator captured it manually) is one concrete example; ES vs NQ on the same structural break events the same pattern.
+
+### Hypothesis
+
+The 6 instrument charts may have **drifted apart in their Pine configurations** over weeks of per-chart tweaks. Lagging charts may have:
+- Stricter zone-confluence requirements (more overlay scripts needing to align)
+- Tighter volume thresholds (fewer bars qualify as "volume confirmation")
+- Larger minimum-displacement thresholds (smaller moves don't trigger)
+- Denser overlay scripts (Supply 1H/4H + Demand 1H + VWAP±1σ + PDH/PDL/PDC + FVG on SPY vs leaner stack on QQQ)
+- Different `Signal cooldown (bars)` settings
+- Per-chart instrument override (committed `12f5e50` 2026-05-12) potentially overriding signal logic, not just labels
+
+### Action
+
+**Saturday weekend Electron session: side-by-side Pine settings audit of all 6 charts.** Dump every input value for SMC Pro on SPY / QQQ / IWM / ES1! / NQ1! / MES1!, compare column-by-column. Any differences = drift to either reconcile or document as intentional.
+
+### Why not tonight
+
+Diagnosing requires chart-by-chart screen capture and Pine settings dialog inspection — that's MCP-tool-with-chart-access work or operator visual work, not log analysis. Better as a focused 30-min audit Saturday than ad-hoc investigation during RTH.
+
+### Connection to other decisions
+
+- Independent of Decisions 1-5 (those are all post-Pine fixes). This is upstream — a configuration drift, not an architecture flaw.
+- If drift is found and reconciled, the SPY-late-fire pattern from today's per-instrument investigation may resolve without any HANK-side code change.
+- Composes with Decision 1 (timing-lag fix): even if Pine settings are reconciled, the structure-confirmation-vs-sweep timing lag is still real and Decision 1 still applies.
+
+*Logged 2026-05-13 EOD pending weekend audit.*
