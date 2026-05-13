@@ -217,6 +217,11 @@ async function pollCycle() {
   const positions = [];
   let totalThetaPerMin = 0;
 
+  // Burn zone is time-of-day, same for all positions — compute once per cycle.
+  // Declared BEFORE the loop because each position's burnZone field references
+  // burn.current (otherwise TDZ error: 'Cannot access burn before initialization').
+  const burn = getBurnZoneData();
+
   for (const trade of open) {
     let currentUnderlying = null;
     try {
@@ -304,8 +309,6 @@ async function pollCycle() {
 
     totalThetaPerMin += result.thetaPerMinContract * (position.contracts || 1);
   }
-
-  const burn = getBurnZoneData();
 
   const output = {
     ts:                   Date.now(),
