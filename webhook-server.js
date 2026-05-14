@@ -216,6 +216,14 @@ async function handlePineAlert(req, res) {
   }
 
   // §19 — Signal reversal exit
+  // P1-6 (2026-05-14 EOD) exit hierarchy: SIGNAL_REVERSAL is the LAST-RESORT
+  // exit reason. Mechanical exits (STOP_LOSS / TARGET / TRAIL / BE / locked)
+  // ALWAYS win on the same tick by virtue of running in evaluateOpenPositions
+  // which closes synchronously before processing the next pine alert.
+  // Additional precedence: trades that have transitioned to STAGE_3_TRAILING
+  // are protected by their trail+R-locks — operator wants the trail to run,
+  // not the next opposite Pine signal to short-circuit it. Skip SIGNAL_REVERSAL
+  // when the candidate has stage=STAGE_3_TRAILING.
   try {
     const lg = JSON.parse(readFileSync(LEDGER_FILE, 'utf8'));
     const oppositeOpen = (lg.trades ?? []).find(t =>
@@ -223,13 +231,22 @@ async function handlePineAlert(req, res) {
       t.signal !== direction && t.engine !== 'SWING'
     );
     if (oppositeOpen) {
-      const entryU = oppositeOpen.underlyingPrice ?? price;
-      const dirMult = oppositeOpen.signal === 'CALLS' ? 1 : -1;
-      const optMove = (price - entryU) * dirMult * 0.4;
-      const synthExit = Math.max(0.01, parseFloat((oppositeOpen.fillPrice + optMove).toFixed(4)));
-      const closed = closePosition(oppositeOpen.requestId, synthExit, 'SIGNAL_REVERSAL');
-      if (closed) {
-        console.log(`  [SIGNAL_REVERSAL] Closed ${instrument} ${oppositeOpen.signal} at $${synthExit.toFixed(2)} (entry $${oppositeOpen.fillPrice}) — ${engine} flipped to ${direction}`);
+      if (oppositeOpen.stage === 'STAGE_3_TRAILING') {
+        jAlert('INFO', 'signal-reversal.skipped.stage3', {
+          instrument, requestId: oppositeOpen.requestId,
+          openSignal: oppositeOpen.signal, newSignal: direction,
+          reason: 'STAGE_3_TRAILING — trail/R-lock owns the close, not signal-reversal',
+        });
+        console.log(`  [SIGNAL_REVERSAL] SKIPPED — ${instrument} ${oppositeOpen.signal} in STAGE_3_TRAILING; trail/R-locks own close`);
+      } else {
+        const entryU = oppositeOpen.underlyingPrice ?? price;
+        const dirMult = oppositeOpen.signal === 'CALLS' ? 1 : -1;
+        const optMove = (price - entryU) * dirMult * 0.4;
+        const synthExit = Math.max(0.01, parseFloat((oppositeOpen.fillPrice + optMove).toFixed(4)));
+        const closed = closePosition(oppositeOpen.requestId, synthExit, 'SIGNAL_REVERSAL');
+        if (closed) {
+          console.log(`  [SIGNAL_REVERSAL] Closed ${instrument} ${oppositeOpen.signal} at $${synthExit.toFixed(2)} (entry $${oppositeOpen.fillPrice}) — ${engine} flipped to ${direction}`);
+        }
       }
     }
   } catch (e) {
