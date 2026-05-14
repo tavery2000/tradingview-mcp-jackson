@@ -268,23 +268,42 @@ export function gateMacro4H(signal, ctx) {
   return noop;
 }
 
-// ─── Counter-trend gate (2026-05-13) — env-configurable soft/hard ───────
-// Reads COUNTER_TREND_MODE = off | down_weight | block (default down_weight).
+// ─── Counter-trend gate (2026-05-13 + P1-7 instrument-class split) ──────
+// Mode resolution priority:
+//   1. instrument-class-specific: COUNTER_TREND_FUTURES_MODE or
+//      COUNTER_TREND_EQUITY_MODE
+//   2. legacy global: COUNTER_TREND_MODE (default down_weight)
+//
+// Today's data motivation (2026-05-14): LH engine -$11,102 net, SELL
+// engine -$3,541, both primarily counter-trend on futures. Down-weight ×
+// 0.6 was insufficient to suppress. Futures default flipped to block.
+// Equity continues at down_weight (the dollar damage is much smaller per
+// trade and the down_weight has worked).
+//
 // Returns one of:
 //   { action: 'pass',        multiplier: 1.0 }
 //   { action: 'down_weight', multiplier: <COUNTER_TREND_DOWNWEIGHT or 0.6> }
 //   { action: 'block' }
 // FADE engine exempted (counter-trend by design). RANGING / UNKNOWN never trigger.
-// Webhook-server.js wires this between LATE_DAY_ENTRY_0DTE and sendOrder so the
-// down_weight path multiplies consensus.finalConfidence before tier sizing —
-// HIGH (1.5) × 0.6 → 0.9 still trades but at low band; MEDIUM (1.0) × 0.6 → 0.6
-// hits the below-threshold gate in paperTrading and becomes a no-trade.
-export function evaluateCounterTrend(macro4H, direction, engine) {
+const _FUTURES_SET = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
+
+export function evaluateCounterTrend(macro4H, direction, engine, instrument = null) {
   const pass = { action: 'pass', multiplier: 1.0 };
   if (!direction) return pass;
   if (engine === 'FADE') return pass;
 
-  const mode = process.env.COUNTER_TREND_MODE || 'down_weight';
+  // Resolve mode by instrument class
+  const instUpper = (instrument || '').toUpperCase();
+  const isFutures = _FUTURES_SET.has(instUpper);
+  let mode;
+  if (instrument != null) {
+    mode = isFutures
+      ? (process.env.COUNTER_TREND_FUTURES_MODE || process.env.COUNTER_TREND_MODE || 'down_weight')
+      : (process.env.COUNTER_TREND_EQUITY_MODE  || process.env.COUNTER_TREND_MODE || 'down_weight');
+  } else {
+    // Back-compat for callers that don't pass instrument
+    mode = process.env.COUNTER_TREND_MODE || 'down_weight';
+  }
   if (mode === 'off') return pass;
 
   const isCounter =
@@ -292,12 +311,12 @@ export function evaluateCounterTrend(macro4H, direction, engine) {
     (macro4H === 'DOWN' && direction === 'CALLS');
   if (!isCounter) return pass;
 
-  if (mode === 'block') return { action: 'block', multiplier: 0 };
+  if (mode === 'block') return { action: 'block', multiplier: 0, instrumentClass: isFutures ? 'futures' : 'equity' };
 
   // down_weight (default)
   const raw = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
   const mult = Number.isFinite(raw) && raw > 0 && raw <= 1.0 ? raw : 0.6;
-  return { action: 'down_weight', multiplier: mult };
+  return { action: 'down_weight', multiplier: mult, instrumentClass: isFutures ? 'futures' : 'equity' };
 }
 
 // ─── VWAP wrong-side gate ───────────────────────────────────────────────

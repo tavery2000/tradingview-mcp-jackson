@@ -298,10 +298,13 @@ async function handlePineAlert(req, res) {
     _macro4HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
   }
 
-  const ctGate = evaluateCounterTrend(_macro4H, direction, engine);
+  // P1-7 (2026-05-14 EOD): pass instrument so evaluateCounterTrend can
+  // resolve mode by class (COUNTER_TREND_FUTURES_MODE vs EQUITY_MODE).
+  const ctGate = evaluateCounterTrend(_macro4H, direction, engine, instrument);
   if (ctGate.action === 'block') {
     jGateBlock(engine, instrument, direction, 'COUNTER_TREND_BLOCK', {
       macro4H: _macro4H, macro4HSrc: _macro4HSrc, mode: 'block',
+      instrumentClass: ctGate.instrumentClass ?? null,
     });
     return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H });
   }
@@ -432,6 +435,9 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   const _ctMode = process.env.COUNTER_TREND_MODE || 'down_weight';
   const _ctMult = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
+  const _ctFut  = process.env.COUNTER_TREND_FUTURES_MODE || _ctMode;
+  const _ctEq   = process.env.COUNTER_TREND_EQUITY_MODE  || _ctMode;
+  console.log(`  [WEBHOOK] Counter-trend gates: futures=${_ctFut}  equity=${_ctEq}  downweight×${_ctMult}`);
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║
