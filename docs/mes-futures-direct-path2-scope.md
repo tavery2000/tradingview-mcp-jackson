@@ -3,7 +3,28 @@
 **Date:** 2026-05-14 (scoping)
 **Target deploy:** Monday 2026-05-18 (paper-mode test, RTH session)
 **Author:** Claude Code (scoping deliverable per operator request)
-**Status:** SCOPE DOC. Implementation begins per operator authorization (working window: weekend 2026-05-16/17, no signal-affecting changes to existing options-dispatch path).
+**Status:** SCOPE DOC, **DECISIONS LOCKED 2026-05-14 EOD**. Implementation begins per operator authorization. Working window: weekend 2026-05-16/17.
+
+---
+
+## 0. Locked decisions (operator-confirmed 2026-05-14 EOD)
+
+| # | Decision | Lock |
+|---|---|---|
+| 1 | **Direction naming:** preserve CALLS/PUTS in journal records (matches Pine alert payload format end-to-end) | LOCKED |
+| 2 | **Webull live-trading gate:** SEPARATE from options. New env var `FUTURES_TRADING_MODE=PAPER\|LIVE` distinct from existing `TRADING_MODE`. Allows futures live before options live (or vice versa). | LOCKED |
+| 3 | **v1 instruments:** **MES1! ONLY**. Account graduates to additional instruments (ES1!, NQ1!, MNQ1!) when balance crosses **$2,500** (2.5x growth from $1k starting capital). Sizing matrix recalibration deferred to graduation milestone. | LOCKED |
+| 4 | **Concurrent positions:** UNLIMITED (per RULE 1). No `FUT_MAX_CONCURRENT` cap. | LOCKED |
+| 5 | **Stacking rule:** AGGRESSIVE — B→A on 1 same-direction signal within 60-sec window (as drafted in §5). | LOCKED |
+| 6 | **Trailing stops:** SHIP WITH v1 launch (not deferred to v2). Tier A: trail to BE at +3 pts, trail to +50% of target at +5 pts. Tier B: trail to BE at +2 pts. Tier C: no trail. | LOCKED |
+
+Implementation impact of locked decisions (vs original draft):
+- Trailing stops in v1: +1-2 hrs dev work (adds trail-state machine to position record + tick-handler logic in futuresStopMonitor)
+- Separate FUTURES_TRADING_MODE: +30 min dev work (parallel mode constant)
+- MES1!-only v1 with $2,500 graduation trigger: SIMPLER than multi-instrument v1 — saves time. Add graduation watcher at module load (warns operator when balance crosses threshold; does NOT auto-enable additional instruments — operator authorizes the v2 enabling explicitly)
+- All other locks preserve original scope
+
+Updated dev estimate: **13-19 hrs** (was 12-17). Still fits weekend window comfortably.
 
 ---
 
@@ -190,10 +211,17 @@ Alternative: have `futuresStopMonitor` poll CDP directly (avoids monitor.js coup
 ### MODIFIED: `.env`
 
 ```bash
-# 2026-05-18: futures-direct dispatch (Path 2). When true, MES1!/ES1!/NQ1!/MNQ1!
-# Pine alerts route to futuresTrading.placeFuturesOrder instead of the options
-# chain. Equity (SPY/QQQ/IWM) unaffected. Default false for safe rollout.
-FUTURES_DIRECT_ENABLED=false           # flip to true on Monday 5/18 startup
+# 2026-05-18: futures-direct dispatch (Path 2). When true, MES1! Pine alerts
+# route to futuresTrading.placeFuturesOrder instead of the options chain.
+# Equity (SPY/QQQ/IWM) unaffected. v1: MES1! only — ES1!/NQ1!/MNQ1! gated by
+# account-graduation watcher (unlocks when futures-ledger.balance > $2,500).
+# Default false for safe rollout; flip to true on Monday 5/18 after 09:40 ET.
+FUTURES_DIRECT_ENABLED=false
+
+# Live trading gate — SEPARATE from options-side TRADING_MODE so futures can
+# go live independently. PAPER = simulated fills via futures-ledger.json.
+# LIVE = Webull futures order routing (not yet implemented in Path 2 v1).
+FUTURES_TRADING_MODE=PAPER
 
 # Tier sizing per docs/mes-1k-300-daily-plan.md
 FUT_TIER_A_CONTRACTS=5
@@ -208,14 +236,23 @@ FUT_TIER_A_TARGET_POINTS=6
 FUT_TIER_B_TARGET_POINTS=5
 FUT_TIER_C_TARGET_POINTS=3
 
-# Stacking-window for tier upgrades (LIVE → C; HL alone → B; HTF + 2nd same-direction
-# alert within window → A)
+# Trailing stops (v1 launch per locked decision §0). Tier A trails to BE
+# at +3pt unrealized, then to +50% of target (+3pt) at +5pt unrealized.
+# Tier B trails to BE at +2pt. Tier C: no trail (let scalp run to TP/SL).
+FUT_TIER_A_TRAIL_BE_POINTS=3
+FUT_TIER_A_TRAIL_LOCK_POINTS=5
+FUT_TIER_A_TRAIL_LOCK_TARGET_PCT=50
+FUT_TIER_B_TRAIL_BE_POINTS=2
+
+# Stacking-window for tier upgrades (LIVE→C; HL alone→B; HTF + 2nd same-
+# direction alert within window→A). Aggressive per locked decision §0.
 FUT_STACKING_WINDOW_MS=60000
 
-# $1,000 paper account
+# $1,000 paper account; graduates to multi-instrument at $2,500
 FUT_STARTING_BALANCE=1000
+FUT_GRADUATION_THRESHOLD=2500
 
-# Daily envelope (mirrors options-side caps but tighter for $1k account)
+# Daily envelope (tighter than options for $1k account)
 FUT_DAILY_TARGET=300
 FUT_MAX_DAILY_LOSS=150
 FUT_MAX_TRADES_PER_DAY=10
@@ -460,14 +497,16 @@ The futures-ledger.json file persists across rollbacks — closing existing posi
 
 ---
 
-## 13. Open questions for operator
+## 13. Open questions — RESOLVED
 
-1. **Direction naming:** futures use LONG/SHORT, options use CALLS/PUTS. Do you want futures journal records to map CALLS→LONG and PUTS→SHORT (operator-readable), or preserve CALLS/PUTS (consistent with Pine alert payload format)?
-2. **Webull live trading:** Path 2 ships paper-only (matches existing options paper-mode). When do you want live Webull futures order routing? Same gate pattern as options (TRADING_MODE=LIVE), or separate (FUTURES_TRADING_MODE=LIVE)?
-3. **Multiple futures instruments:** plan focuses on MES1!. Do you want ES1!/NQ1!/MNQ1! enabled from day 1 with different contract counts (NQ has different point-value than MES; sizing matrix would need to scale differently), or MES1!-only for v1 with others added in v2?
-4. **Alert volume:** the cap-rip means MES1! can have unlimited concurrent positions. Combined with 5 contracts/Tier A entry, an active session could see 5+ simultaneous Tier A entries = 25 contracts × $5/pt = $125/pt of exposure. Do you want a per-strategy CONCURRENT cap (e.g., max 3 open futures positions at once) or fully unlimited?
-5. **Stacking rule strictness:** plan upgrades B→A on a single same-direction signal within 60 sec. Aggressive. Want stricter (require 2 same-direction within window for upgrade)?
-6. **Trailing stops:** plan v1 ships with fixed stops only. Want trailing logic in v1, or wait until baseline win-rate established?
+All six questions answered by operator 2026-05-14 EOD. See §0 (Locked decisions) at top of doc for the consolidated decision table. Original questions and answers preserved here for reference:
+
+1. **Direction naming:** ~~LONG/SHORT or CALLS/PUTS?~~ → **CALLS/PUTS** preserved (matches Pine payload format end-to-end).
+2. **Webull live-trading gate:** ~~Same as options or separate?~~ → **SEPARATE** (`FUTURES_TRADING_MODE` distinct from options-side `TRADING_MODE`).
+3. **Multi-instrument v1:** ~~All four or MES1!-only?~~ → **MES1! ONLY**, additional instruments unlocked when account > $2,500.
+4. **Concurrent cap:** ~~Per-strategy cap or unlimited?~~ → **UNLIMITED** (per RULE 1).
+5. **Stacking rule:** ~~Aggressive or stricter?~~ → **AGGRESSIVE** (B→A on 1 same-direction signal in 60s window).
+6. **Trailing stops:** ~~v1 launch or defer to v2?~~ → **v1 LAUNCH** (Tier A: BE at +3, +50% of target at +5; Tier B: BE at +2; Tier C: no trail).
 
 ---
 
