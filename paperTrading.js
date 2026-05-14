@@ -65,8 +65,31 @@ const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLo
 // testing — hard daily-loss cap and session/RTH gates remain the only
 // entry-blocking layers; tier-scaled concurrent + per-instrument caps from
 // tier.js (T1 maxConcurrent=6, perInstrumentCap=2) are bypassed.
+// HOTFIX 3 (2026-05-14): re-enabled with env overrides — MAX_CONCURRENT and
+// PER_INSTRUMENT_CAP env vars REPLACE tier defaults when set (env-wins,
+// matching MAX_DAILY_LOSS pattern). Set via .env, no code change to flip.
 const MAX_CONCURRENT_ENABLED      = (process.env.MAX_CONCURRENT_ENABLED || 'false').toLowerCase() === 'true';
 const PER_INSTRUMENT_CAP_ENABLED  = (process.env.PER_INSTRUMENT_CAP_ENABLED || 'false').toLowerCase() === 'true';
+const MAX_CONCURRENT_OVERRIDE     = parseInt(process.env.MAX_CONCURRENT      || '0', 10);
+const PER_INSTRUMENT_CAP_OVERRIDE = parseInt(process.env.PER_INSTRUMENT_CAP  || '0', 10);
+// HOTFIX 3: opposing-direction lockout — block new CALLS on instrument with
+// open PUT position (and vice-versa). Layered above SIGNAL_REVERSAL which
+// closes opposite positions on direct signal flips; this gate catches the
+// case where a SWING entry from monitor-X.js arrives while a Pine PUT/CALL
+// from the webhook is still open (no SIGNAL_REVERSAL between dispatchers).
+const OPPOSING_LOCKOUT_ENABLED    = (process.env.OPPOSING_LOCKOUT_ENABLED || 'true').toLowerCase() === 'true';
+// HOTFIX 3: family-correlation cap — share slot pools across correlated
+// instruments. ES family (ES/MES + 1!), NQ family (NQ/MNQ + 1! + QQQ),
+// SPY standalone, IWM standalone. Each family limited to FAMILY_CAP_LIMIT
+// open positions combined. Default 2.
+const FAMILY_CAP_ENABLED          = (process.env.FAMILY_CAP_ENABLED || 'true').toLowerCase() === 'true';
+const FAMILY_CAP_LIMIT            = parseInt(process.env.FAMILY_CAP_LIMIT || '2', 10);
+const _INSTRUMENT_FAMILY = {
+  SPY: 'SPY', IWM: 'IWM', QQQ: 'NQ_FAMILY',
+  ES: 'ES_FAMILY', 'ES1!': 'ES_FAMILY', MES: 'ES_FAMILY', 'MES1!': 'ES_FAMILY',
+  NQ: 'NQ_FAMILY', 'NQ1!': 'NQ_FAMILY', MNQ: 'NQ_FAMILY', 'MNQ1!': 'NQ_FAMILY',
+};
+function _resolveFamily(inst) { return _INSTRUMENT_FAMILY[(inst || '').toUpperCase()] || 'OTHER'; }
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -107,8 +130,16 @@ function getContractMultiplier(instrument) {
   }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
-  console.log(`  [paperTrading] Max-concurrent gate: ${MAX_CONCURRENT_ENABLED ? `ENABLED (T${_ts.tier}=${getMaxConcurrent(_ts.tier)})` : 'disabled (testing — unlimited concurrent entries)'}`);
-  console.log(`  [paperTrading] Per-instrument cap: ${PER_INSTRUMENT_CAP_ENABLED ? `ENABLED (T${_ts.tier}=${getPerInstrumentCap(_ts.tier)})` : 'disabled (testing — unlimited per instrument)'}`);
+  {
+    const _mc  = MAX_CONCURRENT_OVERRIDE     > 0 ? MAX_CONCURRENT_OVERRIDE     : getMaxConcurrent(_ts.tier);
+    const _pic = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? PER_INSTRUMENT_CAP_OVERRIDE : getPerInstrumentCap(_ts.tier);
+    const _mcSrc  = MAX_CONCURRENT_OVERRIDE     > 0 ? `env override` : `tier T${_ts.tier}`;
+    const _picSrc = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? `env override` : `tier T${_ts.tier}`;
+    console.log(`  [paperTrading] Max-concurrent gate: ${MAX_CONCURRENT_ENABLED ? `ENABLED cap=${_mc} (${_mcSrc})` : 'disabled (testing — unlimited concurrent entries)'}`);
+    console.log(`  [paperTrading] Per-instrument cap: ${PER_INSTRUMENT_CAP_ENABLED ? `ENABLED cap=${_pic} (${_picSrc})` : 'disabled (testing — unlimited per instrument)'}`);
+  }
+  console.log(`  [paperTrading] Opposing-direction lockout: ${OPPOSING_LOCKOUT_ENABLED ? 'ENABLED (block CALLS when PUT open + vice-versa)' : 'disabled'}`);
+  console.log(`  [paperTrading] Family-correlation cap: ${FAMILY_CAP_ENABLED ? `ENABLED limit=${FAMILY_CAP_LIMIT}/family (ES/MES, NQ/QQQ, SPY, IWM)` : 'disabled'}`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -416,8 +447,9 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   const tierState  = loadTier();
   const tierNum    = tierState.tier;
   const tierDailyCap   = getDailyLossCap(tierNum);
-  const tierMaxConcur  = getMaxConcurrent(tierNum);
-  const tierPerInstCap = getPerInstrumentCap(tierNum);
+  // HOTFIX 3: env REPLACES tier when env > 0 (matches MAX_DAILY_LOSS pattern).
+  const tierMaxConcur  = MAX_CONCURRENT_OVERRIDE     > 0 ? MAX_CONCURRENT_OVERRIDE     : getMaxConcurrent(tierNum);
+  const tierPerInstCap = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? PER_INSTRUMENT_CAP_OVERRIDE : getPerInstrumentCap(tierNum);
 
   const today  = etDate();
   // Read daily P&L from disk — closePosition (SWING engine) may have written losses
@@ -517,6 +549,50 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     orderGate.markVetoed(requestId, reason);
     jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PER_INSTRUMENT_CAP', { sameInst, cap: tierPerInstCap, instrument: inst, tier: tierNum });
     return { vetoed: true, reason };
+  }
+
+  // HOTFIX 3 (2026-05-14): opposing-direction lockout. Block new CALLS on
+  // an instrument with an open PUT (and vice-versa). Layered above
+  // SIGNAL_REVERSAL which only fires on the webhook side; this gate also
+  // catches monitor.js SWING entries vs an open Pine position.
+  if (OPPOSING_LOCKOUT_ENABLED) {
+    const newDir = consensus.signal === 'CALLS' ? 'call' : 'put';
+    const opposingDir = newDir === 'call' ? 'put' : 'call';
+    const opposing = openTrades.filter(t =>
+      (t.instrument || '').toUpperCase() === inst.toUpperCase() && t.type === opposingDir
+    );
+    if (opposing.length > 0) {
+      const reason = `Opposing-direction lockout — ${inst} has ${opposing.length} open ${opposingDir.toUpperCase()}, rejecting new ${newDir.toUpperCase()}`;
+      orderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'OPPOSING_DIRECTION_LOCKOUT', {
+        instrument: inst, newDir, opposingDir, opposingCount: opposing.length,
+        opposingRequestIds: opposing.map(t => t.requestId),
+      });
+      return { vetoed: true, reason };
+    }
+  }
+
+  // HOTFIX 3 (2026-05-14): family-correlation cap. ES/MES share a slot
+  // pool, NQ/QQQ share a slot pool, SPY + IWM standalone. Combined limit
+  // FAMILY_CAP_LIMIT (default 2) per family. Prevents over-exposure to a
+  // single underlying via correlated futures + ETF positions.
+  if (FAMILY_CAP_ENABLED) {
+    const newFamily = _resolveFamily(inst);
+    if (newFamily !== 'OTHER') {
+      const sameFamily = openTrades.filter(t => _resolveFamily(t.instrument) === newFamily).length;
+      if (sameFamily >= FAMILY_CAP_LIMIT) {
+        const familyMembers = openTrades
+          .filter(t => _resolveFamily(t.instrument) === newFamily)
+          .map(t => t.instrument);
+        const reason = `Family-correlation cap — ${newFamily} pool full (${sameFamily}/${FAMILY_CAP_LIMIT}: ${familyMembers.join(', ')}), rejecting ${inst}`;
+        orderGate.markVetoed(requestId, reason);
+        jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'FAMILY_CORRELATION_CAP', {
+          instrument: inst, family: newFamily, sameFamily, cap: FAMILY_CAP_LIMIT,
+          familyMembers,
+        });
+        return { vetoed: true, reason };
+      }
+    }
   }
 
   // ── Contract sizing — tier × confidence band ──────────
