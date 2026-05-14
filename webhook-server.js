@@ -159,6 +159,19 @@ async function handlePineAlert(req, res) {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
   } catch {}
 
+  // P1-8 (2026-05-14 EOD): instrument suspension. Comma-separated env var
+  // INSTRUMENT_DISABLED rejects all alerts on listed instruments. Today
+  // IWM = 13.2% WR / -$973 net — structurally broken, suspended pending
+  // logic review. Add others to the list as needed; web/restart picks up.
+  const _disabledList = (process.env.INSTRUMENT_DISABLED || '')
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+  if (_disabledList.includes((instrument || '').toUpperCase())) {
+    jGateBlock(engine, instrument, direction, 'INSTRUMENT_DISABLED', {
+      etTime: etTimeString(), disabledList: _disabledList,
+    });
+    return send(res, 200, { ok: false, reason: 'INSTRUMENT_DISABLED', et: etTimeString() });
+  }
+
   // P0-1 (2026-05-14 EOD): write latest underlying price per instrument so
   // monitor.js's evaluateOpenPositions feeder can resolve futures (ES1!/NQ1!/
   // MES1!/MNQ1!) prices. Today's catastrophe: futures stops never fired
