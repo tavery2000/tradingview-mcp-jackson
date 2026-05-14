@@ -61,6 +61,12 @@ let _dailyLossWarningFiredFor = null;
 // hard cap ($5K) and warning ($2.5K) remain active; only the worst-case
 // reserve pre-block is suppressed. Set true in .env to restore.
 const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLowerCase() === 'true';
+// 2026-05-14 HOTFIX 2: concurrency-cap kill-switches. Default false during
+// testing — hard daily-loss cap and session/RTH gates remain the only
+// entry-blocking layers; tier-scaled concurrent + per-instrument caps from
+// tier.js (T1 maxConcurrent=6, perInstrumentCap=2) are bypassed.
+const MAX_CONCURRENT_ENABLED      = (process.env.MAX_CONCURRENT_ENABLED || 'false').toLowerCase() === 'true';
+const PER_INSTRUMENT_CAP_ENABLED  = (process.env.PER_INSTRUMENT_CAP_ENABLED || 'false').toLowerCase() === 'true';
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -101,6 +107,8 @@ function getContractMultiplier(instrument) {
   }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
+  console.log(`  [paperTrading] Max-concurrent gate: ${MAX_CONCURRENT_ENABLED ? `ENABLED (T${_ts.tier}=${getMaxConcurrent(_ts.tier)})` : 'disabled (testing — unlimited concurrent entries)'}`);
+  console.log(`  [paperTrading] Per-instrument cap: ${PER_INSTRUMENT_CAP_ENABLED ? `ENABLED (T${_ts.tier}=${getPerInstrumentCap(_ts.tier)})` : 'disabled (testing — unlimited per instrument)'}`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -490,8 +498,13 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   }
 
   // Per-instrument and total concurrent-position caps — tier-scaled
+  // HOTFIX 2 (2026-05-14): both caps gated by env flags, default false during
+  // testing so concurrency math doesn't suppress signals before the day's
+  // signal-quality data is collected. Hard daily-loss cap remains the
+  // entry-blocking layer; openTrades is still computed because PER_INSTRUMENT_CAP
+  // depends on it when re-enabled.
   const openTrades = (ledger.trades || []).filter(t => t.status === 'OPEN');
-  if (openTrades.length >= tierMaxConcur) {
+  if (MAX_CONCURRENT_ENABLED && openTrades.length >= tierMaxConcur) {
     const reason = `Max concurrent positions (${openTrades.length}/${tierMaxConcur}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
     jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'MAX_CONCURRENT', { open: openTrades.length, cap: tierMaxConcur, tier: tierNum, openInstruments: openTrades.map(t => t.instrument) });
@@ -499,7 +512,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   }
   const inst = consensus.instrument || 'SPY';
   const sameInst = openTrades.filter(t => (t.instrument || '').toUpperCase() === inst.toUpperCase()).length;
-  if (sameInst >= tierPerInstCap) {
+  if (PER_INSTRUMENT_CAP_ENABLED && sameInst >= tierPerInstCap) {
     const reason = `Per-instrument cap (${sameInst}/${tierPerInstCap} on ${inst}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
     jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PER_INSTRUMENT_CAP', { sameInst, cap: tierPerInstCap, instrument: inst, tier: tierNum });
