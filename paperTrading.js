@@ -71,13 +71,37 @@ const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLo
 // cap, MAX_DAILY_LOSS_WARNING soft alert). DAILY_TARGET emits TARGET_REACHED
 // on +$DAILY_TARGET realized but trading continues.
 //
-// RULE 3 — per-trade stop loss. STOP_LOSS_PCT > 0 enables the stop; the
-// trade record gets stopPremium = fillPrice × (1 - PCT/100) at fill time.
-// evaluateOpenPositions fires STOP_LOSS exit when current premium <= stop.
-// Initial value 30 derived from 2026-05-14 journal (catches the two
-// catastrophic losers -95.7% / -92.3%, preserves moderate losers' natural
-// SIGNAL_REVERSAL exits). Tighten after MFE instrumentation.
-const STOP_LOSS_PCT         = parseFloat(process.env.STOP_LOSS_PCT || '30');
+// P0-3 (2026-05-14 EOD): per-instrument point/dollar stops. Replaces the
+// %-based STOP_LOSS_PCT entirely. Stops compare against the UNDERLYING
+// price (not the option premium), giving precise + predictable behavior
+// independent of option Greeks/IV. CALLS stop fires when underlying drops
+// to entryUnderlyingPrice - stop. PUTS stop fires when underlying rises
+// to entryUnderlyingPrice + stop.
+//
+// Per-instrument values from operator directive — points for futures (CME
+// futures point-value × multiplier governs $-risk), dollars for equity
+// options (price-distance on the underlying ETF).
+const STOP_POINTS = {
+  'ES1!':  parseFloat(process.env.STOP_ES_POINTS  || '3.0'),
+  'NQ1!':  parseFloat(process.env.STOP_NQ_POINTS  || '10.0'),
+  'MES1!': parseFloat(process.env.STOP_MES_POINTS || '3.0'),
+  'MNQ1!': parseFloat(process.env.STOP_MNQ_POINTS || '10.0'),
+  'ES':    parseFloat(process.env.STOP_ES_POINTS  || '3.0'),
+  'NQ':    parseFloat(process.env.STOP_NQ_POINTS  || '10.0'),
+  'MES':   parseFloat(process.env.STOP_MES_POINTS || '3.0'),
+  'MNQ':   parseFloat(process.env.STOP_MNQ_POINTS || '10.0'),
+};
+const STOP_DOLLARS = {
+  'SPY': parseFloat(process.env.STOP_SPY_DOLLARS || '0.30'),
+  'QQQ': parseFloat(process.env.STOP_QQQ_DOLLARS || '0.35'),
+  'IWM': parseFloat(process.env.STOP_IWM_DOLLARS || '0.25'),
+};
+function _getStopDistance(instrument) {
+  const k = (instrument || '').toUpperCase();
+  if (STOP_POINTS[k]  != null) return STOP_POINTS[k];
+  if (STOP_DOLLARS[k] != null) return STOP_DOLLARS[k];
+  return null;
+}
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -119,7 +143,9 @@ function getContractMultiplier(instrument) {
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
   console.log(`  [paperTrading] All concurrency/correlation/opposition gates: REMOVED (RULE 1)`);
-  console.log(`  [paperTrading] Per-trade stop-loss: ${STOP_LOSS_PCT > 0 ? `ENABLED at -${STOP_LOSS_PCT}% of fill` : 'disabled (STOP_LOSS_PCT=0)'}`);
+  console.log(`  [paperTrading] Per-trade stop-loss: POINT-BASED (P0-3) ` +
+    `ES/MES=${STOP_POINTS['ES1!']}pt NQ/MNQ=${STOP_POINTS['NQ1!']}pt ` +
+    `SPY=$${STOP_DOLLARS['SPY']} QQQ=$${STOP_DOLLARS['QQQ']} IWM=$${STOP_DOLLARS['IWM']}`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
 }
 
@@ -662,14 +688,17 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       }
     } catch (e) { jError('entryIV-calc', e.message, { instrument: order.instrument, strike: order.strike }); }
 
-    // RULE 3: per-trade stop-loss. Compute stop premium at fill time so
-    // evaluateOpenPositions can compare current premium against a fixed
-    // floor without re-deriving from STOP_LOSS_PCT each tick. stopActive
-    // false when STOP_LOSS_PCT=0 (operator-disabled) or fillPrice unusable.
-    const _stopPremium = (STOP_LOSS_PCT > 0 && fill.fillPrice > 0)
-      ? parseFloat((fill.fillPrice * (1 - STOP_LOSS_PCT / 100)).toFixed(4))
+    // P0-3 (2026-05-14 EOD): point-based stop on UNDERLYING price.
+    // Replaces premium-% stop. CALLS stop = entryUnderlying - distance,
+    // PUTS stop = entryUnderlying + distance. Stop check in
+    // evaluateOpenPositions compares against live underlying, not premium.
+    const _stopDistance = _getStopDistance(consensus.instrument);
+    const _entryU       = entryUnderlying ?? consensus.underlyingPrice ?? null;
+    const _isCalls      = consensus.signal === 'CALLS';
+    const _stopUnderlying = (_stopDistance != null && _entryU != null)
+      ? parseFloat((_isCalls ? _entryU - _stopDistance : _entryU + _stopDistance).toFixed(4))
       : null;
-    const _stopActive  = _stopPremium != null;
+    const _stopActive   = _stopUnderlying != null;
 
     const trade = {
       ...order,
@@ -689,9 +718,10 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       finalConfidence: finalConf,
       entryIV,
       entryUnderlying,
-      stopPremium: _stopPremium,
-      stopActive:  _stopActive,
-      stopPct:     STOP_LOSS_PCT > 0 ? STOP_LOSS_PCT : null,
+      stopUnderlyingPrice: _stopUnderlying,
+      stopDistance:        _stopDistance,
+      stopActive:          _stopActive,
+      entryUnderlyingPrice: _entryU,
       // Alias for callers (webhook-server.js SIGNAL_REVERSAL exit math) that
       // look up `underlyingPrice` rather than `entryUnderlying`. Same value,
       // two names — schema redundancy intentional to prevent future field-name
@@ -1015,16 +1045,22 @@ export function evaluateOpenPositions(priceFeeder) {
         analysis,
       });
 
-      // RULE 3: per-trade stop-loss. Fired BEFORE IV-crush + hard-exit so
-      // a stop hit during IV crush still records as STOP_LOSS (the relevant
-      // exit reason for risk-control accounting). Idempotent — closePosition
-      // ignores already-CLOSED requestIds; even if multiple eval ticks queue
-      // the same exit, only the first lands.
-      if (t.stopActive && t.stopPremium != null && fed.optionPrice <= t.stopPremium) {
-        exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'STOP_LOSS' });
-        pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
-          `Stop loss on ${t.instrument} ${t.signal}. Hit ${(t.stopPct ?? STOP_LOSS_PCT).toFixed(0)} percent loss. Closing.`);
-        continue;  // skip IV/hard exits on this tick — the stop owns the close
+      // P0-3 (2026-05-14 EOD): underlying-price stop check. Replaces
+      // premium-% stop. CALLS: fed.underlyingPrice <= stopUnderlyingPrice.
+      // PUTS: fed.underlyingPrice >= stopUnderlyingPrice. Fired BEFORE
+      // IV-crush + hard-exit so a stop hit during IV crush still records
+      // as STOP_LOSS (the relevant exit reason for risk-control accounting).
+      if (t.stopActive && t.stopUnderlyingPrice != null && fed.underlyingPrice != null) {
+        const isCalls = t.signal === 'CALLS';
+        const breached = isCalls
+          ? (fed.underlyingPrice <= t.stopUnderlyingPrice)
+          : (fed.underlyingPrice >= t.stopUnderlyingPrice);
+        if (breached) {
+          exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'STOP_LOSS' });
+          pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
+            `Stop loss on ${t.instrument} ${t.signal}. Underlying breached ${t.stopUnderlyingPrice.toFixed(2)}. Closing.`);
+          continue;  // skip IV/hard exits on this tick — the stop owns the close
+        }
       }
 
       // IV-crush exit: vega drag eating gains and we're up >200%
