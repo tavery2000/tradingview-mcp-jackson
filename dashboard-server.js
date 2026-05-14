@@ -188,6 +188,13 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, readJson('portfolio-theta.json') ?? { positions: [] });
   }
 
+  // 2026-05-13 v2: daily-loss soft-warning state. paperTrading.js writes this
+  // file when MAX_DAILY_LOSS_WARNING crosses. Dashboard can poll to display a
+  // top-bar warning banner. File absent / fired=false → no warning active today.
+  if (req.method === 'GET' && url === '/api/daily-loss-warning') {
+    return sendJson(res, readJson('daily-loss-warning-state.json') ?? { fired: false });
+  }
+
   if (req.method === 'GET' && url === '/api/options-flow') {
     return sendJson(res, readJson('options-flow.json') ?? {});
   }

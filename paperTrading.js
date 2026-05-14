@@ -45,10 +45,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ───────────────────────────────────────────────
 
-const TRADING_MODE   = process.env.TRADING_MODE || 'PAPER';
-const PAPER_BALANCE  = parseFloat(process.env.PAPER_BALANCE || '25000');
-const MAX_DAILY_LOSS = parseFloat(process.env.MAX_DAILY_LOSS || '500');
-const MAX_CONTRACTS  = parseInt(process.env.MAX_CONTRACTS   || '10');
+const TRADING_MODE          = process.env.TRADING_MODE || 'PAPER';
+const PAPER_BALANCE         = parseFloat(process.env.PAPER_BALANCE || '25000');
+const MAX_DAILY_LOSS        = parseFloat(process.env.MAX_DAILY_LOSS || '500');
+// 2026-05-13 v2: soft-warning tier. 0 = disabled. When set, fires a single
+// alert per ET-date per process when realized loss crosses this threshold,
+// but trading continues. Hard cap remains MAX_DAILY_LOSS.
+const MAX_DAILY_LOSS_WARNING = parseFloat(process.env.MAX_DAILY_LOSS_WARNING || '0');
+// Module-level flag — tracks the ET-date string when warning was fired this
+// process. Reset on process restart (in-memory only). Webhook supervisor
+// respawn → flag resets → warning can fire again if realized still below
+// threshold; that's by design (the operator gets a fresh alert on respawn).
+let _dailyLossWarningFiredFor = null;
+const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
 
@@ -69,17 +78,23 @@ function getContractMultiplier(instrument) {
   return 100;
 }
 
-// Surface effective daily-loss cap at module load. Each monitor process that
-// imports paperTrading.js prints once. Misalignment between env-default and
-// tier config hid for weeks until 2026-05-13 — this line prevents recurrence.
+// Surface effective daily-loss tiers at module load. Each monitor process
+// that imports paperTrading.js prints once. 2026-05-13 v2: now prints two
+// lines — soft-warning threshold (if MAX_DAILY_LOSS_WARNING > 0) and hard cap.
+// Env-wins semantics: env REPLACES tier when set (previously Math.min).
 {
   const _ts = loadTier();
   const _tierCap = getDailyLossCap(_ts.tier);
   const _envCap  = MAX_DAILY_LOSS;
-  const _eff     = Math.min(_tierCap, _envCap > 0 ? _envCap : _tierCap);
-  const _src     = _tierCap === _envCap ? 'tier=env'
-                 : _eff === _tierCap    ? `tier T${_ts.tier} (env=$${_envCap} higher)`
-                 :                        `env (tier T${_ts.tier}=$${_tierCap} higher)`;
+  const _eff     = _envCap > 0 ? _envCap : _tierCap;
+  const _src     = _envCap > 0
+    ? (_envCap === _tierCap ? 'tier=env'
+       : _envCap > _tierCap ? `env testing-tier (above tier T${_ts.tier}=$${_tierCap})`
+       :                      `env (below tier T${_ts.tier}=$${_tierCap})`)
+    : `tier T${_ts.tier} (env unset)`;
+  if (MAX_DAILY_LOSS_WARNING > 0) {
+    console.log(`  [paperTrading] Daily loss warning: $${MAX_DAILY_LOSS_WARNING.toLocaleString()} (soft alert, trading continues)`);
+  }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
 }
 
@@ -401,8 +416,56 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     ledger.dailyPnL[today] = dailyPnL;
   } catch {}
 
-  // Daily-loss cap — tier-scaled. Falls back to env-configured MAX_DAILY_LOSS if smaller.
-  const effectiveDailyCap = Math.min(tierDailyCap, MAX_DAILY_LOSS > 0 ? MAX_DAILY_LOSS : tierDailyCap);
+  // Daily-loss cap — env-wins-when-set (2026-05-13 v2: previously Math.min
+  // clamped env DOWN against tier; now env REPLACES tier when set, so testing-
+  // mode can raise the cap above T1's $2,500 prod-realistic trigger. Production
+  // reverts via env=2500 in .env).
+  const effectiveDailyCap = MAX_DAILY_LOSS > 0 ? MAX_DAILY_LOSS : tierDailyCap;
+
+  // Soft-warning tier — fires once per ET-date per process, then trading
+  // CONTINUES. Operator gets: journal (DAILY_LOSS_WARNING), wsServer
+  // broadcast, TTS voice alert, console banner, daily-loss-warning-state.json
+  // (served by dashboard /api/daily-loss-warning). Skip if disabled (=0) or
+  // already fired today.
+  if (MAX_DAILY_LOSS_WARNING > 0 && _dailyLossWarningFiredFor !== today
+      && dailyPnL <= -MAX_DAILY_LOSS_WARNING) {
+    _dailyLossWarningFiredFor = today;
+    const lossAmt = Math.abs(dailyPnL).toFixed(0);
+    try {
+      jAlert('warning', 'DAILY_LOSS_WARNING', {
+        dailyPnL, threshold: MAX_DAILY_LOSS_WARNING, hardCap: effectiveDailyCap,
+        instrument: consensus.instrument, engine: consensus.engine,
+        date: today, etTime: getETString(),
+      });
+    } catch {}
+    if (typeof global.wsBroadcast === 'function') {
+      try {
+        global.wsBroadcast({
+          type: 'warning',
+          payload: {
+            kind: 'DAILY_LOSS_WARNING',
+            dailyPnL, threshold: MAX_DAILY_LOSS_WARNING, hardCap: effectiveDailyCap,
+            time: getETString(),
+          },
+        });
+      } catch {}
+    }
+    try {
+      pushVoiceAlert('daily-loss-warning', 'critical',
+        `Daily loss warning. Down ${lossAmt} dollars. Threshold ${MAX_DAILY_LOSS_WARNING}. Continuing to trade. Hard cap ${effectiveDailyCap}.`,
+        300_000);
+    } catch {}
+    try {
+      writeFileSync(join(__dirname, 'daily-loss-warning-state.json'), JSON.stringify({
+        fired: true, firedAt: Date.now(), firedAtET: getETString(), date: today,
+        dailyPnL: parseFloat(dailyPnL.toFixed(2)),
+        threshold: MAX_DAILY_LOSS_WARNING,
+        hardCap: effectiveDailyCap,
+      }));
+    } catch {}
+    console.log(`  ${C.yellow}⚠ DAILY LOSS WARNING — $${lossAmt} / threshold $${MAX_DAILY_LOSS_WARNING} (hard cap $${effectiveDailyCap}) — trading continues${C.reset}`);
+  }
+
   if (dailyPnL <= -effectiveDailyCap) {
     const reason = `Daily loss cap hit ($${Math.abs(dailyPnL).toFixed(0)} / $${effectiveDailyCap}) [T${tierNum}]`;
     orderGate.markVetoed(requestId, reason);
