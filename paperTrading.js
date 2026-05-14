@@ -36,8 +36,8 @@ import {
 } from './theta.js';
 import { jEntry, jExit, jError, jAlert, jGateBlock, journal } from './journal.js';
 import {
-  loadTier, saveTier, getPositionSize, getDailyLossCap, getMaxConcurrent,
-  getPerInstrumentCap, checkTierUpEligibility, checkTierDown,
+  loadTier, saveTier, getPositionSize, getDailyLossCap,
+  checkTierUpEligibility, checkTierDown,
   applyTierDown, updateEquity,
 } from './tier.js';
 
@@ -61,17 +61,9 @@ let _dailyLossWarningFiredFor = null;
 // hard cap ($5K) and warning ($2.5K) remain active; only the worst-case
 // reserve pre-block is suppressed. Set true in .env to restore.
 const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLowerCase() === 'true';
-// 2026-05-14 HOTFIX 2: concurrency-cap kill-switches. Default false during
-// testing — hard daily-loss cap and session/RTH gates remain the only
-// entry-blocking layers; tier-scaled concurrent + per-instrument caps from
-// tier.js (T1 maxConcurrent=6, perInstrumentCap=2) are bypassed.
-// HOTFIX 3 (2026-05-14): re-enabled with env overrides — MAX_CONCURRENT and
-// PER_INSTRUMENT_CAP env vars REPLACE tier defaults when set (env-wins,
-// matching MAX_DAILY_LOSS pattern). Set via .env, no code change to flip.
-const MAX_CONCURRENT_ENABLED      = (process.env.MAX_CONCURRENT_ENABLED || 'false').toLowerCase() === 'true';
-const PER_INSTRUMENT_CAP_ENABLED  = (process.env.PER_INSTRUMENT_CAP_ENABLED || 'false').toLowerCase() === 'true';
-const MAX_CONCURRENT_OVERRIDE     = parseInt(process.env.MAX_CONCURRENT      || '0', 10);
-const PER_INSTRUMENT_CAP_OVERRIDE = parseInt(process.env.PER_INSTRUMENT_CAP  || '0', 10);
+// 2026-05-14: count-based concurrency caps (MAX_CONCURRENT, PER_INSTRUMENT_CAP)
+// removed permanently. Risk is managed per-trade (stop-loss) and per-day
+// (MAX_DAILY_LOSS hard cap), not by capping the number of open positions.
 // HOTFIX 3: opposing-direction lockout — block new CALLS on instrument with
 // open PUT position (and vice-versa). Layered above SIGNAL_REVERSAL which
 // closes opposite positions on direct signal flips; this gate catches the
@@ -130,14 +122,7 @@ function getContractMultiplier(instrument) {
   }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
-  {
-    const _mc  = MAX_CONCURRENT_OVERRIDE     > 0 ? MAX_CONCURRENT_OVERRIDE     : getMaxConcurrent(_ts.tier);
-    const _pic = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? PER_INSTRUMENT_CAP_OVERRIDE : getPerInstrumentCap(_ts.tier);
-    const _mcSrc  = MAX_CONCURRENT_OVERRIDE     > 0 ? `env override` : `tier T${_ts.tier}`;
-    const _picSrc = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? `env override` : `tier T${_ts.tier}`;
-    console.log(`  [paperTrading] Max-concurrent gate: ${MAX_CONCURRENT_ENABLED ? `ENABLED cap=${_mc} (${_mcSrc})` : 'disabled (testing — unlimited concurrent entries)'}`);
-    console.log(`  [paperTrading] Per-instrument cap: ${PER_INSTRUMENT_CAP_ENABLED ? `ENABLED cap=${_pic} (${_picSrc})` : 'disabled (testing — unlimited per instrument)'}`);
-  }
+  console.log(`  [paperTrading] Count-based caps (MAX_CONCURRENT / PER_INSTRUMENT_CAP): removed`);
   console.log(`  [paperTrading] Opposing-direction lockout: ${OPPOSING_LOCKOUT_ENABLED ? 'ENABLED (block CALLS when PUT open + vice-versa)' : 'disabled'}`);
   console.log(`  [paperTrading] Family-correlation cap: ${FAMILY_CAP_ENABLED ? `ENABLED limit=${FAMILY_CAP_LIMIT}/family (ES/MES, NQ/QQQ, SPY, IWM)` : 'disabled'}`);
 }
@@ -447,9 +432,6 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   const tierState  = loadTier();
   const tierNum    = tierState.tier;
   const tierDailyCap   = getDailyLossCap(tierNum);
-  // HOTFIX 3: env REPLACES tier when env > 0 (matches MAX_DAILY_LOSS pattern).
-  const tierMaxConcur  = MAX_CONCURRENT_OVERRIDE     > 0 ? MAX_CONCURRENT_OVERRIDE     : getMaxConcurrent(tierNum);
-  const tierPerInstCap = PER_INSTRUMENT_CAP_OVERRIDE > 0 ? PER_INSTRUMENT_CAP_OVERRIDE : getPerInstrumentCap(tierNum);
 
   const today  = etDate();
   // Read daily P&L from disk — closePosition (SWING engine) may have written losses
@@ -529,27 +511,12 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason };
   }
 
-  // Per-instrument and total concurrent-position caps — tier-scaled
-  // HOTFIX 2 (2026-05-14): both caps gated by env flags, default false during
-  // testing so concurrency math doesn't suppress signals before the day's
-  // signal-quality data is collected. Hard daily-loss cap remains the
-  // entry-blocking layer; openTrades is still computed because PER_INSTRUMENT_CAP
-  // depends on it when re-enabled.
+  // 2026-05-14: count-based MAX_CONCURRENT and PER_INSTRUMENT_CAP gates
+  // removed permanently per operator decision. openTrades is still computed
+  // because OPPOSING_DIRECTION_LOCKOUT and FAMILY_CORRELATION_CAP below
+  // both consume it.
   const openTrades = (ledger.trades || []).filter(t => t.status === 'OPEN');
-  if (MAX_CONCURRENT_ENABLED && openTrades.length >= tierMaxConcur) {
-    const reason = `Max concurrent positions (${openTrades.length}/${tierMaxConcur}) [T${tierNum}]`;
-    orderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'MAX_CONCURRENT', { open: openTrades.length, cap: tierMaxConcur, tier: tierNum, openInstruments: openTrades.map(t => t.instrument) });
-    return { vetoed: true, reason };
-  }
   const inst = consensus.instrument || 'SPY';
-  const sameInst = openTrades.filter(t => (t.instrument || '').toUpperCase() === inst.toUpperCase()).length;
-  if (PER_INSTRUMENT_CAP_ENABLED && sameInst >= tierPerInstCap) {
-    const reason = `Per-instrument cap (${sameInst}/${tierPerInstCap} on ${inst}) [T${tierNum}]`;
-    orderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PER_INSTRUMENT_CAP', { sameInst, cap: tierPerInstCap, instrument: inst, tier: tierNum });
-    return { vetoed: true, reason };
-  }
 
   // HOTFIX 3 (2026-05-14): opposing-direction lockout. Block new CALLS on
   // an instrument with an open PUT (and vice-versa). Layered above
