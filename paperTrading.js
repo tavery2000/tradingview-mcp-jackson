@@ -61,27 +61,11 @@ let _dailyLossWarningFiredFor = null;
 // hard cap ($5K) and warning ($2.5K) remain active; only the worst-case
 // reserve pre-block is suppressed. Set true in .env to restore.
 const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLowerCase() === 'true';
-// 2026-05-14: count-based concurrency caps (MAX_CONCURRENT, PER_INSTRUMENT_CAP)
-// removed permanently. Risk is managed per-trade (stop-loss) and per-day
-// (MAX_DAILY_LOSS hard cap), not by capping the number of open positions.
-// HOTFIX 3: opposing-direction lockout — block new CALLS on instrument with
-// open PUT position (and vice-versa). Layered above SIGNAL_REVERSAL which
-// closes opposite positions on direct signal flips; this gate catches the
-// case where a SWING entry from monitor-X.js arrives while a Pine PUT/CALL
-// from the webhook is still open (no SIGNAL_REVERSAL between dispatchers).
-const OPPOSING_LOCKOUT_ENABLED    = (process.env.OPPOSING_LOCKOUT_ENABLED || 'true').toLowerCase() === 'true';
-// HOTFIX 3: family-correlation cap — share slot pools across correlated
-// instruments. ES family (ES/MES + 1!), NQ family (NQ/MNQ + 1! + QQQ),
-// SPY standalone, IWM standalone. Each family limited to FAMILY_CAP_LIMIT
-// open positions combined. Default 2.
-const FAMILY_CAP_ENABLED          = (process.env.FAMILY_CAP_ENABLED || 'true').toLowerCase() === 'true';
-const FAMILY_CAP_LIMIT            = parseInt(process.env.FAMILY_CAP_LIMIT || '2', 10);
-const _INSTRUMENT_FAMILY = {
-  SPY: 'SPY', IWM: 'IWM', QQQ: 'NQ_FAMILY',
-  ES: 'ES_FAMILY', 'ES1!': 'ES_FAMILY', MES: 'ES_FAMILY', 'MES1!': 'ES_FAMILY',
-  NQ: 'NQ_FAMILY', 'NQ1!': 'NQ_FAMILY', MNQ: 'NQ_FAMILY', 'MNQ1!': 'NQ_FAMILY',
-};
-function _resolveFamily(inst) { return _INSTRUMENT_FAMILY[(inst || '').toUpperCase()] || 'OTHER'; }
+// 2026-05-14 EOD: All concurrency / correlation / opposition gates removed
+// permanently per RULE 1 (all instruments, all directions, all the time).
+// Risk is managed per-trade (STOP_LOSS_PCT) and per-day (MAX_DAILY_LOSS hard
+// cap, MAX_DAILY_LOSS_WARNING soft alert). DAILY_TARGET emits TARGET_REACHED
+// on +$DAILY_TARGET realized but trading continues.
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -122,9 +106,7 @@ function getContractMultiplier(instrument) {
   }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
-  console.log(`  [paperTrading] Count-based caps (MAX_CONCURRENT / PER_INSTRUMENT_CAP): removed`);
-  console.log(`  [paperTrading] Opposing-direction lockout: ${OPPOSING_LOCKOUT_ENABLED ? 'ENABLED (block CALLS when PUT open + vice-versa)' : 'disabled'}`);
-  console.log(`  [paperTrading] Family-correlation cap: ${FAMILY_CAP_ENABLED ? `ENABLED limit=${FAMILY_CAP_LIMIT}/family (ES/MES, NQ/QQQ, SPY, IWM)` : 'disabled'}`);
+  console.log(`  [paperTrading] All concurrency/correlation/opposition gates: REMOVED (RULE 1)`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -511,56 +493,10 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason };
   }
 
-  // 2026-05-14: count-based MAX_CONCURRENT and PER_INSTRUMENT_CAP gates
-  // removed permanently per operator decision. openTrades is still computed
-  // because OPPOSING_DIRECTION_LOCKOUT and FAMILY_CORRELATION_CAP below
-  // both consume it.
-  const openTrades = (ledger.trades || []).filter(t => t.status === 'OPEN');
-  const inst = consensus.instrument || 'SPY';
-
-  // HOTFIX 3 (2026-05-14): opposing-direction lockout. Block new CALLS on
-  // an instrument with an open PUT (and vice-versa). Layered above
-  // SIGNAL_REVERSAL which only fires on the webhook side; this gate also
-  // catches monitor.js SWING entries vs an open Pine position.
-  if (OPPOSING_LOCKOUT_ENABLED) {
-    const newDir = consensus.signal === 'CALLS' ? 'call' : 'put';
-    const opposingDir = newDir === 'call' ? 'put' : 'call';
-    const opposing = openTrades.filter(t =>
-      (t.instrument || '').toUpperCase() === inst.toUpperCase() && t.type === opposingDir
-    );
-    if (opposing.length > 0) {
-      const reason = `Opposing-direction lockout — ${inst} has ${opposing.length} open ${opposingDir.toUpperCase()}, rejecting new ${newDir.toUpperCase()}`;
-      orderGate.markVetoed(requestId, reason);
-      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'OPPOSING_DIRECTION_LOCKOUT', {
-        instrument: inst, newDir, opposingDir, opposingCount: opposing.length,
-        opposingRequestIds: opposing.map(t => t.requestId),
-      });
-      return { vetoed: true, reason };
-    }
-  }
-
-  // HOTFIX 3 (2026-05-14): family-correlation cap. ES/MES share a slot
-  // pool, NQ/QQQ share a slot pool, SPY + IWM standalone. Combined limit
-  // FAMILY_CAP_LIMIT (default 2) per family. Prevents over-exposure to a
-  // single underlying via correlated futures + ETF positions.
-  if (FAMILY_CAP_ENABLED) {
-    const newFamily = _resolveFamily(inst);
-    if (newFamily !== 'OTHER') {
-      const sameFamily = openTrades.filter(t => _resolveFamily(t.instrument) === newFamily).length;
-      if (sameFamily >= FAMILY_CAP_LIMIT) {
-        const familyMembers = openTrades
-          .filter(t => _resolveFamily(t.instrument) === newFamily)
-          .map(t => t.instrument);
-        const reason = `Family-correlation cap — ${newFamily} pool full (${sameFamily}/${FAMILY_CAP_LIMIT}: ${familyMembers.join(', ')}), rejecting ${inst}`;
-        orderGate.markVetoed(requestId, reason);
-        jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'FAMILY_CORRELATION_CAP', {
-          instrument: inst, family: newFamily, sameFamily, cap: FAMILY_CAP_LIMIT,
-          familyMembers,
-        });
-        return { vetoed: true, reason };
-      }
-    }
-  }
+  // 2026-05-14 EOD: All concurrency / correlation / opposition gates removed
+  // permanently per RULE 1. Single-instrument multi-direction is allowed,
+  // family correlations are unconstrained, and there is no max-open count.
+  // Per-trade STOP_LOSS_PCT and per-day MAX_DAILY_LOSS are the sole risk caps.
 
   // ── Contract sizing — tier × confidence band ──────────
   // Confidence priority: explicit numeric (consensus.finalConfidence) → consensus.contracts override
