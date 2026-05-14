@@ -57,6 +57,10 @@ const MAX_DAILY_LOSS_WARNING = parseFloat(process.env.MAX_DAILY_LOSS_WARNING || 
 // respawn → flag resets → warning can fire again if realized still below
 // threshold; that's by design (the operator gets a fresh alert on respawn).
 let _dailyLossWarningFiredFor = null;
+// 2026-05-14: reserve-aware veto kill-switch. Default false during testing —
+// hard cap ($5K) and warning ($2.5K) remain active; only the worst-case
+// reserve pre-block is suppressed. Set true in .env to restore.
+const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLowerCase() === 'true';
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -96,6 +100,7 @@ function getContractMultiplier(instrument) {
     console.log(`  [paperTrading] Daily loss warning: $${MAX_DAILY_LOSS_WARNING.toLocaleString()} (soft alert, trading continues)`);
   }
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
+  console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -542,25 +547,30 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   // loss across (a) existing OPEN positions and (b) THIS new entry, treating
   // each as if it would exit at STOP_0.5X (-50% of entry premium). If the
   // sum of realized + reserved >= cap, veto.
-  const STOP_RATIO = 0.5;
-  const _wcl = (entry, qty, inst) =>
-    Math.max(0, (entry || 0) * (qty || 1) * getContractMultiplier(inst) * STOP_RATIO);
-  const _reservedExisting = (ledger.trades || [])
-    .filter(t => t.status === 'OPEN')
-    .reduce((s, t) => s + _wcl(t.fillPrice ?? t.limitPrice ?? 0, t.contracts ?? 1, t.instrument), 0);
-  const _reservedNew = _wcl(consensus.entryPrice ?? 0, contracts, consensus.instrument);
-  const _committedLoss = Math.max(0, -dailyPnL) + _reservedExisting + _reservedNew;
-  if (_committedLoss >= effectiveDailyCap) {
-    const reason = `Daily-loss reserve exhausted (committed $${_committedLoss.toFixed(0)} / cap $${effectiveDailyCap}) [T${tierNum}]`;
-    orderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'DAILY_LOSS_CAP_RESERVE', {
-      dailyPnL, reservedExisting: parseFloat(_reservedExisting.toFixed(2)),
-      reservedNew: parseFloat(_reservedNew.toFixed(2)),
-      committedLoss: parseFloat(_committedLoss.toFixed(2)),
-      effectiveDailyCap, tier: tierNum,
-    });
-    console.log(`  ${C.red}🛑 RESERVE CAP — committed $${_committedLoss.toFixed(0)} >= $${effectiveDailyCap}${C.reset}`);
-    return { vetoed: true, reason };
+  // Gated by RESERVE_VETO_ENABLED (default false during testing) so the
+  // hard cap remains the only entry-blocking layer when collecting full-day
+  // validation data.
+  if (RESERVE_VETO_ENABLED) {
+    const STOP_RATIO = 0.5;
+    const _wcl = (entry, qty, inst) =>
+      Math.max(0, (entry || 0) * (qty || 1) * getContractMultiplier(inst) * STOP_RATIO);
+    const _reservedExisting = (ledger.trades || [])
+      .filter(t => t.status === 'OPEN')
+      .reduce((s, t) => s + _wcl(t.fillPrice ?? t.limitPrice ?? 0, t.contracts ?? 1, t.instrument), 0);
+    const _reservedNew = _wcl(consensus.entryPrice ?? 0, contracts, consensus.instrument);
+    const _committedLoss = Math.max(0, -dailyPnL) + _reservedExisting + _reservedNew;
+    if (_committedLoss >= effectiveDailyCap) {
+      const reason = `Daily-loss reserve exhausted (committed $${_committedLoss.toFixed(0)} / cap $${effectiveDailyCap}) [T${tierNum}]`;
+      orderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'DAILY_LOSS_CAP_RESERVE', {
+        dailyPnL, reservedExisting: parseFloat(_reservedExisting.toFixed(2)),
+        reservedNew: parseFloat(_reservedNew.toFixed(2)),
+        committedLoss: parseFloat(_committedLoss.toFixed(2)),
+        effectiveDailyCap, tier: tierNum,
+      });
+      console.log(`  ${C.red}🛑 RESERVE CAP — committed $${_committedLoss.toFixed(0)} >= $${effectiveDailyCap}${C.reset}`);
+      return { vetoed: true, reason };
+    }
   }
 
   const order = {
