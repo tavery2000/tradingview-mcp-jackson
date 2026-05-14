@@ -2617,6 +2617,14 @@ let _spyVolPct = 1.0; // set each poll, read by printSummary
 let _biasEvaluatedAt = 0; // ET minutes — last bias evaluation
 
 async function poll() {
+  // P2-13 (2026-05-14 EOD): auto-timeframe switch. Fires once per day at
+  // 09:30 ET (→1m) and 12:00 ET (→5m). Idempotent — won't re-issue if
+  // already switched today. Skips silently if AUTO_TIMEFRAME_SWITCH=false.
+  try {
+    const { maybeSwitchTimeframe } = await import('./timeframeSwitcher.js');
+    if (spyClient) await maybeSwitchTimeframe(spyClient, { name: 'monitor.js[SPY]' });
+  } catch {}
+
   if (!isMarketHours()) {
     // Off-hours: still run FVG scanners against cached 5M bars so the
     // dashboard panels show the last session's gaps. Sweep needs live

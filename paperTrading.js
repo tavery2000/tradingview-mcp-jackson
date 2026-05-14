@@ -142,6 +142,17 @@ const CAPITAL_CAP_PER_TRADE = parseFloat(process.env.CAPITAL_CAP_PER_TRADE || '1
 // contracts = floor((account_balance × ACCOUNT_RISK_PCT) / (stop_distance × multiplier)).
 // Combined with CAPITAL_CAP_PER_TRADE: smaller of the two governs.
 const ACCOUNT_RISK_PCT      = parseFloat(process.env.ACCOUNT_RISK_PCT || '0.01');   // 1%
+// P2-13 (2026-05-14 EOD): PM stop/target multipliers for 5m regime.
+// 5m bars have wider intra-bar ranges than 1m → wider stops needed to
+// avoid bar-noise stop-outs. 1.5× preserves 1:2 R:R.
+const PM_STOP_MULTIPLIER    = parseFloat(process.env.PM_STOP_MULTIPLIER   || '1.5');
+const PM_TARGET_MULTIPLIER  = parseFloat(process.env.PM_TARGET_MULTIPLIER || '1.5');
+const TIMEFRAME_SWITCH_HOUR_ET = parseInt(process.env.TIMEFRAME_SWITCH_HOUR_ET || '12', 10);
+function _getRegimeNow() {
+  const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+  const [h, m] = t.split(':').map(Number);
+  return (h * 60 + m) >= TIMEFRAME_SWITCH_HOUR_ET * 60 ? 'PM' : 'AM';
+}
 // P1-5-A (2026-05-14 EOD): whipsaw protection — stop must trigger on
 // 1-min BAR CLOSE through the stop level, not intra-bar tick. Prevents
 // premature exits on noise excursions that recover before bar confirms.
@@ -845,7 +856,13 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     // Replaces premium-% stop. CALLS stop = entryUnderlying - distance,
     // PUTS stop = entryUnderlying + distance. Stop check in
     // evaluateOpenPositions compares against live underlying, not premium.
-    const _stopDistance = _getStopDistance(consensus.instrument);
+    // P2-13: in PM regime (post-12:00 ET), apply PM_STOP_MULTIPLIER /
+    // PM_TARGET_MULTIPLIER to widen stops/targets for 5m bar regime.
+    const _regime  = _getRegimeNow();
+    const _stopMul = _regime === 'PM' ? PM_STOP_MULTIPLIER   : 1.0;
+    const _tgtMul  = _regime === 'PM' ? PM_TARGET_MULTIPLIER : 1.0;
+    const _stopDistanceBase = _getStopDistance(consensus.instrument);
+    const _stopDistance     = _stopDistanceBase != null ? _stopDistanceBase * _stopMul : null;
     const _entryU       = entryUnderlying ?? consensus.underlyingPrice ?? null;
     const _isCalls      = consensus.signal === 'CALLS';
     const _stopUnderlying = (_stopDistance != null && _entryU != null)
@@ -855,7 +872,8 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     // P1-5 (2026-05-14 EOD): 1:2 R:R take-profit + scale-out staging.
     // STAGE_1_ARMED on entry. evaluateOpenPositions transitions to
     // STAGE_3_TRAILING when target hits (50% close, BE stop, trail active).
-    const _targetDistance = _getTargetDistance(consensus.instrument);
+    const _targetDistanceBase = _getTargetDistance(consensus.instrument);
+    const _targetDistance     = _targetDistanceBase != null ? _targetDistanceBase * _tgtMul : null;
     const _targetUnderlying = (_targetDistance != null && _entryU != null)
       ? parseFloat((_isCalls ? _entryU + _targetDistance : _entryU - _targetDistance).toFixed(4))
       : null;

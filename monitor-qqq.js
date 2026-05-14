@@ -1106,6 +1106,12 @@ let lastAlert = null, lastAlertTime = 0;
 let levelsRefreshed = false;
 
 async function poll() {
+  // P2-13 (2026-05-14 EOD): auto-timeframe switch (1m → 5m at 12:00 ET).
+  try {
+    const { maybeSwitchTimeframe } = await import('./timeframeSwitcher.js');
+    if (client) await maybeSwitchTimeframe(client, { name: 'monitor-qqq.js' });
+  } catch {}
+
   if (!isMarketHours()) { printOutsideHours(); return; }
 
   // Re-fetch pre-market levels at 09:31 ET if todayOpen was unknown at startup
