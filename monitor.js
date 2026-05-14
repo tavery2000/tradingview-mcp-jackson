@@ -27,6 +27,7 @@
  * exact key names TV returns. Hardcode and strip fallback chain once confirmed.
  */
 
+import 'dotenv/config';   // 2026-05-14: load .env BEFORE paperTrading.js's module-load env reads (SWING entries call sendOrder)
 import CDP             from 'chrome-remote-interface';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';

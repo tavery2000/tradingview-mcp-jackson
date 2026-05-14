@@ -23,6 +23,7 @@
  * Usage: node monitor-qqq.js
  */
 
+import 'dotenv/config';   // 2026-05-14: load .env BEFORE paperTrading.js's module-load env reads (SWING entries call sendOrder)
 import CDP                        from 'chrome-remote-interface';
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath }          from 'url';
