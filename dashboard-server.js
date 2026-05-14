@@ -1,3 +1,5 @@
+import { startHeartbeat } from './heartbeat.js';
+startHeartbeat('dashboard-server.js');
 import http from 'http';
 import { readFileSync, existsSync, readdirSync, statSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -200,6 +202,36 @@ const server = http.createServer(async (req, res) => {
   // green TARGET_REACHED banner. File absent / fired=false → not hit today.
   if (req.method === 'GET' && url === '/api/daily-target') {
     return sendJson(res, readJson('daily-target-state.json') ?? { fired: false });
+  }
+
+  // P0-2 (2026-05-14 EOD): heartbeat aggregator. Each long-running monitor
+  // writes logs/heartbeat-{name}.json every 30s via heartbeat.js. Dashboard
+  // polls this endpoint, alerts operator if any heartbeat is stale > 60s.
+  // Today's incident: theta-monitor + monitor-iwm died silently with no
+  // operator visibility — heartbeats give a passive liveness signal.
+  if (req.method === 'GET' && url === '/api/heartbeats') {
+    const HEARTBEAT_STALE_MS = parseInt(process.env.HEARTBEAT_STALE_MS || '60000', 10);
+    const logsDir = join(__dirname, 'logs');
+    const out = { ts: Date.now(), staleThresholdMs: HEARTBEAT_STALE_MS, processes: [] };
+    try {
+      const files = readdirSync(logsDir).filter(f => f.startsWith('heartbeat-') && f.endsWith('.json'));
+      for (const f of files) {
+        const raw = readJson(`logs/${f}`);
+        if (!raw?.name) continue;
+        const ageMs = Date.now() - (raw.ts || 0);
+        out.processes.push({
+          name:  raw.name,
+          pid:   raw.pid,
+          ts:    raw.ts,
+          et:    raw.et,
+          ageMs,
+          stale: ageMs > HEARTBEAT_STALE_MS,
+        });
+      }
+      out.processes.sort((a, b) => a.name.localeCompare(b.name));
+      out.staleCount = out.processes.filter(p => p.stale).length;
+    } catch (e) { out.error = e.message; }
+    return sendJson(res, out);
   }
 
   if (req.method === 'GET' && url === '/api/options-flow') {

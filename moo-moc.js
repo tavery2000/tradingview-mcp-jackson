@@ -31,6 +31,8 @@
  * Usage: node moo-moc.js   (standalone — no monitor.js or wsServer required)
  */
 
+import { startHeartbeat } from './heartbeat.js';
+startHeartbeat('moo-moc.js');
 import https    from 'https';
 import http     from 'http';
 import { exec } from 'child_process';

@@ -15,6 +15,8 @@
  *   Claude API               — AI briefing generation
  */
 
+import { startHeartbeat } from './heartbeat.js';
+startHeartbeat('briefing.js');
 import Anthropic from '@anthropic-ai/sdk';
 import https     from 'https';
 import http      from 'http';

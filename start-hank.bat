@@ -44,50 +44,52 @@ start "HANK ngrok" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. &&
 timeout /t 2 /nobreak > nul
 
 :: ── Window 3: MOO/MOC Engine ──────────────────────────────────────────────────
-:: Start first — must be up before 09:20 ET to capture MOO imbalance
-start "HANK MOO/MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOO/MOC ENGINE && echo  MOO window 09:20-09:29  MOC window 15:50-15:59 && echo. && node moo-moc.js"
+:: P0-2 (2026-05-14 EOD): all monitors now launched under supervise.js for
+:: auto-restart on death. theta-monitor + monitor-iwm died silently mid-
+:: session today; supervisor pattern catches future deaths within 2s.
+start "HANK MOO/MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOO/MOC ENGINE && echo  MOO window 09:20-09:29  MOC window 15:50-15:59 && echo. && node supervise.js moo-moc.js"
 
 :: ── Window 4: SPY Monitor ─────────────────────────────────────────────────────
-:: Hosts wsServer on :8765. QQQ + IWM monitors connect to it. Start before them.
-start "HANK SPY" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK SPY MONITOR  ^|  Mag-6 + SPY && echo  wsServer broadcasting on ws://localhost:8765 && echo. && node monitor.js"
+:: Hosts wsServer on :8080. QQQ + IWM monitors connect to it. Start before them.
+start "HANK SPY" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK SPY MONITOR  ^|  Mag-6 + SPY && echo  wsServer broadcasting on ws://localhost:8080 && echo. && node supervise.js monitor.js"
 
 timeout /t 6 /nobreak > nul
 
 :: ── Window 5: QQQ Monitor ─────────────────────────────────────────────────────
-start "HANK QQQ" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK QQQ MONITOR  ^|  W3 + QQQ && echo. && node monitor-qqq.js"
+start "HANK QQQ" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK QQQ MONITOR  ^|  W3 + QQQ && echo. && node supervise.js monitor-qqq.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 6: IWM Monitor ─────────────────────────────────────────────────────
-start "HANK IWM" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK IWM MONITOR  ^|  Mag-3 + IWM && echo. && node monitor-iwm.js"
+start "HANK IWM" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK IWM MONITOR  ^|  Mag-3 + IWM && echo. && node supervise.js monitor-iwm.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 7: News Terminal ───────────────────────────────────────────────────
-start "HANK News" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NEWS TERMINAL && echo  RSS + SEC filings + TTS + MOC data writer && echo. && node news.js"
+start "HANK News" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NEWS TERMINAL && echo  RSS + SEC filings + TTS + MOC data writer && echo. && node supervise.js news.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 8: MOC Engine ──────────────────────────────────────────────────────
 :: Arms 15:45. Reads moc-data.json + wsServer TICK. Hard exit 15:59.
-start "HANK MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOC ENGINE && echo  Arms 15:45  Snapshot 15:50  Trigger 15:51  Exit 15:59 && echo. && node moc-engine.js"
+start "HANK MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOC ENGINE && echo  Arms 15:45  Snapshot 15:50  Trigger 15:51  Exit 15:59 && echo. && node supervise.js moc-engine.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 9: Morning Briefing ────────────────────────────────────────────────
-start "HANK Briefing" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK BRIEFING ENGINE && echo  Daily brief at 08:30 ET && echo. && node briefing.js"
+start "HANK Briefing" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK BRIEFING ENGINE && echo  Daily brief at 08:30 ET && echo. && node supervise.js briefing.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 10: Dashboard Server ──────────────────────────────────────────────
-start "HANK Dashboard" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK DASHBOARD SERVER && echo  Open: http://localhost:3000 && echo. && node dashboard-server.js"
+start "HANK Dashboard" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK DASHBOARD SERVER && echo  Open: http://localhost:3000 && echo. && node supervise.js dashboard-server.js"
 
 timeout /t 2 /nobreak > nul
 
 :: ── Window 11: Theta Monitor ─────────────────────────────────────────────────
 :: Per-position greeks + burn zone — depends on wsServer (Window 4 monitor.js)
 :: and CDP :9222 for futures. Writes portfolio-theta.json every 5s.
-start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK THETA MONITOR && echo  Per-position greeks + burn zone  ^|  /api/theta + hank^>theta && echo. && node theta-monitor.js"
+start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK THETA MONITOR && echo  Per-position greeks + burn zone  ^|  /api/theta + hank^>theta && echo. && node supervise.js theta-monitor.js"
 
 echo.
 echo  ============================================================

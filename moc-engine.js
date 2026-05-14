@@ -34,6 +34,8 @@
  * Usage: node moc-engine.js   (Window 6, alongside monitor.js + moo-moc.js)
  */
 
+import { startHeartbeat } from './heartbeat.js';
+startHeartbeat('moc-engine.js');
 import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { fileURLToPath }  from 'url';
 import { dirname, join }  from 'path';

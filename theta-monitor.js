@@ -31,6 +31,8 @@
  *     numbers are estimates, not live.
  */
 
+import { startHeartbeat } from './heartbeat.js';
+startHeartbeat('theta-monitor.js');
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname }       from 'path';
 import { fileURLToPath }       from 'url';
