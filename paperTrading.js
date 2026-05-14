@@ -66,6 +66,14 @@ const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLo
 // Risk is managed per-trade (STOP_LOSS_PCT) and per-day (MAX_DAILY_LOSS hard
 // cap, MAX_DAILY_LOSS_WARNING soft alert). DAILY_TARGET emits TARGET_REACHED
 // on +$DAILY_TARGET realized but trading continues.
+//
+// RULE 3 — per-trade stop loss. STOP_LOSS_PCT > 0 enables the stop; the
+// trade record gets stopPremium = fillPrice × (1 - PCT/100) at fill time.
+// evaluateOpenPositions fires STOP_LOSS exit when current premium <= stop.
+// Initial value 30 derived from 2026-05-14 journal (catches the two
+// catastrophic losers -95.7% / -92.3%, preserves moderate losers' natural
+// SIGNAL_REVERSAL exits). Tighten after MFE instrumentation.
+const STOP_LOSS_PCT         = parseFloat(process.env.STOP_LOSS_PCT || '30');
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -107,6 +115,7 @@ function getContractMultiplier(instrument) {
   console.log(`  [paperTrading] Daily loss cap: $${_eff.toLocaleString()} (source: ${_src})`);
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
   console.log(`  [paperTrading] All concurrency/correlation/opposition gates: REMOVED (RULE 1)`);
+  console.log(`  [paperTrading] Per-trade stop-loss: ${STOP_LOSS_PCT > 0 ? `ENABLED at -${STOP_LOSS_PCT}% of fill` : 'disabled (STOP_LOSS_PCT=0)'}`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -596,6 +605,15 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       }
     } catch (e) { jError('entryIV-calc', e.message, { instrument: order.instrument, strike: order.strike }); }
 
+    // RULE 3: per-trade stop-loss. Compute stop premium at fill time so
+    // evaluateOpenPositions can compare current premium against a fixed
+    // floor without re-deriving from STOP_LOSS_PCT each tick. stopActive
+    // false when STOP_LOSS_PCT=0 (operator-disabled) or fillPrice unusable.
+    const _stopPremium = (STOP_LOSS_PCT > 0 && fill.fillPrice > 0)
+      ? parseFloat((fill.fillPrice * (1 - STOP_LOSS_PCT / 100)).toFixed(4))
+      : null;
+    const _stopActive  = _stopPremium != null;
+
     const trade = {
       ...order,
       ...fill,
@@ -614,6 +632,9 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       finalConfidence: finalConf,
       entryIV,
       entryUnderlying,
+      stopPremium: _stopPremium,
+      stopActive:  _stopActive,
+      stopPct:     STOP_LOSS_PCT > 0 ? STOP_LOSS_PCT : null,
       // Alias for callers (webhook-server.js SIGNAL_REVERSAL exit math) that
       // look up `underlyingPrice` rather than `entryUnderlying`. Same value,
       // two names — schema redundancy intentional to prevent future field-name
@@ -893,6 +914,18 @@ export function evaluateOpenPositions(priceFeeder) {
         burnZone:    analysis.burnZone,
         analysis,
       });
+
+      // RULE 3: per-trade stop-loss. Fired BEFORE IV-crush + hard-exit so
+      // a stop hit during IV crush still records as STOP_LOSS (the relevant
+      // exit reason for risk-control accounting). Idempotent — closePosition
+      // ignores already-CLOSED requestIds; even if multiple eval ticks queue
+      // the same exit, only the first lands.
+      if (t.stopActive && t.stopPremium != null && fed.optionPrice <= t.stopPremium) {
+        exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'STOP_LOSS' });
+        pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
+          `Stop loss on ${t.instrument} ${t.signal}. Hit ${(t.stopPct ?? STOP_LOSS_PCT).toFixed(0)} percent loss. Closing.`);
+        continue;  // skip IV/hard exits on this tick — the stop owns the close
+      }
 
       // IV-crush exit: vega drag eating gains and we're up >200%
       if (t.entryIV != null && analysis.ivCrushing && analysis.pnlPct > 200) {
