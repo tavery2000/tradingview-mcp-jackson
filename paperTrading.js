@@ -134,6 +134,14 @@ function _getTargetDistance(instrument) {
   return null;
 }
 const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak underlying
+// P1-11 (2026-05-14 EOD): per-trade capital cap. tradeCapital = entryPremium
+// × contracts × 100 (options); reject if > cap. Default $1,000 for the $1k
+// account discipline. Set 0 to disable cap (back-compat for $25k account).
+const CAPITAL_CAP_PER_TRADE = parseFloat(process.env.CAPITAL_CAP_PER_TRADE || '1000');
+// P1-12 (2026-05-14 EOD): 1% account-risk position sizing.
+// contracts = floor((account_balance × ACCOUNT_RISK_PCT) / (stop_distance × multiplier)).
+// Combined with CAPITAL_CAP_PER_TRADE: smaller of the two governs.
+const ACCOUNT_RISK_PCT      = parseFloat(process.env.ACCOUNT_RISK_PCT || '0.01');   // 1%
 // P1-5-A (2026-05-14 EOD): whipsaw protection — stop must trigger on
 // 1-min BAR CLOSE through the stop level, not intra-bar tick. Prevents
 // premature exits on noise excursions that recover before bar confirms.
@@ -686,6 +694,36 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason };
   }
   contracts = Math.min(contracts, MAX_CONTRACTS);
+
+  // ── P1-11 (2026-05-14 EOD): per-trade capital cap ──────────────────
+  // tradeCapital = entryPremium × contracts × 100  (options-on-anything)
+  // Reduce contracts until cap respected. Reject entry if even 1 contract
+  // exceeds cap. Operator's $1k account discipline — no single trade can
+  // tie up more than CAPITAL_CAP_PER_TRADE of capital.
+  // (Path 2 futures-direct will use a different formula: contracts ×
+  // entry × multiplier where multiplier is futures point-value ($50 ES,
+  // $20 NQ, $5 MES, $2 MNQ). Not yet wired — Path 2 is weekend work.)
+  const _entryPremium = consensus.entryPrice ?? 0;
+  const _capPerTrade  = CAPITAL_CAP_PER_TRADE;
+  if (_entryPremium > 0 && _capPerTrade > 0) {
+    const _capImpliedContracts = Math.floor(_capPerTrade / (_entryPremium * 100));
+    if (_capImpliedContracts < 1) {
+      // Even 1 contract exceeds cap — reject
+      const reason = `CAPITAL_CAP_PER_TRADE — 1 contract @ $${_entryPremium.toFixed(2)} = $${(_entryPremium * 100).toFixed(0)} > cap $${_capPerTrade}`;
+      orderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'CAPITAL_CAP_PER_TRADE', {
+        entryPremium: _entryPremium, capPerTrade: _capPerTrade,
+        oneContractCapital: _entryPremium * 100,
+      });
+      console.log(`  ${C.red}🛑 ${reason}${C.reset}`);
+      return { vetoed: true, reason };
+    }
+    if (_capImpliedContracts < contracts) {
+      // Reduce contracts to fit cap
+      console.log(`  ${C.yellow}⚠ CAPITAL_CAP_PER_TRADE — reducing contracts ${contracts}→${_capImpliedContracts} (premium $${_entryPremium.toFixed(2)} × ${_capImpliedContracts} × 100 = $${(_entryPremium * 100 * _capImpliedContracts).toFixed(0)} ≤ cap $${_capPerTrade})${C.reset}`);
+      contracts = _capImpliedContracts;
+    }
+  }
 
   // ── Soft unrealized-aware daily-loss cap (2026-05-13) ────────────────
   // The DAILY_LOSS_CAP check above sees only realized P&L. With Option B
