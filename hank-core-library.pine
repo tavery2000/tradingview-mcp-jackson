@@ -1,10 +1,20 @@
 //@version=5
+library("hank_core")
+
 // =====================================================================
 // HANK Core Library — Shared SMC Pro logic for family scripts
 // =====================================================================
 // Built by HANK (NYC2000). Mechanical split from smc-pro-futures.pine
 // 2026-05-13 — all shared SMC computation lives here, family scripts
 // hold inputs + alerts + sensitivity gates.
+//
+// 2026-05-13 v2 fix: library() declaration moved to line 2 (immediately
+// after //@version=5) per Pine Editor's expectation. Previous placement
+// with a 45-line comment block before library() caused some Pine Editor
+// builds to default the script to indicator-mode, which then rejected
+// every `export` keyword. Dropped `overlay=true` arg too — the importing
+// family scripts declare overlay=true on their own indicator() call, so
+// the library doesn't need to assert it.
 //
 // Family scripts:
 //   hank-spy-family.pine  (SPY / ES1! / MES1!)
@@ -13,7 +23,7 @@
 //
 // FIRST-TIME PUBLISH FLOW (operator, post-close only):
 //   1. Open this file in TradingView Pine Editor.
-//   2. "Save" → name it `hank_core` (must match the library() call below).
+//   2. "Save" → name it `hank_core` (must match the library() call above).
 //   3. "Publish library" → choose Private. Note your username appears in
 //      the resulting path: `username/hank_core/1`.
 //   4. Open each hank-*-family.pine file. Verify the `import` line at the
@@ -43,8 +53,6 @@
 // If compile fails irrecoverably, fallback is three standalone copies of
 // smc-pro-futures.pine (no library) — bulletproof but not DRY.
 // =====================================================================
-
-library("hank_core", overlay=true)
 
 // =====================================================================
 // SMCState UDT — all stateful pivot/structure/zone/signal trackers
