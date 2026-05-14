@@ -725,6 +725,42 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     }
   }
 
+  // ── P1-12 (2026-05-14 EOD): 1% account-risk position sizing ─────────
+  // contracts = floor((account_balance × ACCOUNT_RISK_PCT) / (stop_distance × multiplier))
+  // Multipliers (point value × $-per-point):
+  //   ES = $50, NQ = $20, MES = $5, MNQ = $2 (futures point values)
+  //   SPY/QQQ/IWM = $100 per option contract
+  // Combined with CAPITAL_CAP_PER_TRADE: smaller governs.
+  // Skip if stop_distance unavailable (legacy trades or no-stop instruments).
+  const _stopDist = _getStopDistance(consensus.instrument);
+  if (ACCOUNT_RISK_PCT > 0 && _stopDist != null) {
+    const _multMap = {
+      'ES': 50, 'ES1!': 50, 'NQ': 20, 'NQ1!': 20,
+      'MES': 5, 'MES1!': 5, 'MNQ': 2, 'MNQ1!': 2,
+      'SPY': 100, 'QQQ': 100, 'IWM': 100,
+    };
+    const _mult = _multMap[(consensus.instrument || '').toUpperCase()] ?? 100;
+    const _accountBalance = ledger.balance ?? PAPER_BALANCE;
+    const _riskBudget = _accountBalance * ACCOUNT_RISK_PCT;
+    const _maxLossPerContract = _stopDist * _mult;
+    const _riskImpliedContracts = Math.floor(_riskBudget / _maxLossPerContract);
+    if (_riskImpliedContracts < 1) {
+      const reason = `ACCOUNT_RISK_CAP — 1 contract risks $${_maxLossPerContract.toFixed(0)} > 1% of $${_accountBalance.toFixed(0)} ($${_riskBudget.toFixed(0)})`;
+      orderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'ACCOUNT_RISK_CAP', {
+        accountBalance: _accountBalance, riskBudget: _riskBudget,
+        stopDistance: _stopDist, multiplier: _mult,
+        maxLossPerContract: _maxLossPerContract,
+      });
+      console.log(`  ${C.red}🛑 ${reason}${C.reset}`);
+      return { vetoed: true, reason };
+    }
+    if (_riskImpliedContracts < contracts) {
+      console.log(`  ${C.yellow}⚠ ACCOUNT_RISK_CAP — reducing contracts ${contracts}→${_riskImpliedContracts} (1% of $${_accountBalance.toFixed(0)} = $${_riskBudget.toFixed(0)} risk budget; per-contract risk = ${_stopDist} × $${_mult} = $${_maxLossPerContract.toFixed(0)})${C.reset}`);
+      contracts = _riskImpliedContracts;
+    }
+  }
+
   // ── Soft unrealized-aware daily-loss cap (2026-05-13) ────────────────
   // The DAILY_LOSS_CAP check above sees only realized P&L. With Option B
   // (up to 6 concurrent positions), unrealized drawdown can be much wider
