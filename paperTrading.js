@@ -381,6 +381,48 @@ export const orderGate = new OrderGate();
 
 let ledger = loadLedger();
 
+// ─── Stuck-trade scanner (TASK 5, 2026-05-14 EOD) ──────────────────────
+// Run once at module load. Scan the ledger for OPEN positions whose
+// entry timestamp is from a prior ET-date — those are session-bridge
+// survivors that need operator review. Flag-only (no auto-close).
+// Fires per-process at startup; voice TTS is deduped via a per-date key
+// so all 4 dispatchers calling this won't spam the operator. Console
+// banner + journal record emit per-process for full visibility.
+(function _scanStuckTrades() {
+  try {
+    if (!ledger.trades?.length) return;
+    const today = etDate();
+    const stale = ledger.trades.filter(t => {
+      if (t.status !== 'OPEN' || !t.fillTime) return false;
+      const d = new Date(t.fillTime).toLocaleDateString('en-US', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+      });
+      const [mo, dd, yy] = d.split('/');
+      return `${yy}-${mo}-${dd}` < today;
+    });
+    if (stale.length === 0) return;
+    const summary = stale.map(t => ({
+      requestId: t.requestId, instrument: t.instrument, signal: t.signal,
+      engine: t.engine, entryET: t.fillTimeET,
+      entryDate: new Date(t.fillTime).toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
+      contracts: t.contracts, fillPrice: t.fillPrice,
+    }));
+    console.log(`\n  ${C.yellow}⚠ STUCK TRADES — ${stale.length} OPEN positions from prior session(s):${C.reset}`);
+    summary.forEach(s => {
+      console.log(`    ${s.requestId.padEnd(50)} ${s.instrument} ${s.signal} ${s.engine} entered ${s.entryET} (${s.entryDate}) × ${s.contracts} @ $${s.fillPrice}`);
+    });
+    console.log(`  ${C.yellow}→ Operator review required. No auto-close.${C.reset}\n`);
+    try { jAlert('warning', 'STUCK_TRADES_DETECTED', { count: stale.length, today, stale: summary }); } catch {}
+    try {
+      pushVoiceAlert(`stuck-trades-${today}`, 'warning',
+        `${stale.length} stuck open positions from prior session. Operator review required.`,
+        300_000);
+    } catch {}
+  } catch (e) {
+    try { jError('stuck-trade-scan', e.message); } catch {}
+  }
+})();
+
 // Get session from current ET time
 function getCurrentSession() {
   const mins = getETMins();
