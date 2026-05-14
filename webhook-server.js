@@ -159,11 +159,35 @@ async function handlePineAlert(req, res) {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
   } catch {}
 
-  // RTH gate
-  if (!isTradingHours()) {
-    jGateBlock(engine, instrument, direction, 'OUT_OF_HOURS', { etTime: etTimeString() });
-    return send(res, 200, { ok: false, reason: 'OUT_OF_HOURS', et: etTimeString() });
+  // ── Session gate (2026-05-14 EOD TASK 4) ─────────────────────────────
+  // Instrument-aware time gating. Equity (SPY/QQQ/IWM) blocked pre-09:30
+  // (PRE_MARKET) and 09:30-09:40 (EXPLORATION_WINDOW per operator rule:
+  // no trades on equity until exploration completes). Equity also blocked
+  // post-16:00 ET (OUT_OF_HOURS, market closed). Futures (ES/NQ/MES/MNQ
+  // and continuous-front-month forms) are exempt — 24/5 session per
+  // operator directive. The existing LATE_DAY_ENTRY_0DTE gate below
+  // handles equity 15:30-15:45.
+  const SESSION_GATE_EQUITY = new Set(['SPY', 'QQQ', 'IWM']);
+  const _gateETMins = (() => {
+    const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  })();
+  if (SESSION_GATE_EQUITY.has(instrument)) {
+    if (_gateETMins < 9 * 60 + 30) {
+      jGateBlock(engine, instrument, direction, 'PRE_MARKET', { etTime: etTimeString(), etMins: _gateETMins, openMins: 9 * 60 + 30 });
+      return send(res, 200, { ok: false, reason: 'PRE_MARKET', et: etTimeString() });
+    }
+    if (_gateETMins < 9 * 60 + 40) {
+      jGateBlock(engine, instrument, direction, 'EXPLORATION_WINDOW', { etTime: etTimeString(), etMins: _gateETMins, gateOpensAtMins: 9 * 60 + 40 });
+      return send(res, 200, { ok: false, reason: 'EXPLORATION_WINDOW', et: etTimeString() });
+    }
+    if (_gateETMins >= 16 * 60) {
+      jGateBlock(engine, instrument, direction, 'OUT_OF_HOURS', { etTime: etTimeString(), etMins: _gateETMins, closeMins: 16 * 60 });
+      return send(res, 200, { ok: false, reason: 'OUT_OF_HOURS', et: etTimeString() });
+    }
   }
+  // Futures: no time gate. ES1!/NQ1!/MES1!/MNQ1! and bare forms trade 24/5.
 
   // ATR-based option price fallback (Webull chain API_DISABLED)
   const optEst = parseFloat((price * 0.005 * 0.4).toFixed(2));

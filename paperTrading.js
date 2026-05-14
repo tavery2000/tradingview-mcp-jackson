@@ -409,20 +409,30 @@ function etDate() {
  */
 export async function sendOrder(consensus, requestId, lastQuote = null) {
 
-  // ── Defense-in-depth RTH gate (audit 2026-05-11 §5) ───
-  // Reject any trade attempt outside 09:30:00–16:00:00 ET. Upstream callers
-  // already gate via isTradingHours(); this catches direct sendOrder() calls
-  // that ever bypass the upstream guard.
-  const _etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
-  const [_eh, _em, _es] = _etHMS.split(':').map(Number);
-  const _etSec = _eh * 3600 + _em * 60 + _es;
-  if (_etSec < 34200 || _etSec >= 57600) {
-    const reason = `OUT_OF_HOURS — sendOrder rejected at ${_etHMS} ET (gate: 09:30:00–16:00:00)`;
-    orderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'OUT_OF_HOURS_SENDORDER', { etHMS: _etHMS });
-    console.log(`  ${C.red}🛑 OUT_OF_HOURS — sendOrder rejected: ${_etHMS} ET${C.reset}`);
-    return { vetoed: true, reason };
+  // ── Defense-in-depth session gate (2026-05-14 EOD TASK 4) ───
+  // Equity (SPY/QQQ/IWM): reject pre-09:30 (PRE_MARKET), 09:30-09:40
+  // (EXPLORATION_WINDOW), and >=16:00 (OUT_OF_HOURS). Futures bypass
+  // (24/5 session per operator directive). Mirrors the webhook-server.js
+  // session-gate logic so direct sendOrder() callers (monitor SWING
+  // entries) are also covered.
+  const _SESSION_EQUITY = new Set(['SPY', 'QQQ', 'IWM']);
+  if (_SESSION_EQUITY.has((consensus.instrument || '').toUpperCase())) {
+    const _etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const [_eh, _em, _es] = _etHMS.split(':').map(Number);
+    const _etMins = _eh * 60 + _em;
+    let _gateReason = null;
+    if (_etMins < 9 * 60 + 30)       _gateReason = 'PRE_MARKET';
+    else if (_etMins < 9 * 60 + 40)  _gateReason = 'EXPLORATION_WINDOW';
+    else if (_etMins >= 16 * 60)     _gateReason = 'OUT_OF_HOURS_SENDORDER';
+    if (_gateReason) {
+      const reason = `${_gateReason} — sendOrder rejected at ${_etHMS} ET (equity ${consensus.instrument})`;
+      orderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, _gateReason, { etHMS: _etHMS, etMins: _etMins });
+      console.log(`  ${C.red}🛑 ${_gateReason} — sendOrder rejected: ${_etHMS} ET (${consensus.instrument})${C.reset}`);
+      return { vetoed: true, reason };
+    }
   }
+  // Futures: no time gate at sendOrder layer. 24/5 trading allowed.
 
   // ── Tier-aware risk + sizing gate ─────────────────────
   const tierState  = loadTier();
