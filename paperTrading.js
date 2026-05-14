@@ -164,6 +164,17 @@ const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'bar_close').toLow
 // IFF the current price is still beyond the stop level at the new bar's
 // first tick (i.e., the prior bar truly closed beyond stop).
 const _whipsawState = new Map();
+// P1-5-B (2026-05-14 EOD): structure-based stop layer above point-based.
+// STRUCTURE_STOP_INSTRUMENTS = comma-list of instruments where this layer
+// applies. Same whipsaw bar-close confirmation as P1-5-A (intra-bar wick
+// past invalidation does NOT fire — must close past).
+const STRUCTURE_STOP_ENABLED     = (process.env.STRUCTURE_STOP_ENABLED || 'true').toLowerCase() === 'true';
+const STRUCTURE_STOP_INSTRUMENTS = new Set(
+  (process.env.STRUCTURE_STOP_INSTRUMENTS || 'ES1!,NQ1!,MES1!,MNQ1!,SPY,QQQ')
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+);
+// Per-trade structural-breach tracker (parallel to _whipsawState).
+const _structureWhipsaw = new Map();
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -212,6 +223,7 @@ function getContractMultiplier(instrument) {
     `ES/MES=${TARGET_POINTS['ES1!']}pt NQ/MNQ=${TARGET_POINTS['NQ1!']}pt ` +
     `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']} ` +
     `(50/50 scale-out + BE + ${TRAIL_PCT}% trail + R-locks at +3R/+4R)`);
+  console.log(`  [paperTrading] Structure stop (P1-5-B): ${STRUCTURE_STOP_ENABLED ? `ENABLED on ${[...STRUCTURE_STOP_INSTRUMENTS].join(',')} (priority above point-based)` : 'disabled'}`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
 }
 
@@ -900,6 +912,14 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       stopDistance:        _stopDistance,
       stopActive:          _stopActive,
       entryUnderlyingPrice: _entryU,
+      // P1-5-B structure stop fields. Active when invalidationLevel is
+      // a finite number AND the instrument is in STRUCTURE_STOP_INSTRUMENTS.
+      // CALLS fire on close <= invalidation; PUTS fire on close >= invalidation.
+      invalidationLevel:   Number.isFinite(consensus.invalidationLevel) ? consensus.invalidationLevel : null,
+      structureType:       consensus.structureType ?? null,
+      structureStopActive: STRUCTURE_STOP_ENABLED
+                            && Number.isFinite(consensus.invalidationLevel)
+                            && STRUCTURE_STOP_INSTRUMENTS.has((consensus.instrument || '').toUpperCase()),
       // P1-5 take-profit + scale-out + trailing state
       stage:               'STAGE_1_ARMED',
       targetUnderlyingPrice: _targetUnderlying,
@@ -1476,15 +1496,50 @@ export function evaluateOpenPositions(priceFeeder) {
         _mfeMaeTracker.set(t.requestId, ex);
       } catch {}
 
-      // P0-3 + P1-5 + P1-6 (2026-05-14 EOD): mechanical exit hierarchy.
+      // P0-3 + P1-5 + P1-6 + P1-5-B (2026-05-14 EOD): mechanical exit hierarchy.
       // Exit priority on a single tick (first match wins):
-      //   1. STOP_LOSS (initial stop or BREAKEVEN_STOP or PROFIT_LOCKED_STOP)
-      //   2. TARGET (1:2 hit → triggers STAGE_2 scale-out → STAGE_3)
-      //   3. TRAIL_STOP (STAGE_3 trail breach)
-      //   4. SIGNAL_REVERSAL (handled separately by webhook on opposite alert)
-      //   5. IV_CRUSH_EXIT / HARD_EXIT (legacy, lower priority than mechanical)
+      //   1. STOP_LOSS_STRUCTURE (P1-5-B — structural invalidation break)
+      //   2. STOP_LOSS_POINTS (initial stop OR BREAKEVEN_STOP OR PROFIT_LOCKED_STOP)
+      //   3. TARGET (1:2 hit → triggers STAGE_2 scale-out → STAGE_3)
+      //   4. TRAIL_STOP (STAGE_3 trail breach)
+      //   5. SIGNAL_REVERSAL (handled separately by webhook on opposite alert)
+      //   6. IV_CRUSH_EXIT / HARD_EXIT (legacy, lower priority than mechanical)
       const isCalls = t.signal === 'CALLS';
       const liveU   = fed.underlyingPrice;
+
+      // 0. STOP_LOSS_STRUCTURE — fires before point-based stop. Bar-close
+      //    confirmed (whipsaw protection same as P1-5-A but on a separate
+      //    breach tracker so structure + points don't share state).
+      if (t.structureStopActive && t.invalidationLevel != null && liveU != null) {
+        const structBreached = isCalls
+          ? (liveU <= t.invalidationLevel)
+          : (liveU >= t.invalidationLevel);
+
+        const useBarClose = WHIPSAW_PROTECTION && STOP_CONFIRMATION === 'bar_close';
+        let shouldFire = false;
+        if (!useBarClose) {
+          shouldFire = structBreached;
+        } else {
+          const nowET = new Date().toLocaleString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit' });
+          let ws = _structureWhipsaw.get(t.requestId);
+          if (!ws) { ws = { currentBarMinute: nowET, currentBarBreached: false }; _structureWhipsaw.set(t.requestId, ws); }
+          if (nowET !== ws.currentBarMinute) {
+            if (ws.currentBarBreached && structBreached) shouldFire = true;
+            ws.currentBarMinute = nowET;
+            ws.currentBarBreached = structBreached;
+          } else if (structBreached) {
+            ws.currentBarBreached = true;
+          }
+        }
+
+        if (shouldFire) {
+          exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'STOP_LOSS_STRUCTURE' });
+          pushVoiceAlert(`stop-loss-struct-${t.requestId}`, 'critical',
+            `Structural stop on ${t.instrument} ${t.signal}. ${t.structureType ?? 'STRUCT'} invalidation at ${t.invalidationLevel.toFixed(2)} confirmed by bar close.`);
+          _structureWhipsaw.delete(t.requestId);
+          continue;
+        }
+      }
 
       // 1. STOP check — respects current effective stop (may be BE or
       //    profit-locked level after STAGE_3 transitions). P1-5-A whipsaw
@@ -1498,7 +1553,7 @@ export function evaluateOpenPositions(priceFeeder) {
           ? (liveU <= t.stopUnderlyingPrice)
           : (liveU >= t.stopUnderlyingPrice);
 
-        let exitReason = 'STOP_LOSS';
+        let exitReason = 'STOP_LOSS_POINTS';   // P1-5-B: renamed from STOP_LOSS for clarity
         if (t.lockedStopLevel === '1R' || t.lockedStopLevel === '2R') exitReason = 'PROFIT_LOCKED_STOP';
         else if (t.stage === 'STAGE_3_TRAILING' && t.entryUnderlyingPrice != null
                  && Math.abs(t.stopUnderlyingPrice - t.entryUnderlyingPrice) < 0.01) {

@@ -848,11 +848,22 @@ plot(liveSellCount,       title="LiveSellCount",      color=color.new(color.red,
 // payloads — SPY chart emitting "ES1!" was observed 2026-05-12 ~11:40 ET.
 // Setting the override explicitly per chart prevents the mislabel and
 // gives operators full control over what reaches webhook-server.js.
+// P1-5-B (2026-05-14 EOD): emit invalidation_level + structure_type for
+// the structure-based stop layer in paperTrading.js. CALLS use the most
+// recent HL pivot low (prevSwingLow); PUTS use the most recent LH pivot
+// high (prevSwingHigh). When the underlying closes through this level
+// the operator's structural thesis has invalidated → STOP_LOSS_STRUCTURE
+// fires. Layered above STOP_LOSS_POINTS — whichever fires first wins.
 payloadJSON(direction, engine, confidence) =>
     instStr = instrumentOverride == "AUTO" ? syminfo.ticker : instrumentOverride
+    invalLevel = direction == "CALLS" ? prevSwingLow : prevSwingHigh
+    structType = direction == "CALLS" ? "HL" : "LH"
+    invalStr   = na(invalLevel) ? "null" : str.tostring(invalLevel, "#.####")
     '{"instrument":"' + instStr + '","direction":"' + direction +
       '","engine":"' + engine + '","confidence":"' + confidence +
       '","price":' + str.tostring(close, "#.##") +
+      ',"invalidation_level":' + invalStr +
+      ',"structure_type":"' + structType + '"' +
       ',"alertName":"' + engine + ' ' + direction + '"}'
 
 // Confirmed-bar signals (barstate.isconfirmed gated upstream) — once per bar close

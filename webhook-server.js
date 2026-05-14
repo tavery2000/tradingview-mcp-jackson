@@ -147,6 +147,13 @@ async function handlePineAlert(req, res) {
   const { instrument, direction, price, vwap = null, alertName = null } = body;
   const engine     = body.engine     ?? 'PINE';
   const confidence = body.confidence ?? 'MEDIUM';
+  // P1-5-B (2026-05-14 EOD): structure-based stop fields from Pine.
+  // CALLS: invalidation_level = prevSwingLow (HL pivot low).
+  // PUTS:  invalidation_level = prevSwingHigh (LH pivot high).
+  // null when Pine has no recent pivot (early in session, or no struct).
+  const invalidation_level = (body.invalidation_level == null || body.invalidation_level === 'null')
+    ? null : Number(body.invalidation_level);
+  const structure_type     = body.structure_type || null;
 
   console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | ${etTimeString()} ET`);
 
@@ -358,6 +365,8 @@ async function handlePineAlert(req, res) {
     macro4H:                _macro4H,
     counterTrendAction:     ctGate.action,
     counterTrendMultiplier: ctGate.multiplier,
+    invalidationLevel:      invalidation_level,
+    structureType:          structure_type,
   };
 
   // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
