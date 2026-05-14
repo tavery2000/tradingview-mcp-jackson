@@ -57,6 +57,12 @@ const MAX_DAILY_LOSS_WARNING = parseFloat(process.env.MAX_DAILY_LOSS_WARNING || 
 // respawn → flag resets → warning can fire again if realized still below
 // threshold; that's by design (the operator gets a fresh alert on respawn).
 let _dailyLossWarningFiredFor = null;
+// P0-4 (2026-05-14 EOD): MFE/MAE tracker. evaluateOpenPositions updates
+// this map per-tick per open position; closePosition merges values into
+// the trade record at exit. Map<requestId, {peakPnl, troughPnl, peakU,
+// troughU, lastPnl, lastU, ticks}>. Cleared on process restart (acceptable
+// — pre-restart open positions get partial MFE/MAE coverage).
+const _mfeMaeTracker = new Map();
 // RULE 2 — daily realized P&L target. On hit, fire TARGET_REACHED once
 // per ET-date per process. Trading CONTINUES (operator default).
 const DAILY_TARGET = parseFloat(process.env.DAILY_TARGET || '0');
@@ -800,6 +806,30 @@ export function closePosition(requestId, exitPrice, exitReason = 'MANUAL') {
     trade.win        = win;
     trade.grade      = _gradeProcess(trade, exitReason);
 
+    // P0-4 (2026-05-14 EOD): merge MFE/MAE from tracker into trade record.
+    // peakUnrealizedPnL = max favorable P&L observed (MFE in $).
+    // troughUnrealizedPnL = max adverse P&L observed (MAE in $).
+    // peakUnderlyingPrice / troughUnderlyingPrice = best/worst underlying.
+    // Tracker entry deleted after merge (frees memory + signals consumed).
+    const _mm = _mfeMaeTracker.get(requestId);
+    if (_mm) {
+      trade.peakUnrealizedPnL    = parseFloat(_mm.peakPnl.toFixed(2));
+      trade.troughUnrealizedPnL  = parseFloat(_mm.troughPnl.toFixed(2));
+      trade.peakUnderlyingPrice  = parseFloat(_mm.peakU.toFixed(4));
+      trade.troughUnderlyingPrice= parseFloat(_mm.troughU.toFixed(4));
+      trade.mfeMaeTickCount      = _mm.ticks;
+      _mfeMaeTracker.delete(requestId);
+    } else {
+      // No tracker entry — could be: process restarted between entry and
+      // exit, or exit fired before any evaluation tick. Mark as null so
+      // analytics can distinguish "not tracked" from "0 unrealized".
+      trade.peakUnrealizedPnL    = null;
+      trade.troughUnrealizedPnL  = null;
+      trade.peakUnderlyingPrice  = null;
+      trade.troughUnderlyingPrice= null;
+      trade.mfeMaeTickCount      = 0;
+    }
+
     fresh.totalPnL += pnlTotal;
     fresh.balance  += pnlTotal;
     if (win) fresh.wins++; else fresh.losses++;
@@ -1044,6 +1074,31 @@ export function evaluateOpenPositions(priceFeeder) {
         burnZone:    analysis.burnZone,
         analysis,
       });
+
+      // P0-4 (2026-05-14 EOD): MFE/MAE tick update. Track peak + trough
+      // unrealized P&L and underlying price for this open position. Merged
+      // into trade record on exit by closePosition.
+      try {
+        const _liveU = fed.underlyingPrice;
+        const _livePnl = analysis.pnlTotal;   // unrealized $ at this tick
+        const ex = _mfeMaeTracker.get(t.requestId) || {
+          peakPnl:   _livePnl,
+          troughPnl: _livePnl,
+          peakU:     _liveU,
+          troughU:   _liveU,
+          lastPnl:   _livePnl,
+          lastU:     _liveU,
+          ticks:     0,
+        };
+        if (_livePnl > ex.peakPnl)   ex.peakPnl = _livePnl;
+        if (_livePnl < ex.troughPnl) ex.troughPnl = _livePnl;
+        if (_liveU   > ex.peakU)     ex.peakU = _liveU;
+        if (_liveU   < ex.troughU)   ex.troughU = _liveU;
+        ex.lastPnl = _livePnl;
+        ex.lastU   = _liveU;
+        ex.ticks++;
+        _mfeMaeTracker.set(t.requestId, ex);
+      } catch {}
 
       // P0-3 (2026-05-14 EOD): underlying-price stop check. Replaces
       // premium-% stop. CALLS: fed.underlyingPrice <= stopUnderlyingPrice.
