@@ -305,14 +305,30 @@ function simulateFill(order, lastQuote) {
   }
   const mid   = (quote.bid + quote.ask) / 2;
 
-  // Realistic slippage model for 0DTE options
-  // Tighter near-money, wider far OTM
-  const spread    = quote.ask - quote.bid;
-  const slippage  = spread * 0.15; // cross 15% of spread on market order
-
-  const fillPrice = order.side === 'BUY'
-    ? Math.min(quote.ask, mid + slippage)   // buying: pay slightly above mid
-    : Math.max(quote.bid, mid - slippage);  // selling: receive slightly below mid
+  // P1-10 (2026-05-14 EOD): order-type slippage model.
+  //   LIMIT       → zero slippage (exact requested price = order.limitPrice)
+  //   STOP_MARKET → ±1 tick adverse slippage
+  // Falls through to legacy spread-based model if orderType absent (keeps
+  // back-compat for old callers / pre-P1-10 trade records on restart).
+  const orderType = order.orderType || 'LIMIT';
+  let fillPrice;
+  if (orderType === 'LIMIT') {
+    fillPrice = Number.isFinite(order.limitPrice) && order.limitPrice > 0
+      ? order.limitPrice
+      : mid;   // fallback if limitPrice missing
+  } else if (orderType === 'STOP_MARKET') {
+    // ±1 tick = 0.01 for equity options, 0.25 for futures (operator spec
+    // doesn't break out per instrument — using 0.01 generic; refine post-Friday)
+    const tickSize = 0.01;
+    fillPrice = order.side === 'BUY' ? mid + tickSize : mid - tickSize;
+  } else {
+    // Legacy fallback (shouldn't be reachable post-P1-10 validation)
+    const spread    = quote.ask - quote.bid;
+    const slippage  = spread * 0.15;
+    fillPrice = order.side === 'BUY'
+      ? Math.min(quote.ask, mid + slippage)
+      : Math.max(quote.bid, mid - slippage);
+  }
 
   return {
     fillPrice:    parseFloat(fillPrice.toFixed(4)),
@@ -323,6 +339,7 @@ function simulateFill(order, lastQuote) {
     bid:          quote.bid,
     ask:          quote.ask,
     mid:          parseFloat(mid.toFixed(4)),
+    orderType,
     paper:        true,
   };
 }
@@ -704,6 +721,20 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     }
   }
 
+  // P1-10 (2026-05-14 EOD): order-type validation. Only LIMIT and
+  // STOP_MARKET accepted. MARKET orders rejected with ORDER_TYPE_REJECT.
+  // Default to LIMIT if not specified by caller (Pine alerts don't pass
+  // orderType today; webhook injects nothing). Live broker integration
+  // (Webull/Alpaca) MUST enforce the same rule when wired up.
+  const _orderType = (consensus.orderType || 'LIMIT').toUpperCase();
+  if (!['LIMIT', 'STOP_MARKET'].includes(_orderType)) {
+    const reason = `ORDER_TYPE_REJECT — type '${_orderType}' not in {LIMIT, STOP_MARKET}`;
+    orderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'ORDER_TYPE_REJECT', { orderType: _orderType });
+    console.log(`  ${C.red}🛑 ${reason}${C.reset}`);
+    return { vetoed: true, reason };
+  }
+
   const order = {
     requestId,
     signal:    consensus.signal,      // CALLS | PUTS
@@ -715,6 +746,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     side:      'BUY',
     contracts,
     limitPrice:consensus.entryPrice || 0,
+    orderType: _orderType,
     confidence:consensus.confidence,
     ts:        Date.now(),
     timeET:    getETString(),
