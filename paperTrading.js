@@ -134,6 +134,17 @@ function _getTargetDistance(instrument) {
   return null;
 }
 const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak underlying
+// P1-5-A (2026-05-14 EOD): whipsaw protection — stop must trigger on
+// 1-min BAR CLOSE through the stop level, not intra-bar tick. Prevents
+// premature exits on noise excursions that recover before bar confirms.
+// STOP_CONFIRMATION=tick_instant for legacy intra-tick behavior.
+const WHIPSAW_PROTECTION = (process.env.WHIPSAW_PROTECTION || 'true').toLowerCase() === 'true';
+const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'bar_close').toLowerCase();
+// Per-trade bar-close tracker. Each entry: {currentBarMinute, currentBarBreached}.
+// On bar-rollover, if breach was observed in the prior bar, the stop fires
+// IFF the current price is still beyond the stop level at the new bar's
+// first tick (i.e., the prior bar truly closed beyond stop).
+const _whipsawState = new Map();
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -1352,22 +1363,57 @@ export function evaluateOpenPositions(priceFeeder) {
       const liveU   = fed.underlyingPrice;
 
       // 1. STOP check — respects current effective stop (may be BE or
-      //    profit-locked level after STAGE_3 transitions).
+      //    profit-locked level after STAGE_3 transitions). P1-5-A whipsaw
+      //    protection: when WHIPSAW_PROTECTION=true and STOP_CONFIRMATION=
+      //    bar_close, a breach during a 1-min bar only fires on bar
+      //    rollover IFF the underlying is still beyond stop at the new
+      //    bar's first tick. Profit-locked + BE stops bypass whipsaw
+      //    protection (operator wants instant lock-protection).
       if (t.stopActive && t.stopUnderlyingPrice != null && liveU != null) {
         const breached = isCalls
           ? (liveU <= t.stopUnderlyingPrice)
           : (liveU >= t.stopUnderlyingPrice);
-        if (breached) {
-          // Map exit reason based on which stop level fired
-          let exitReason = 'STOP_LOSS';
-          if (t.lockedStopLevel === '1R' || t.lockedStopLevel === '2R') exitReason = 'PROFIT_LOCKED_STOP';
-          else if (t.stage === 'STAGE_3_TRAILING' && t.entryUnderlyingPrice != null
-                   && Math.abs(t.stopUnderlyingPrice - t.entryUnderlyingPrice) < 0.01) {
-            exitReason = 'BREAKEVEN_STOP';
+
+        let exitReason = 'STOP_LOSS';
+        if (t.lockedStopLevel === '1R' || t.lockedStopLevel === '2R') exitReason = 'PROFIT_LOCKED_STOP';
+        else if (t.stage === 'STAGE_3_TRAILING' && t.entryUnderlyingPrice != null
+                 && Math.abs(t.stopUnderlyingPrice - t.entryUnderlyingPrice) < 0.01) {
+          exitReason = 'BREAKEVEN_STOP';
+        }
+
+        // Whipsaw protection only applies to initial STOP_LOSS (operator-
+        // critical: locked-profit + BE stops fire instantly so realized
+        // gains are protected).
+        const useBarClose = WHIPSAW_PROTECTION
+          && STOP_CONFIRMATION === 'bar_close'
+          && exitReason === 'STOP_LOSS';
+
+        let shouldFire = false;
+        if (!useBarClose) {
+          shouldFire = breached;
+        } else {
+          // Track breach state across bars
+          const nowET = new Date().toLocaleString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit' });
+          let ws = _whipsawState.get(t.requestId);
+          if (!ws) { ws = { currentBarMinute: nowET, currentBarBreached: false }; _whipsawState.set(t.requestId, ws); }
+          if (nowET !== ws.currentBarMinute) {
+            // Bar just rolled over — confirm/decline the prior breach
+            if (ws.currentBarBreached && breached) {
+              shouldFire = true;   // prior bar closed beyond stop AND new bar opens still beyond
+            }
+            // Reset for new bar
+            ws.currentBarMinute = nowET;
+            ws.currentBarBreached = breached;
+          } else if (breached) {
+            ws.currentBarBreached = true;   // mid-bar breach observed; await close to confirm
           }
+        }
+
+        if (shouldFire) {
           exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: exitReason });
           pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
-            `${exitReason} on ${t.instrument} ${t.signal}. Underlying ${liveU.toFixed(2)} breached ${t.stopUnderlyingPrice.toFixed(2)}.`);
+            `${exitReason} on ${t.instrument} ${t.signal}. Underlying ${liveU.toFixed(2)} confirmed beyond ${t.stopUnderlyingPrice.toFixed(2)}.`);
+          _whipsawState.delete(t.requestId);
           continue;
         }
       }
