@@ -1,29 +1,24 @@
 //@version=5
+indicator(title="HANK SMC Pro — NQ Family", shorttitle="SMC-NQ", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
 // =====================================================================
 // HANK SMC Pro — NQ Family (QQQ / NQ1! / MNQ1!)
 // =====================================================================
-// Mechanical split from smc-pro-futures.pine 2026-05-13. Defaults match
-// the single-script source exactly. NO BEHAVIORAL CHANGE intended —
-// calibration is a future, separate task.
+// Standalone fork of smc-pro-futures.pine — created 2026-05-13 after the
+// library-based approach hit a Pine Editor tier-gate (operator on free
+// TradingView; "New Library" workflow not available). Three family
+// scripts now duplicate the full logic. Trade-off: paste-and-go
+// simplicity vs DRY. Bug fixes must be applied 3x by hand.
 //
 // Family scope: QQQ equity options + Nasdaq-100 futures (NQ1!, MNQ1!).
-// Use this on QQQ charts, NQ1! charts, MNQ1! charts. The
-// instrumentOverride input below is restricted to the NQ-family
-// allow-list to prevent accidental mislabeling on the wrong chart.
+// Paste on QQQ / NQ1! / MNQ1! charts. instrumentOverride below is
+// restricted to the NQ-family allow-list to prevent mislabeling on the
+// wrong chart (per 2026-05-12 syminfo mislabel observation).
 //
-// FIRST PASTE FLOW:
-//   1. Publish hank-core-library.pine as private library FIRST.
-//   2. Verify the `import` line below matches your TradingView username.
-//      Default assumes `tavery2000`. Change if needed.
-//   3. Save → "Add to Chart".
-//   4. Compare side-by-side with smc-pro-futures.pine on the same chart
-//      for 30+ bars. Alerts should match identically.
+// Defaults match smc-pro-futures.pine exactly — no per-family tuning
+// yet. Calibration is a separate, post-validation task.
 // =====================================================================
-
-import tavery2000/hank_core/1 as core
-
-indicator(title="HANK SMC Pro — NQ Family", shorttitle="SMC-NQ", overlay=true,
-     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // =====================================================================
 // INPUTS
@@ -72,21 +67,24 @@ liveDispMult      = input.float(1.4,  "Displacement (× ATR)",          minval=0
 liveExtremeRatio  = input.float(0.7,  "Close-near-extreme ratio",      minval=0.5, maxval=0.95, step=0.05, group=gLive, tooltip="Close must be in top/bottom (1 - ratio) of bar range. Higher = stricter.")
 
 // --- Early-structure triggers (§14) ---
-gEarly      = "Early-structure triggers"
-enableHLBuy = input.bool(true, "Enable HL→BUY / LH→SELL early-entry", group=gEarly, tooltip="Fire BUY when an HL pivot confirms above prior low; SELL when an LH pivot confirms below prior high. Catches continuation pullback completions AND early reversal turns. Subject to HTF filter, sensitivity gate, and cooldown.")
+gEarly           = "Early-structure triggers"
+enableHLBuy      = input.bool(true, "Enable HL→BUY / LH→SELL early-entry", group=gEarly, tooltip="Fire BUY when an HL pivot confirms above prior low; SELL when an LH pivot confirms below prior high. Catches continuation pullback completions AND early reversal turns. Subject to HTF filter, sensitivity gate, and cooldown.")
 
-// --- Auto-recovery (§16/§17 Path C) ---
+// --- Auto-recovery (§16/§17 Path C — undo trend mutation on false CHoCH) ---
 gAutoRecovery       = "Auto-recovery"
 enableAutoRecovery  = input.bool(true, "Enable auto-recovery on false CHoCH", group=gAutoRecovery, tooltip="When a CHoCH fires and within N bars price closes back through the broken pivot in the original direction, revert the trend state. Restores symmetry so the next legitimate signal can fire without waiting for HTF to catch up. Addresses §16 trend-state pollution and §17 HTF-filter collateral cost.")
 autoRecoveryBars    = input.int(5, "Auto-recovery window (bars)", minval=1, maxval=20, group=gAutoRecovery, tooltip="Bars after CHoCH fire to check for price reclaim. 5 on 1M = 5 min window. Raise for longer windows on higher timeframes.")
 
-// --- Webhook payload (NQ-family allow-list) ---
+// --- Webhook payload (instrument override for alert JSON) ---
+// Default "AUTO" uses syminfo.ticker, which resolves the chart's symbol.
+// Observed 2026-05-12 ~11:40 ET: SPY chart emitted "instrument":"ES1!" in
+// alert payload — likely syminfo.ticker context resolution issue between
+// alert creation time and fire time. Per-chart explicit override prevents
+// the mislabel. Value must match webhook-server.js allow-list exactly.
 gWebhook           = "Webhook Payload"
-instrumentOverride = input.string("AUTO", "Instrument override",
-     options=["AUTO","QQQ","NQ1!","MNQ1!"], group=gWebhook,
-     tooltip="NQ-family allow-list. Default AUTO uses Pine's syminfo.ticker. Set explicitly per chart (QQQ on QQQ chart, NQ1! on NQ1! chart, etc.) to prevent webhook payload mislabel. Must match webhook-server.js VALID_INSTRUMENTS exactly.")
+instrumentOverride = input.string("AUTO", "Instrument override", options=["AUTO","QQQ","NQ1!","MNQ1!"], group=gWebhook, tooltip="NQ-family allow-list. Default AUTO uses Pine's syminfo.ticker. Set explicitly per chart (QQQ on QQQ chart, NQ1! on NQ1! chart, etc.) to prevent the 2026-05-12 syminfo mislabel. Must match webhook-server.js VALID_INSTRUMENTS exactly.")
 
-// --- Sessions ---
+// --- Sessions (toggle each independently) ---
 gSessions = "Sessions"
 sAsia     = input.bool(true, "Asia 18:00-22:00 ET (Sun-Thu)",     group=gSessions)
 sLondon   = input.bool(true, "London 03:00-05:00 ET",             group=gSessions)
@@ -99,6 +97,7 @@ gColors    = "Colors"
 clrBull    = input.color(#26C6DA,                "Bullish core",     group=gColors)
 clrBear    = input.color(#EF5350,                "Bearish core",     group=gColors)
 clrMuted   = input.color(#7F8FA0,                "Neutral / muted",  group=gColors)
+// Session zone transparency raised 2026-05-11 (92 → 96, 90 → 95) for subtler chart presence
 clrAsia    = input.color(color.new(#9575CD, 96), "Asia zone",        group=gColors)
 clrLondon  = input.color(color.new(#5C6BC0, 96), "London zone",      group=gColors)
 clrNYpre   = input.color(color.new(#FFB74D, 96), "NY pre zone",      group=gColors)
@@ -106,55 +105,407 @@ clrNYopen  = input.color(color.new(#66BB6A, 95), "NY open zone",     group=gColo
 clrNYclose = input.color(color.new(#EF5350, 95), "NY close zone",    group=gColors)
 
 // =====================================================================
-// STATE — single SMCState container, library-owned schema
-// =====================================================================
-
-var core.SMCState st = core.newState()
-
-// =====================================================================
 // PIVOT BASELINE
 // =====================================================================
-
-pivotLenEffVal = core.pivotLenEff(adaptivePivot, pivotLen)
-ph    = ta.pivothigh(pivotLenEffVal, pivotLenEffVal)
-pl    = ta.pivotlow(pivotLenEffVal,  pivotLenEffVal)
+// §1-§8 fix: pivot length scales with chart timeframe so structural references
+// stay close enough to current price for intraday reversals to register.
+pivotLenEff = adaptivePivot ?
+     (timeframe.period == "1"  or timeframe.period == "3"  or timeframe.period == "5"  ? 3 :
+      timeframe.period == "15" or timeframe.period == "30"                              ? 5 :
+      pivotLen) :
+     pivotLen
+ph    = ta.pivothigh(pivotLenEff, pivotLenEff)
+pl    = ta.pivotlow(pivotLenEff,  pivotLenEff)
 atr14 = ta.atr(14)
 
 // =====================================================================
-// STRUCTURE LABELS + HL/LH raw signals (BEFORE swing-state update)
+// STATE — structure tracking
+// =====================================================================
+var float prevSwingHigh     = na
+var float prevSwingLow      = na
+var float lastUnbrokenHigh  = na   // most-recent high not yet broken by close
+var float lastUnbrokenLow   = na
+var int   lastUnbrokenHiBar = na
+var int   lastUnbrokenLoBar = na
+var int   trend             = 0    // 1=bull, -1=bear, 0=undefined
+
+// Label arrays (for pruning to maxStructLabels)
+var array<label> structLabels = array.new<label>()
+
+// BOS / CHoCH lines + labels
+var array<line>  bosLines    = array.new<line>()
+var array<line>  chochLines  = array.new<line>()
+var array<label> bosLabels   = array.new<label>()
+var array<label> chochLabels = array.new<label>()
+
+// =====================================================================
+// STATE — order blocks, FVGs, sweeps
+// =====================================================================
+var array<box> bullOBs  = array.new<box>()
+var array<box> bearOBs  = array.new<box>()
+var array<box> bullFVGs = array.new<box>()
+var array<box> bearFVGs = array.new<box>()
+
+var int lastBullSweepBar = na
+var int lastBearSweepBar = na
+var array<label> sweepLabels = array.new<label>()
+
+// =====================================================================
+// STATE — signals
+// =====================================================================
+var int    lastBuyBar      = na
+var int    lastSellBar     = na
+var string lastSignalText  = "—"
+var color  lastSignalColor = clrMuted
+
+// §12 — live intra-bar latches (one fire per bar per direction, reset on new bar)
+var bool   liveBullFiredThisBar = false
+var bool   liveBearFiredThisBar = false
+
+// §16/§17 Path C — false-CHoCH trackers for auto-recovery
+// Capture the pivot price at moment of CHoCH fire so we can detect reclaim later.
+var float  falseBullCHOprice = na  // The lastUnbrokenHigh that was broken when bullCHOraw fired
+var int    falseBullCHObar   = na
+var float  falseBearCHOprice = na  // The lastUnbrokenLow that was broken when bearCHOraw fired
+var int    falseBearCHObar   = na
+
+// =====================================================================
+// STATE — sessions
+// =====================================================================
+var array<label> sessLabels = array.new<label>()
+
+// =====================================================================
+// HELPERS
 // =====================================================================
 
-[bullHLraw, bearLHraw] = core.drawStructureLabels(st, ph, pl, pivotLenEffVal,
-     maxStructLabels, showStruct, enableHLBuy, clrBull, clrBear)
+// Drop-oldest-when-full pattern for label arrays
+pruneLabels(arr, maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        label.delete(old)
 
-core.updateSwingState(st, ph, pl, pivotLenEffVal)
+// Drop-oldest-when-full pattern for line arrays
+pruneLines(arr, maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        line.delete(old)
+
+// Drop-oldest-when-full pattern for box arrays
+pruneBoxes(arr, maxN) =>
+    while array.size(arr) > maxN
+        old = array.shift(arr)
+        box.delete(old)
 
 // =====================================================================
-// BOS / CHoCH + AUTO-RECOVERY
+// STRUCTURE — HH/HL/LH/LL labels
 // =====================================================================
+if not na(ph) and showStruct
+    pivBar = bar_index - pivotLenEff
+    txt    = na(prevSwingHigh) or ph > prevSwingHigh ? "HH" : "LH"
+    col    = txt == "HH" ? clrBull : clrBear
+    lbl    = label.new(x=pivBar, y=ph, text=txt, color=color.new(#000000, 100),
+         textcolor=col, style=label.style_label_down, size=size.small,
+         yloc=yloc.abovebar)
+    array.push(structLabels, lbl)
+    pruneLabels(structLabels, maxStructLabels * 2) // keep 2x buffer for high+low
 
-[bullBOSraw, bearBOSraw, bullCHOraw, bearCHOraw] =
-     core.detectBOSCHO(st, enableAutoRecovery, showBOSLines, showCHoCHLines, clrBull, clrBear)
+if not na(pl) and showStruct
+    pivBar = bar_index - pivotLenEff
+    txt    = na(prevSwingLow) or pl > prevSwingLow ? "HL" : "LL"
+    col    = txt == "HL" ? clrBull : clrBear
+    lbl    = label.new(x=pivBar, y=pl, text=txt, color=color.new(#000000, 100),
+         textcolor=col, style=label.style_label_up, size=size.small,
+         yloc=yloc.belowbar)
+    array.push(structLabels, lbl)
+    pruneLabels(structLabels, maxStructLabels * 2)
 
-core.checkAutoRecovery(st, autoRecoveryBars, pivotLenEffVal)
+// §14 — early-structure raw signals (HL→BUY, LH→SELL)
+// Compute BEFORE the prevSwing update below, otherwise the comparison is against itself.
+// HL = new pivot low above prior pivot low; LH = new pivot high below prior pivot high.
+bullHLraw = enableHLBuy and not na(pl) and not na(prevSwingLow)  and pl > prevSwingLow
+bearLHraw = enableHLBuy and not na(ph) and not na(prevSwingHigh) and ph < prevSwingHigh
+
+// Update prev-swing references (used for next HH/HL/LH/LL classification)
+if not na(ph)
+    prevSwingHigh := ph
+if not na(pl)
+    prevSwingLow := pl
+
+// Set the "next break target" — the most recent un-broken swing
+if not na(ph)
+    lastUnbrokenHigh  := ph
+    lastUnbrokenHiBar := bar_index - pivotLenEff
+if not na(pl)
+    lastUnbrokenLow  := pl
+    lastUnbrokenLoBar := bar_index - pivotLenEff
+
+// =====================================================================
+// BOS / CHoCH detection (on confirmed bar close)
+// =====================================================================
+bullBOSraw = false
+bearBOSraw = false
+bullCHOraw = false
+bearCHOraw = false
+
+if barstate.isconfirmed
+    // Upside break of last unbroken high
+    if not na(lastUnbrokenHigh) and close > lastUnbrokenHigh
+        if trend == -1
+            bullCHOraw := true
+            // §16/§17 Path C — capture the broken pivot for auto-recovery detection
+            if enableAutoRecovery
+                falseBullCHOprice := lastUnbrokenHigh
+                falseBullCHObar   := bar_index
+            trend := 1
+        else
+            bullBOSraw := true
+            trend := 1
+        // Draw line from broken pivot to break bar
+        if (bullBOSraw and showBOSLines) or (bullCHOraw and showCHoCHLines)
+            ln = line.new(x1=lastUnbrokenHiBar, y1=lastUnbrokenHigh,
+                 x2=bar_index, y2=lastUnbrokenHigh,
+                 color=clrBull,
+                 style=bullCHOraw ? line.style_solid : line.style_dashed,
+                 width=1)
+            lbl = label.new(x=bar_index, y=lastUnbrokenHigh,
+                 text=bullCHOraw ? "CHoCH" : "BOS",
+                 color=color.new(#000000, 100),
+                 textcolor=clrBull, style=label.style_label_left,
+                 size=size.tiny)
+            if bullCHOraw
+                array.push(chochLines, ln)
+                array.push(chochLabels, lbl)
+                pruneLines(chochLines, 12)
+                pruneLabels(chochLabels, 12)
+            else
+                array.push(bosLines, ln)
+                array.push(bosLabels, lbl)
+                pruneLines(bosLines, 12)
+                pruneLabels(bosLabels, 12)
+        lastUnbrokenHigh  := na
+        lastUnbrokenHiBar := na
+
+    // Downside break of last unbroken low
+    if not na(lastUnbrokenLow) and close < lastUnbrokenLow
+        if trend == 1
+            bearCHOraw := true
+            // §16/§17 Path C — capture the broken pivot for auto-recovery detection
+            if enableAutoRecovery
+                falseBearCHOprice := lastUnbrokenLow
+                falseBearCHObar   := bar_index
+            trend := -1
+        else
+            bearBOSraw := true
+            trend := -1
+        if (bearBOSraw and showBOSLines) or (bearCHOraw and showCHoCHLines)
+            ln = line.new(x1=lastUnbrokenLoBar, y1=lastUnbrokenLow,
+                 x2=bar_index, y2=lastUnbrokenLow,
+                 color=clrBear,
+                 style=bearCHOraw ? line.style_solid : line.style_dashed,
+                 width=1)
+            lbl = label.new(x=bar_index, y=lastUnbrokenLow,
+                 text=bearCHOraw ? "CHoCH" : "BOS",
+                 color=color.new(#000000, 100),
+                 textcolor=clrBear, style=label.style_label_left,
+                 size=size.tiny)
+            if bearCHOraw
+                array.push(chochLines, ln)
+                array.push(chochLabels, lbl)
+                pruneLines(chochLines, 12)
+                pruneLabels(chochLabels, 12)
+            else
+                array.push(bosLines, ln)
+                array.push(bosLabels, lbl)
+                pruneLines(bosLines, 12)
+                pruneLabels(bosLabels, 12)
+        lastUnbrokenLow  := na
+        lastUnbrokenLoBar := na
+
+// =====================================================================
+// AUTO-RECOVERY (§16/§17 Path C — undo false-CHoCH trend mutation)
+// If a CHoCH fires and within autoRecoveryBars price closes back through
+// the broken pivot in the ORIGINAL direction, revert the trend state.
+// Restores symmetry so the next legitimate signal can fire without
+// waiting for HTF to catch up.
+// =====================================================================
+if barstate.isconfirmed and enableAutoRecovery
+    // Bullish CHoCH that wasn't — price came back DOWN past the broken LH
+    if not na(falseBullCHOprice) and (bar_index - falseBullCHObar) <= autoRecoveryBars
+        if close < falseBullCHOprice
+            trend := -1
+            lastUnbrokenHigh  := falseBullCHOprice
+            lastUnbrokenHiBar := falseBullCHObar - pivotLenEff
+            falseBullCHOprice := na
+            falseBullCHObar   := na
+
+    // Bearish CHoCH that wasn't — price came back UP past the broken HL
+    if not na(falseBearCHOprice) and (bar_index - falseBearCHObar) <= autoRecoveryBars
+        if close > falseBearCHOprice
+            trend := 1
+            lastUnbrokenLow  := falseBearCHOprice
+            lastUnbrokenLoBar := falseBearCHObar - pivotLenEff
+            falseBearCHOprice := na
+            falseBearCHObar   := na
+
+    // Expire stale trackers outside the window
+    if not na(falseBullCHObar) and (bar_index - falseBullCHObar) > autoRecoveryBars
+        falseBullCHOprice := na
+        falseBullCHObar   := na
+    if not na(falseBearCHObar) and (bar_index - falseBearCHObar) > autoRecoveryBars
+        falseBearCHOprice := na
+        falseBearCHObar   := na
 
 // =====================================================================
 // LIQUIDITY SWEEPS
+// Bull sweep: low pierced lastUnbrokenLow by >=0.25*ATR, close back above
+// Bear sweep: high pierced lastUnbrokenHigh by >=0.25*ATR, close back below
 // =====================================================================
+sweepThr     = 0.25 * atr14
+bullSweepRaw = false
+bearSweepRaw = false
 
-[bullSweepRaw, bearSweepRaw] = core.detectSweep(st, atr14, showSweeps, clrBull, clrBear)
+if barstate.isconfirmed and not na(atr14)
+    // Bull sweep: piercing the low and reclaiming
+    if not na(prevSwingLow) and low <= prevSwingLow - sweepThr and close > prevSwingLow
+        bullSweepRaw := true
+        lastBullSweepBar := bar_index
+        if showSweeps
+            lbl = label.new(x=bar_index, y=prevSwingLow,
+                 text="◆", color=color.new(#000000, 100),
+                 textcolor=clrBull, style=label.style_label_up,
+                 size=size.tiny, yloc=yloc.belowbar)
+            array.push(sweepLabels, lbl)
+            pruneLabels(sweepLabels, 20)
+
+    // Bear sweep: piercing the high and rejecting
+    if not na(prevSwingHigh) and high >= prevSwingHigh + sweepThr and close < prevSwingHigh
+        bearSweepRaw := true
+        lastBearSweepBar := bar_index
+        if showSweeps
+            lbl = label.new(x=bar_index, y=prevSwingHigh,
+                 text="◆", color=color.new(#000000, 100),
+                 textcolor=clrBear, style=label.style_label_down,
+                 size=size.tiny, yloc=yloc.abovebar)
+            array.push(sweepLabels, lbl)
+            pruneLabels(sweepLabels, 20)
 
 // =====================================================================
-// FVG + OB
+// FAIR VALUE GAPS — 3-candle imbalance
+//   Bullish: high[2] < low[0]  (gap = [high[2], low[0]])
+//   Bearish: low[2]  > high[0] (gap = [high[0], low[2]])
 // =====================================================================
+fvgExtend = 80   // bars to extend right
 
-core.detectFVG(st, atr14, showFVGs, zoneOpacity, clrBull, clrBear)
-core.detectOB(st, atr14, showOBs, zoneOpacity, clrBull, clrBear)
+if barstate.isconfirmed and not na(atr14) and showFVGs
+    // Bullish FVG
+    if high[2] < low[0]
+        topY = low[0]
+        botY = high[2]
+        gap  = topY - botY
+        // Filter: only worth drawing if at least 0.3 * ATR (avoid micro-gaps)
+        if gap >= 0.3 * atr14
+            b = box.new(left=bar_index - 2, top=topY,
+                 right=bar_index + fvgExtend, bottom=botY,
+                 bgcolor=color.new(clrBull, zoneOpacity),
+                 border_color=color.new(clrBull, 80),
+                 border_width=1)
+            array.push(bullFVGs, b)
+            pruneBoxes(bullFVGs, 3)
+
+    // Bearish FVG
+    if low[2] > high[0]
+        topY = low[2]
+        botY = high[0]
+        gap  = topY - botY
+        if gap >= 0.3 * atr14
+            b = box.new(left=bar_index - 2, top=topY,
+                 right=bar_index + fvgExtend, bottom=botY,
+                 bgcolor=color.new(clrBear, zoneOpacity),
+                 border_color=color.new(clrBear, 80),
+                 border_width=1)
+            array.push(bearFVGs, b)
+            pruneBoxes(bearFVGs, 3)
+
+// FVG mitigation — close trades through the gap → delete
+if barstate.isconfirmed and array.size(bullFVGs) > 0
+    for i = array.size(bullFVGs) - 1 to 0
+        b   = array.get(bullFVGs, i)
+        bot = box.get_bottom(b)
+        if low <= bot
+            box.delete(b)
+            array.remove(bullFVGs, i)
+
+if barstate.isconfirmed and array.size(bearFVGs) > 0
+    for i = array.size(bearFVGs) - 1 to 0
+        b   = array.get(bearFVGs, i)
+        top = box.get_top(b)
+        if high >= top
+            box.delete(b)
+            array.remove(bearFVGs, i)
 
 // =====================================================================
-// HTF BIAS
+// ORDER BLOCKS
+//   Bullish OB = the most recent bearish candle BEFORE a bullish
+//   displacement (body >= 1.5 * ATR, close > open).
+//   Bearish OB = the most recent bullish candle BEFORE a bearish
+//   displacement.
 // =====================================================================
+obExtend = 100
 
+displacementBull = barstate.isconfirmed and not na(atr14) and close > open and (close - open) >= 1.5 * atr14
+displacementBear = barstate.isconfirmed and not na(atr14) and close < open and (open - close) >= 1.5 * atr14
+
+if displacementBull and showOBs
+    // Look back up to 5 bars for the nearest bearish candle
+    int obIdx = na
+    for k = 1 to 5
+        if close[k] < open[k]
+            obIdx := k
+            break
+    if not na(obIdx)
+        b = box.new(left=bar_index - obIdx, top=high[obIdx],
+             right=bar_index + obExtend, bottom=low[obIdx],
+             bgcolor=color.new(clrBull, zoneOpacity),
+             border_color=color.new(clrBull, 70),
+             border_width=1)
+        array.push(bullOBs, b)
+        pruneBoxes(bullOBs, 2)
+
+if displacementBear and showOBs
+    int obIdx = na
+    for k = 1 to 5
+        if close[k] > open[k]
+            obIdx := k
+            break
+    if not na(obIdx)
+        b = box.new(left=bar_index - obIdx, top=high[obIdx],
+             right=bar_index + obExtend, bottom=low[obIdx],
+             bgcolor=color.new(clrBear, zoneOpacity),
+             border_color=color.new(clrBear, 70),
+             border_width=1)
+        array.push(bearOBs, b)
+        pruneBoxes(bearOBs, 2)
+
+// OB mitigation — close through the body → delete
+if barstate.isconfirmed and array.size(bullOBs) > 0
+    for i = array.size(bullOBs) - 1 to 0
+        b   = array.get(bullOBs, i)
+        bot = box.get_bottom(b)
+        if close < bot
+            box.delete(b)
+            array.remove(bullOBs, i)
+
+if barstate.isconfirmed and array.size(bearOBs) > 0
+    for i = array.size(bearOBs) - 1 to 0
+        b   = array.get(bearOBs, i)
+        top = box.get_top(b)
+        if close > top
+            box.delete(b)
+            array.remove(bearOBs, i)
+
+// =====================================================================
+// HTF BIAS (request.security with internal pivot tracking)
+// =====================================================================
 htfTf = htfMode == "Auto" ?
      (timeframe.period == "1"  or timeframe.period == "3"  or timeframe.period == "5"  ? "60"  :
       timeframe.period == "15" or timeframe.period == "30"                              ? "240" :
@@ -162,106 +513,239 @@ htfTf = htfMode == "Auto" ?
       "D") :
      htfManual
 
-htfBias = request.security(syminfo.tickerid, htfTf, core.htfBiasFn(htfPivotLen),
+htfBiasFn() =>
+    var array<float> hHs = array.new<float>()
+    var array<float> hLs = array.new<float>()
+    htfPh = ta.pivothigh(htfPivotLen, htfPivotLen)
+    htfPl = ta.pivotlow(htfPivotLen,  htfPivotLen)
+    if not na(htfPh)
+        array.unshift(hHs, htfPh)
+        if array.size(hHs) > 3
+            array.pop(hHs)
+    if not na(htfPl)
+        array.unshift(hLs, htfPl)
+        if array.size(hLs) > 3
+            array.pop(hLs)
+    bias = "Neutral"
+    if array.size(hHs) >= 2 and array.size(hLs) >= 2
+        hh = array.get(hHs, 0) > array.get(hHs, 1)
+        hl = array.get(hLs, 0) > array.get(hLs, 1)
+        ll = array.get(hLs, 0) < array.get(hLs, 1)
+        lh = array.get(hHs, 0) < array.get(hHs, 1)
+        bias := hh and hl ? "Bullish" : ll and lh ? "Bearish" : "Neutral"
+    bias
+
+htfBias = request.security(syminfo.tickerid, htfTf, htfBiasFn(),
      lookahead=barmerge.lookahead_off)
 
 // =====================================================================
-// ZONE-BREAK (§10) + LIVE INTRA-BAR (§12)
+// ZONE-BREAK TRIGGERS (§10 fix — wick-into-zone + close-through with rejection)
+// Pattern A: OR-branch into bullBreak / bearBreak so existing sensitivity,
+// cooldown, and HTF-filter gates all apply equally.
 // =====================================================================
+bullZoneBreakRaw = false
+bearZoneBreakRaw = false
 
-[bullZoneBreakRaw, bearZoneBreakRaw] = core.detectZoneBreak(st, atr14, enableZoneBreak, zbWickMult)
-[liveBullBreakRaw, liveBearBreakRaw] = core.detectLiveBreak(st, atr14,
-     enableLiveSignals, liveVolMult, liveDispMult, liveExtremeRatio)
+if enableZoneBreak and barstate.isconfirmed and not na(atr14)
+    // Bullish zone break — wick into demand from above, close above zone top
+    if array.size(bullOBs) > 0
+        for i = 0 to array.size(bullOBs) - 1
+            b = array.get(bullOBs, i)
+            zoneTop = box.get_top(b)
+            touched  = low <= zoneTop
+            brokeUp  = close > zoneTop
+            rejected = (close - low) >= zbWickMult * atr14
+            if touched and brokeUp and rejected
+                bullZoneBreakRaw := true
+                break
+
+    // Bearish zone break — wick into supply from below, close below zone bottom
+    if array.size(bearOBs) > 0
+        for i = 0 to array.size(bearOBs) - 1
+            b = array.get(bearOBs, i)
+            zoneBot = box.get_bottom(b)
+            touched   = high >= zoneBot
+            brokeDown = close < zoneBot
+            rejected  = (high - close) >= zbWickMult * atr14
+            if touched and brokeDown and rejected
+                bearZoneBreakRaw := true
+                break
 
 // =====================================================================
-// SIGNAL SENSITIVITY (per-family tunable — stays in family script)
+// LIVE INTRA-BAR TRIGGERS (§12 fix — fire BEFORE bar close on displacement breaks)
+// Gated on barstate.isrealtime so historical bars never trigger (no backtest contamination).
+// Multi-condition filter: structural break + volume spike + displacement + close-near-extreme.
+// Per-bar latch prevents flicker / multi-fire.
 // =====================================================================
+if barstate.isnew
+    liveBullFiredThisBar := false
+    liveBearFiredThisBar := false
 
+liveBullBreakRaw = false
+liveBearBreakRaw = false
+
+if enableLiveSignals and barstate.isrealtime and not na(atr14)
+    avgVol        = ta.sma(volume, 20)
+    volSpike      = not na(avgVol) and volume >= liveVolMult * avgVol
+    barRange      = high - low
+    displaced     = barRange >= liveDispMult * atr14
+    closeNearHigh = barRange > 0 and (close - low) / barRange > liveExtremeRatio
+    closeNearLow  = barRange > 0 and (high - close) / barRange > liveExtremeRatio
+
+    if not liveBullFiredThisBar and not na(lastUnbrokenHigh) and close > lastUnbrokenHigh and volSpike and displaced and closeNearHigh
+        liveBullBreakRaw      := true
+        liveBullFiredThisBar  := true
+
+    if not liveBearFiredThisBar and not na(lastUnbrokenLow) and close < lastUnbrokenLow and volSpike and displaced and closeNearLow
+        liveBearBreakRaw      := true
+        liveBearFiredThisBar  := true
+
+// =====================================================================
+// SIGNALS
+// Sensitivity (§13 + §14 — event-type-aware confluence):
+//   Conservative: CHoCH needs (sweep OR zone); BOS needs (sweep AND zone); zone-break + HL/LH each need confluence
+//   Balanced:     CHoCH fires alone (reversal IS confluence); BOS needs (sweep OR zone); zone-break + HL/LH fire alone
+//   Aggressive:   any structural break fires alone
+// Rationale: reversal events (CHoCH), zone-rejection events (§10), and early-structure
+// events (§14 HL/LH pivots) are inherently confluence events; only continuation breaks
+// (BOS) benefit from additional sweep/zone filtering against fakeouts.
+// =====================================================================
 RECENT_SWEEP_BARS = 10
 
 bullBreak = bullBOSraw or bullCHOraw or bullZoneBreakRaw or bullHLraw
 bearBreak = bearBOSraw or bearCHOraw or bearZoneBreakRaw or bearLHraw
 
-bullSweepRecent = not na(st.lastBullSweepBar) and (bar_index - st.lastBullSweepBar) <= RECENT_SWEEP_BARS
-bearSweepRecent = not na(st.lastBearSweepBar) and (bar_index - st.lastBearSweepBar) <= RECENT_SWEEP_BARS
+bullSweepRecent = not na(lastBullSweepBar) and (bar_index - lastBullSweepBar) <= RECENT_SWEEP_BARS
+bearSweepRecent = not na(lastBearSweepBar) and (bar_index - lastBearSweepBar) <= RECENT_SWEEP_BARS
 
-nearBullZ = core.nearBullZone(st, atr14)
-nearBearZ = core.nearBearZone(st, atr14)
+// "Near a zone" — price within 0.5 * ATR of any active OB/FVG of matching dir
+nearBullZone = false
+if not na(atr14)
+    band = 0.5 * atr14
+    if array.size(bullOBs) > 0
+        for i = 0 to array.size(bullOBs) - 1
+            b = array.get(bullOBs, i)
+            t = box.get_top(b)
+            bo = box.get_bottom(b)
+            if low <= t + band and low >= bo - band
+                nearBullZone := true
+    if not nearBullZone and array.size(bullFVGs) > 0
+        for i = 0 to array.size(bullFVGs) - 1
+            b = array.get(bullFVGs, i)
+            t = box.get_top(b)
+            bo = box.get_bottom(b)
+            if low <= t + band and low >= bo - band
+                nearBullZone := true
 
-buyTrigger  = false
+nearBearZone = false
+if not na(atr14)
+    band = 0.5 * atr14
+    if array.size(bearOBs) > 0
+        for i = 0 to array.size(bearOBs) - 1
+            b = array.get(bearOBs, i)
+            t = box.get_top(b)
+            bo = box.get_bottom(b)
+            if high >= bo - band and high <= t + band
+                nearBearZone := true
+    if not nearBearZone and array.size(bearFVGs) > 0
+        for i = 0 to array.size(bearFVGs) - 1
+            b = array.get(bearFVGs, i)
+            t = box.get_top(b)
+            bo = box.get_bottom(b)
+            if high >= bo - band and high <= t + band
+                nearBearZone := true
+
+buyTrigger = false
 sellTrigger = false
 
 if barstate.isconfirmed
     if sensitivity == "Conservative"
-        buyTrigger  := (bullCHOraw and (bullSweepRecent or nearBullZ)) or
-                       (bullBOSraw and bullSweepRecent and nearBullZ) or
+        // CHoCH and HL/LH need at least one confluence; BOS needs both; zone-break alone
+        buyTrigger  := (bullCHOraw and (bullSweepRecent or nearBullZone)) or
+                       (bullBOSraw and bullSweepRecent and nearBullZone) or
                        bullZoneBreakRaw or
-                       (bullHLraw and (bullSweepRecent or nearBullZ))
-        sellTrigger := (bearCHOraw and (bearSweepRecent or nearBearZ)) or
-                       (bearBOSraw and bearSweepRecent and nearBearZ) or
+                       (bullHLraw and (bullSweepRecent or nearBullZone))
+        sellTrigger := (bearCHOraw and (bearSweepRecent or nearBearZone)) or
+                       (bearBOSraw and bearSweepRecent and nearBearZone) or
                        bearZoneBreakRaw or
-                       (bearLHraw and (bearSweepRecent or nearBearZ))
+                       (bearLHraw and (bearSweepRecent or nearBearZone))
     else if sensitivity == "Balanced"
+        // CHoCH, HL/LH, and zone-break fire alone; BOS needs one confluence
         buyTrigger  := bullCHOraw or
-                       (bullBOSraw and (bullSweepRecent or nearBullZ)) or
+                       (bullBOSraw and (bullSweepRecent or nearBullZone)) or
                        bullZoneBreakRaw or
                        bullHLraw
         sellTrigger := bearCHOraw or
-                       (bearBOSraw and (bearSweepRecent or nearBearZ)) or
+                       (bearBOSraw and (bearSweepRecent or nearBearZone)) or
                        bearZoneBreakRaw or
                        bearLHraw
-    else
+    else  // Aggressive
         buyTrigger  := bullBreak
         sellTrigger := bearBreak
 
-    if buyTrigger and not na(st.lastBuyBar) and (bar_index - st.lastBuyBar) < signalCooldown
+    // Cooldown — same direction can't fire within signalCooldown bars
+    if buyTrigger and not na(lastBuyBar) and (bar_index - lastBuyBar) < signalCooldown
         buyTrigger := false
-    if sellTrigger and not na(st.lastSellBar) and (bar_index - st.lastSellBar) < signalCooldown
+    if sellTrigger and not na(lastSellBar) and (bar_index - lastSellBar) < signalCooldown
         sellTrigger := false
 
+    // HTF filter — when ON, only fire signals aligned with HTF bias
     if useHTFFilter
         if buyTrigger and htfBias != "Bullish"
             buyTrigger := false
         if sellTrigger and htfBias != "Bearish"
             sellTrigger := false
 
+// HTF-aligned variants (always computed for alertcondition() outputs)
 buyTriggerHTF  = buyTrigger  and htfBias == "Bullish"
 sellTriggerHTF = sellTrigger and htfBias == "Bearish"
 
-// =====================================================================
-// SIGNAL RENDERING
-// =====================================================================
-
+// Render BUY/SELL
 if buyTrigger and showSignals
     yOff = na(atr14) ? 0.0 : atr14 * 0.5
     label.new(x=bar_index, y=low - yOff, text="BUY",
          color=color.new(clrBull, 0), textcolor=color.white,
          style=label.style_label_up, size=size.normal)
-    st.lastBuyBar := bar_index
+    lastBuyBar      := bar_index
+    lastSignalText  := "BUY"
+    lastSignalColor := clrBull
 
 if sellTrigger and showSignals
     yOff = na(atr14) ? 0.0 : atr14 * 0.5
     label.new(x=bar_index, y=high + yOff, text="SELL",
          color=color.new(clrBear, 0), textcolor=color.white,
          style=label.style_label_down, size=size.normal)
-    st.lastSellBar := bar_index
+    lastSellBar     := bar_index
+    lastSignalText  := "SELL"
+    lastSignalColor := clrBear
 
+// Plot triangle markers as a backup visual (always-on if signals enabled)
 plotshape(buyTrigger  and showSignals, title="BUY arrow",  style=shape.triangleup,
      location=location.belowbar, color=clrBull, size=size.tiny)
 plotshape(sellTrigger and showSignals, title="SELL arrow", style=shape.triangledown,
      location=location.abovebar, color=clrBear, size=size.tiny)
 
+// §12 — LIVE intra-bar markers (hollow circles with "L" — distinct from confirmed BUY/SELL)
 plotshape(liveBullBreakRaw and showSignals, title="LIVE BUY",  style=shape.circle,
      location=location.belowbar, color=clrBull, size=size.tiny, text="L", textcolor=color.white)
 plotshape(liveBearBreakRaw and showSignals, title="LIVE SELL", style=shape.circle,
      location=location.abovebar, color=clrBear, size=size.tiny, text="L", textcolor=color.white)
 
 // =====================================================================
-// SESSION ZONES
+// SESSION ZONES (futures-specific, America/New_York time)
 // =====================================================================
+TZ = "America/New_York"
+asiaSessStr    = "1800-2200:12345"   // Sun-Thu evenings
+londonSessStr  = "0300-0500:23456"   // Mon-Fri
+nyPreSessStr   = "0700-0930:23456"
+nyOpenSessStr  = "0930-1030:23456"
+nyCloseSessStr = "1600-1615:23456"
 
-[inAsia, inLondon, inNYpre, inNYopen, inNYclose] =
-     core.detectSessions(sAsia, sLondon, sNYpre, sNYopen, sNYclose)
+inAsia    = sAsia    and not na(time(timeframe.period, asiaSessStr,    TZ))
+inLondon  = sLondon  and not na(time(timeframe.period, londonSessStr,  TZ))
+inNYpre   = sNYpre   and not na(time(timeframe.period, nyPreSessStr,   TZ))
+inNYopen  = sNYopen  and not na(time(timeframe.period, nyOpenSessStr,  TZ))
+inNYclose = sNYclose and not na(time(timeframe.period, nyCloseSessStr, TZ))
 
 bgcolor(showSessions and inAsia    ? clrAsia    : na, title="Asia session")
 bgcolor(showSessions and inLondon  ? clrLondon  : na, title="London session")
@@ -269,17 +753,46 @@ bgcolor(showSessions and inNYpre   ? clrNYpre   : na, title="NY pre session")
 bgcolor(showSessions and inNYopen  ? clrNYopen  : na, title="NY open session")
 bgcolor(showSessions and inNYclose ? clrNYclose : na, title="NY close session")
 
+// Session entry labels — fire on first bar inside each session
+sessionEnter(curIn, prevIn, name, col) =>
+    if curIn and not prevIn
+        ph2 = ta.highest(20)
+        lbl = label.new(x=bar_index, y=ph2, text=name,
+             color=color.new(#000000, 100), textcolor=col,
+             style=label.style_label_down, size=size.tiny,
+             yloc=yloc.abovebar)
+        array.push(sessLabels, lbl)
+        pruneLabels(sessLabels, 25)   // 5 labels x 5 sessions = 25
+
 if showSessions
-    core.drawSessionEntry(st, inAsia,    inAsia[1],    "Asia",     clrMuted)
-    core.drawSessionEntry(st, inLondon,  inLondon[1],  "London",   clrMuted)
-    core.drawSessionEntry(st, inNYpre,   inNYpre[1],   "NY pre",   clrMuted)
-    core.drawSessionEntry(st, inNYopen,  inNYopen[1],  "NY open",  clrBull)
-    core.drawSessionEntry(st, inNYclose, inNYclose[1], "NY close", clrBear)
+    sessionEnter(inAsia,    inAsia[1],    "Asia",     clrMuted)
+    sessionEnter(inLondon,  inLondon[1],  "London",   clrMuted)
+    sessionEnter(inNYpre,   inNYpre[1],   "NY pre",   clrMuted)
+    sessionEnter(inNYopen,  inNYopen[1],  "NY open",  clrBull)
+    sessionEnter(inNYclose, inNYclose[1], "NY close", clrBear)
+
+// Current session name (for dashboard)
+curSessName =
+     inAsia    ? "Asia"    :
+     inLondon  ? "London"  :
+     inNYpre   ? "NY pre"  :
+     inNYopen  ? "NY open" :
+     inNYclose ? "NY close" :
+     "—"
 
 // =====================================================================
-// CDP COUNTERS
+// DASHBOARD — removed 2026-05-11 per operator request (visual clutter,
+// alertcondition outputs and chart structure labels provide the same info)
 // =====================================================================
 
+// =====================================================================
+// CDP POLLER COUNTERS — 2026-05-11 (v2 cumulative)
+// Monotonically-increasing fire counters. Plot value is the running
+// total of fires since session start. CDP poller reads each counter
+// every 2s — when count increases by N, N new fires happened since
+// last poll. Robust to label-id rotation, bar_index normalization,
+// and flag-plot 0→1→0 race conditions.
+// =====================================================================
 var int buyFireCount        = 0
 var int sellFireCount       = 0
 var int bullZoneBreakCount  = 0
@@ -316,38 +829,73 @@ plot(liveBuyCount,        title="LiveBuyCount",       color=color.new(color.gree
 plot(liveSellCount,       title="LiveSellCount",      color=color.new(color.red,    100), display=display.data_window)
 
 // =====================================================================
-// ALERT() FUNCTION CALLS
+// alert() FUNCTION CALLS — 2026-05-11 (final autonomous-execution arch)
+// Embed structured JSON in alert() calls. Configure ONE TradingView alert
+// with condition = "Any alert() function call" + webhook URL pointing at
+// the HANK webhook server. Pine controls the payload — no per-alert config
+// mistakes possible. Replaces the alertcondition + per-alert webhook flow
+// that was unreliable due to TradingView's URL-field state management.
+//
+// Each fire produces a complete JSON payload with instrument, direction,
+// engine, confidence, price, and alertName fields. Webhook server
+// validates allow-list (SPY/QQQ/IWM/ES/NQ/ES1!/NQ1!) and dispatches.
 // =====================================================================
 
+// Build JSON payload string. instStr resolves from the per-chart override
+// (set in the indicator's "Webhook Payload" settings group). Default
+// "AUTO" falls back to syminfo.ticker. Override exists because TradingView
+// has been observed to emit the wrong syminfo.ticker value into webhook
+// payloads — SPY chart emitting "ES1!" was observed 2026-05-12 ~11:40 ET.
+// Setting the override explicitly per chart prevents the mislabel and
+// gives operators full control over what reaches webhook-server.js.
+payloadJSON(direction, engine, confidence) =>
+    instStr = instrumentOverride == "AUTO" ? syminfo.ticker : instrumentOverride
+    '{"instrument":"' + instStr + '","direction":"' + direction +
+      '","engine":"' + engine + '","confidence":"' + confidence +
+      '","price":' + str.tostring(close, "#.##") +
+      ',"alertName":"' + engine + ' ' + direction + '"}'
+
+// Confirmed-bar signals (barstate.isconfirmed gated upstream) — once per bar close
 if buyTrigger
-    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'BUY',  'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('CALLS', 'BUY',  'MEDIUM'), alert.freq_once_per_bar_close)
 if sellTrigger
-    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'SELL', 'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('PUTS',  'SELL', 'MEDIUM'), alert.freq_once_per_bar_close)
+
+// HTF-aligned variants — higher confidence
 if buyTriggerHTF
-    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'HTF',  'HIGH'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('CALLS', 'HTF',  'HIGH'), alert.freq_once_per_bar_close)
 if sellTriggerHTF
-    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'HTF',  'HIGH'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('PUTS',  'HTF',  'HIGH'), alert.freq_once_per_bar_close)
+
+// Chart-engine sub-fires that may not have reached buyTrigger/sellTrigger
+// under Conservative sensitivity — useful when operator wants raw chart
+// signals regardless of sensitivity-tier filtering.
 if bullZoneBreakRaw
-    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('CALLS', 'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
 if bearZoneBreakRaw
-    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('PUTS',  'ZONE', 'MEDIUM'), alert.freq_once_per_bar_close)
 if bullHLraw
-    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'HL',   'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('CALLS', 'HL',   'MEDIUM'), alert.freq_once_per_bar_close)
 if bearLHraw
-    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'LH',   'MEDIUM'), alert.freq_once_per_bar_close)
+    alert(payloadJSON('PUTS',  'LH',   'MEDIUM'), alert.freq_once_per_bar_close)
+
+// LIVE intra-bar — fires DURING bar formation, before barstate.isconfirmed.
+// Use freq_once_per_bar so the alert can fire on the same bar as the LIVE
+// detection (which is intra-bar by design).
 if liveBullBreakRaw
-    alert(core.payloadJSON(instrumentOverride, 'CALLS', 'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
+    alert(payloadJSON('CALLS', 'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
 if liveBearBreakRaw
-    alert(core.payloadJSON(instrumentOverride, 'PUTS',  'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
+    alert(payloadJSON('PUTS',  'LIVE', 'MEDIUM'), alert.freq_once_per_bar)
 
 // =====================================================================
-// ALERTCONDITIONS
+// ALERT CONDITIONS — kept for backward-compat with operators using the
+// per-alertcondition setup; new operators should use alert() + "Any alert()
+// function call" instead.
 // =====================================================================
-
-alertcondition(bullBOSraw,       "Bullish BOS",            "SMC: Bullish BOS")
-alertcondition(bearBOSraw,       "Bearish BOS",            "SMC: Bearish BOS")
-alertcondition(bullCHOraw,       "Bullish CHoCH",          "SMC: Bullish CHoCH (trend reversal up)")
-alertcondition(bearCHOraw,       "Bearish CHoCH",          "SMC: Bearish CHoCH (trend reversal down)")
+alertcondition(bullBOSraw,     "Bullish BOS",            "SMC: Bullish BOS")
+alertcondition(bearBOSraw,     "Bearish BOS",            "SMC: Bearish BOS")
+alertcondition(bullCHOraw,     "Bullish CHoCH",          "SMC: Bullish CHoCH (trend reversal up)")
+alertcondition(bearCHOraw,     "Bearish CHoCH",          "SMC: Bearish CHoCH (trend reversal down)")
 alertcondition(bullSweepRaw,     "Bullish Liquidity Sweep","SMC: Bullish liquidity sweep")
 alertcondition(bearSweepRaw,     "Bearish Liquidity Sweep","SMC: Bearish liquidity sweep")
 alertcondition(bullZoneBreakRaw, "Bullish Zone Break",     "SMC: Bullish zone-break rejection")
@@ -356,7 +904,7 @@ alertcondition(liveBullBreakRaw, "LIVE Bullish Break",     "SMC: LIVE bullish br
 alertcondition(liveBearBreakRaw, "LIVE Bearish Break",     "SMC: LIVE bearish break (intra-bar)")
 alertcondition(bullHLraw,        "Bullish HL early-entry", "SMC: Bullish HL pivot — early continuation/reversal entry")
 alertcondition(bearLHraw,        "Bearish LH early-entry", "SMC: Bearish LH pivot — early continuation/reversal entry")
-alertcondition(buyTrigger,       "BUY signal",             "SMC: BUY signal")
-alertcondition(sellTrigger,      "SELL signal",            "SMC: SELL signal")
-alertcondition(buyTriggerHTF,    "HTF-aligned BUY",        "SMC: HTF-aligned BUY")
-alertcondition(sellTriggerHTF,   "HTF-aligned SELL",       "SMC: HTF-aligned SELL")
+alertcondition(buyTrigger,     "BUY signal",             "SMC: BUY signal")
+alertcondition(sellTrigger,    "SELL signal",            "SMC: SELL signal")
+alertcondition(buyTriggerHTF,  "HTF-aligned BUY",        "SMC: HTF-aligned BUY")
+alertcondition(sellTriggerHTF, "HTF-aligned SELL",       "SMC: HTF-aligned SELL")
