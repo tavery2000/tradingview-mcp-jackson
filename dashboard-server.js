@@ -195,6 +195,13 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, readJson('daily-loss-warning-state.json') ?? { fired: false });
   }
 
+  // 2026-05-14 RULE 2: daily-target state. closePosition writes this file
+  // when realized dailyPnL crosses +DAILY_TARGET. Dashboard polls for the
+  // green TARGET_REACHED banner. File absent / fired=false → not hit today.
+  if (req.method === 'GET' && url === '/api/daily-target') {
+    return sendJson(res, readJson('daily-target-state.json') ?? { fired: false });
+  }
+
   if (req.method === 'GET' && url === '/api/options-flow') {
     return sendJson(res, readJson('options-flow.json') ?? {});
   }

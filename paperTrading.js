@@ -57,6 +57,10 @@ const MAX_DAILY_LOSS_WARNING = parseFloat(process.env.MAX_DAILY_LOSS_WARNING || 
 // respawn → flag resets → warning can fire again if realized still below
 // threshold; that's by design (the operator gets a fresh alert on respawn).
 let _dailyLossWarningFiredFor = null;
+// RULE 2 — daily realized P&L target. On hit, fire TARGET_REACHED once
+// per ET-date per process. Trading CONTINUES (operator default).
+const DAILY_TARGET = parseFloat(process.env.DAILY_TARGET || '0');
+let _dailyTargetFiredFor = null;
 // 2026-05-14: reserve-aware veto kill-switch. Default false during testing —
 // hard cap ($5K) and warning ($2.5K) remain active; only the worst-case
 // reserve pre-block is suppressed. Set true in .env to restore.
@@ -116,6 +120,7 @@ function getContractMultiplier(instrument) {
   console.log(`  [paperTrading] Reserve-aware veto: ${RESERVE_VETO_ENABLED ? 'ENABLED' : 'disabled (testing — hard cap is sole entry block)'}`);
   console.log(`  [paperTrading] All concurrency/correlation/opposition gates: REMOVED (RULE 1)`);
   console.log(`  [paperTrading] Per-trade stop-loss: ${STOP_LOSS_PCT > 0 ? `ENABLED at -${STOP_LOSS_PCT}% of fill` : 'disabled (STOP_LOSS_PCT=0)'}`);
+  console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
 }
 
 // Surface counter-trend gate config at module load (2026-05-13).
@@ -747,6 +752,49 @@ export function closePosition(requestId, exitPrice, exitReason = 'MANUAL') {
     ledger.losses   = fresh.losses;
     if (!ledger.dailyPnL) ledger.dailyPnL = {};
     ledger.dailyPnL[today] = fresh.dailyPnL[today];
+
+    // RULE 2 — DAILY_TARGET tracker. Fires once per ET-date per process when
+    // realized dailyPnL crosses +$DAILY_TARGET. Trading CONTINUES (operator
+    // default — stops protect each trade individually). Mirrors the
+    // MAX_DAILY_LOSS_WARNING pattern from dcf3a5a: jAlert + wsServer
+    // broadcast + TTS + state-file + console banner.
+    if (DAILY_TARGET > 0 && _dailyTargetFiredFor !== today
+        && fresh.dailyPnL[today] >= DAILY_TARGET) {
+      _dailyTargetFiredFor = today;
+      const gainAmt = fresh.dailyPnL[today].toFixed(0);
+      try {
+        jAlert('info', 'TARGET_REACHED', {
+          dailyPnL: fresh.dailyPnL[today], target: DAILY_TARGET,
+          instrument: trade.instrument, engine: trade.engine,
+          date: today, etTime: getETString(),
+        });
+      } catch {}
+      if (typeof global.wsBroadcast === 'function') {
+        try {
+          global.wsBroadcast({
+            type: 'info',
+            payload: {
+              kind: 'TARGET_REACHED',
+              dailyPnL: fresh.dailyPnL[today], target: DAILY_TARGET,
+              time: getETString(),
+            },
+          });
+        } catch {}
+      }
+      try {
+        pushVoiceAlert('daily-target-reached', 'critical',
+          `Daily target reached. Up ${gainAmt} dollars. Continuing to trade. Stops protect each trade.`,
+          300_000);
+      } catch {}
+      try {
+        writeFileSync(join(__dirname, 'daily-target-state.json'), JSON.stringify({
+          fired: true, firedAt: Date.now(), firedAtET: getETString(), date: today,
+          dailyPnL: parseFloat(fresh.dailyPnL[today].toFixed(2)),
+          target: DAILY_TARGET,
+        }));
+      } catch {}
+      console.log(`  ${C.green}🎯 DAILY TARGET REACHED — +$${gainAmt} / target $${DAILY_TARGET} — trading continues${C.reset}`);
+    }
 
     const pnlColor = win ? C.green : C.red;
     console.log(`\n  ${pnlColor}${win ? '✅' : '❌'} PAPER CLOSE — ${exitReason}${C.reset}`);
