@@ -108,6 +108,32 @@ function _getStopDistance(instrument) {
   if (STOP_DOLLARS[k] != null) return STOP_DOLLARS[k];
   return null;
 }
+// P1-5 (2026-05-14 EOD): 1:2 R:R take-profit distances. Per-instrument
+// targets default to 2× the stop distance per the operator spec. Used
+// to compute targetUnderlyingPrice at fill time. STAGE_2 fires when the
+// target is breached → 50% scale-out, BE stop, trail-active on remainder.
+const TARGET_POINTS = {
+  'ES1!':  parseFloat(process.env.TARGET_ES_POINTS  || '6.0'),
+  'NQ1!':  parseFloat(process.env.TARGET_NQ_POINTS  || '20.0'),
+  'MES1!': parseFloat(process.env.TARGET_MES_POINTS || '6.0'),
+  'MNQ1!': parseFloat(process.env.TARGET_MNQ_POINTS || '20.0'),
+  'ES':    parseFloat(process.env.TARGET_ES_POINTS  || '6.0'),
+  'NQ':    parseFloat(process.env.TARGET_NQ_POINTS  || '20.0'),
+  'MES':   parseFloat(process.env.TARGET_MES_POINTS || '6.0'),
+  'MNQ':   parseFloat(process.env.TARGET_MNQ_POINTS || '20.0'),
+};
+const TARGET_DOLLARS = {
+  'SPY': parseFloat(process.env.TARGET_SPY_DOLLARS || '0.60'),
+  'QQQ': parseFloat(process.env.TARGET_QQQ_DOLLARS || '0.70'),
+  'IWM': parseFloat(process.env.TARGET_IWM_DOLLARS || '0.50'),
+};
+function _getTargetDistance(instrument) {
+  const k = (instrument || '').toUpperCase();
+  if (TARGET_POINTS[k]  != null) return TARGET_POINTS[k];
+  if (TARGET_DOLLARS[k] != null) return TARGET_DOLLARS[k];
+  return null;
+}
+const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak underlying
 const MAX_CONTRACTS         = parseInt(process.env.MAX_CONTRACTS   || '10');
 const LEDGER_FILE    = join(__dirname, 'paper-ledger.json');
 const LOCK_FILE      = join(__dirname, '.paper-ledger.lock');
@@ -152,6 +178,10 @@ function getContractMultiplier(instrument) {
   console.log(`  [paperTrading] Per-trade stop-loss: POINT-BASED (P0-3) ` +
     `ES/MES=${STOP_POINTS['ES1!']}pt NQ/MNQ=${STOP_POINTS['NQ1!']}pt ` +
     `SPY=$${STOP_DOLLARS['SPY']} QQQ=$${STOP_DOLLARS['QQQ']} IWM=$${STOP_DOLLARS['IWM']}`);
+  console.log(`  [paperTrading] Take-profit (P1-5): ` +
+    `ES/MES=${TARGET_POINTS['ES1!']}pt NQ/MNQ=${TARGET_POINTS['NQ1!']}pt ` +
+    `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']} ` +
+    `(50/50 scale-out + BE + ${TRAIL_PCT}% trail + R-locks at +3R/+4R)`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
 }
 
@@ -705,6 +735,13 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       ? parseFloat((_isCalls ? _entryU - _stopDistance : _entryU + _stopDistance).toFixed(4))
       : null;
     const _stopActive   = _stopUnderlying != null;
+    // P1-5 (2026-05-14 EOD): 1:2 R:R take-profit + scale-out staging.
+    // STAGE_1_ARMED on entry. evaluateOpenPositions transitions to
+    // STAGE_3_TRAILING when target hits (50% close, BE stop, trail active).
+    const _targetDistance = _getTargetDistance(consensus.instrument);
+    const _targetUnderlying = (_targetDistance != null && _entryU != null)
+      ? parseFloat((_isCalls ? _entryU + _targetDistance : _entryU - _targetDistance).toFixed(4))
+      : null;
 
     const trade = {
       ...order,
@@ -728,6 +765,16 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       stopDistance:        _stopDistance,
       stopActive:          _stopActive,
       entryUnderlyingPrice: _entryU,
+      // P1-5 take-profit + scale-out + trailing state
+      stage:               'STAGE_1_ARMED',
+      targetUnderlyingPrice: _targetUnderlying,
+      targetDistance:      _targetDistance,
+      peakFavorablePrice:  _entryU,           // initialized at entry; updates in STAGE_3
+      trailStopPrice:      null,              // set on STAGE_3 entry
+      lockedStopLevel:     'NONE',            // 'NONE' | '1R' | '2R'
+      cumulativePartialPnL: 0,                // sum of any SCALE_OUT_PARTIAL exits
+      scaleOutEvents:      [],                // each: { contracts, exitPrice, exitTime, pnl, et }
+      originalContracts:   contracts,         // immutable record of original size
       // Alias for callers (webhook-server.js SIGNAL_REVERSAL exit math) that
       // look up `underlyingPrice` rather than `entryUnderlying`. Same value,
       // two names — schema redundancy intentional to prevent future field-name
@@ -774,6 +821,196 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   return order;
 }
 
+// ─── P1-5 (2026-05-14 EOD): scale-out + stage transitions ──────────────────
+// _executeScaleOut: STAGE_1 → STAGE_3 transition. Closes 50% of contracts
+// at current option price (logged as SCALE_OUT_PARTIAL exit), moves stop
+// on remainder to breakeven (entryUnderlyingPrice), activates trail, and
+// transitions stage to STAGE_3_TRAILING. The trade record stays OPEN with
+// reduced contracts.
+function _executeScaleOut(requestId, exitOptionPrice, liveU) {
+  const locked = acquireLock();
+  try {
+    const fresh = loadLedger();
+    const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
+    if (!trade) return null;
+    if (trade.stage !== 'STAGE_1_ARMED') return null;   // already transitioned
+    if (!trade.contracts || trade.contracts < 1) return null;
+
+    // Half-close: ceil so a 1-contract trade still gets a partial of 1 (rest 0 — flat-out)
+    // For multi-contract trades, scale 50% with floor.
+    const halfContracts = Math.max(1, Math.floor(trade.contracts / 2));
+    const remainingContracts = trade.contracts - halfContracts;
+
+    // P&L on the partial close (long-options: profit when premium up)
+    const partialPnlPerShare = exitOptionPrice - trade.fillPrice;
+    const partialPnl = partialPnlPerShare * 100 * halfContracts;
+
+    // Mutate trade record
+    trade.contracts          = remainingContracts;
+    trade.cumulativePartialPnL = (trade.cumulativePartialPnL || 0) + partialPnl;
+    trade.scaleOutEvents     = trade.scaleOutEvents || [];
+    trade.scaleOutEvents.push({
+      contracts: halfContracts,
+      exitPrice: exitOptionPrice,
+      exitTime:  Date.now(),
+      et:        getETString(),
+      pnl:       parseFloat(partialPnl.toFixed(2)),
+      reason:    'SCALE_OUT_PARTIAL',
+      underlyingAtExit: liveU,
+    });
+
+    // STAGE 3 setup: stop moves to BREAKEVEN, trail activates, peak initialized
+    trade.stage              = 'STAGE_3_TRAILING';
+    trade.stopUnderlyingPrice = trade.entryUnderlyingPrice;   // BE stop
+    trade.peakFavorablePrice = liveU;
+    const trailDist          = liveU * (TRAIL_PCT / 100);
+    trade.trailStopPrice     = trade.signal === 'CALLS'
+      ? parseFloat((liveU - trailDist).toFixed(4))
+      : parseFloat((liveU + trailDist).toFixed(4));
+    trade.lockedStopLevel    = 'NONE';
+
+    // Update fresh totals (partial pnl counts toward today's realized)
+    fresh.totalPnL += partialPnl;
+    fresh.balance  += partialPnl;
+    const today = etDate();
+    fresh.dailyPnL[today] = (fresh.dailyPnL[today] || 0) + partialPnl;
+
+    saveLedgerDirect(fresh);
+
+    // Sync in-memory copy
+    const local = ledger.trades.find(t => t.requestId === requestId);
+    if (local) Object.assign(local, {
+      contracts:                trade.contracts,
+      cumulativePartialPnL:     trade.cumulativePartialPnL,
+      scaleOutEvents:           trade.scaleOutEvents,
+      stage:                    trade.stage,
+      stopUnderlyingPrice:      trade.stopUnderlyingPrice,
+      peakFavorablePrice:       trade.peakFavorablePrice,
+      trailStopPrice:           trade.trailStopPrice,
+      lockedStopLevel:          trade.lockedStopLevel,
+    });
+    ledger.totalPnL = fresh.totalPnL;
+    ledger.balance  = fresh.balance;
+    if (!ledger.dailyPnL) ledger.dailyPnL = {};
+    ledger.dailyPnL[today] = fresh.dailyPnL[today];
+
+    console.log(`  ${C.green}🟢 SCALE_OUT_PARTIAL ${trade.instrument} ${trade.signal} — closed ${halfContracts}/${trade.originalContracts} @ $${exitOptionPrice.toFixed(2)} +$${partialPnl.toFixed(0)}; remaining ${remainingContracts} now BE-stop + trail${C.reset}`);
+    try {
+      jExit({
+        ...trade,
+        exitPrice: exitOptionPrice,
+        exitTime:  Date.now(),
+        exitTimeET: getETString(),
+        exitReason: 'SCALE_OUT_PARTIAL',
+        pnl: parseFloat(partialPnl.toFixed(2)),
+        contracts: halfContracts,   // partial-leg view
+      });
+    } catch {}
+    pushVoiceAlert(`scale-out-${requestId}`, 'info',
+      `Scale out fifty percent on ${trade.instrument} ${trade.signal}. Stop moved to break-even. Trailing remainder.`,
+      120_000);
+
+    return trade;
+  } finally {
+    if (locked) releaseLock();
+  }
+}
+
+// _updateStage3: update peak favorable price + trail stop + R-multiple
+// locks. Called every evaluation tick while trade is in STAGE_3_TRAILING.
+// Mutates the in-memory trade record's stop fields; the next tick's
+// stop-check (above) consumes the updated values.
+function _updateStage3(requestId, liveU) {
+  const locked = acquireLock();
+  try {
+    const fresh = loadLedger();
+    const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
+    if (!trade || trade.stage !== 'STAGE_3_TRAILING') return null;
+    if (!trade.entryUnderlyingPrice || !trade.stopDistance) return null;
+
+    const isCalls = trade.signal === 'CALLS';
+    let dirty = false;
+
+    // Update peak favorable price (best underlying observed since entry)
+    const isFavorable = isCalls
+      ? (liveU > (trade.peakFavorablePrice ?? trade.entryUnderlyingPrice))
+      : (liveU < (trade.peakFavorablePrice ?? trade.entryUnderlyingPrice));
+    if (isFavorable) {
+      trade.peakFavorablePrice = liveU;
+      dirty = true;
+    }
+
+    // Trail stop = peak ± TRAIL_PCT% of peak
+    const trailDist = (trade.peakFavorablePrice ?? liveU) * (TRAIL_PCT / 100);
+    const newTrailStop = isCalls
+      ? parseFloat((trade.peakFavorablePrice - trailDist).toFixed(4))
+      : parseFloat((trade.peakFavorablePrice + trailDist).toFixed(4));
+    // Only ratchet trail in the favorable direction (never loosen)
+    if (trade.trailStopPrice == null
+        || (isCalls  && newTrailStop > trade.trailStopPrice)
+        || (!isCalls && newTrailStop < trade.trailStopPrice)) {
+      trade.trailStopPrice = newTrailStop;
+      dirty = true;
+    }
+
+    // R-multiple math: R = stop_distance. Lock 1R at +3R, lock 2R at +4R.
+    const R = trade.stopDistance;
+    const moveFromEntry = isCalls
+      ? (trade.peakFavorablePrice - trade.entryUnderlyingPrice)
+      : (trade.entryUnderlyingPrice - trade.peakFavorablePrice);
+    const RMultiple = moveFromEntry / R;
+
+    if (RMultiple >= 4 && trade.lockedStopLevel !== '2R') {
+      // Lock at +2R from entry
+      const lockPrice = isCalls
+        ? parseFloat((trade.entryUnderlyingPrice + 2 * R).toFixed(4))
+        : parseFloat((trade.entryUnderlyingPrice - 2 * R).toFixed(4));
+      // Use the higher of trail and lock for CALLS, lower for PUTS — locked stop floors the protection
+      trade.stopUnderlyingPrice = isCalls
+        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
+        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
+      trade.lockedStopLevel = '2R';
+      dirty = true;
+      console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal} +4R reached — stop locked at +2R (${trade.stopUnderlyingPrice.toFixed(2)})${C.reset}`);
+    } else if (RMultiple >= 3 && trade.lockedStopLevel === 'NONE') {
+      // Lock at +1R from entry
+      const lockPrice = isCalls
+        ? parseFloat((trade.entryUnderlyingPrice + 1 * R).toFixed(4))
+        : parseFloat((trade.entryUnderlyingPrice - 1 * R).toFixed(4));
+      trade.stopUnderlyingPrice = isCalls
+        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
+        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
+      trade.lockedStopLevel = '1R';
+      dirty = true;
+      console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal} +3R reached — stop locked at +1R (${trade.stopUnderlyingPrice.toFixed(2)})${C.reset}`);
+    } else if (trade.lockedStopLevel === 'NONE') {
+      // No R-lock yet — stopUnderlyingPrice tracks the trail (already at BE
+      // from STAGE_2 transition). Use the more favorable of BE and trail.
+      const trailWinsOverBE = isCalls
+        ? (trade.trailStopPrice > trade.entryUnderlyingPrice)
+        : (trade.trailStopPrice < trade.entryUnderlyingPrice);
+      if (trailWinsOverBE && trade.trailStopPrice != null) {
+        trade.stopUnderlyingPrice = trade.trailStopPrice;
+        dirty = true;
+      }
+    }
+
+    if (dirty) {
+      saveLedgerDirect(fresh);
+      const local = ledger.trades.find(t => t.requestId === requestId);
+      if (local) Object.assign(local, {
+        peakFavorablePrice:  trade.peakFavorablePrice,
+        trailStopPrice:      trade.trailStopPrice,
+        stopUnderlyingPrice: trade.stopUnderlyingPrice,
+        lockedStopLevel:     trade.lockedStopLevel,
+      });
+    }
+    return trade;
+  } finally {
+    if (locked) releaseLock();
+  }
+}
+
 // ─── Close Position ───────────────────────────────────────
 
 export function closePosition(requestId, exitPrice, exitReason = 'MANUAL') {
@@ -790,17 +1027,21 @@ export function closePosition(requestId, exitPrice, exitReason = 'MANUAL') {
 
     // Long options (call or put): profit when premium increases — multiplier is always +1
     const pnlPerShare = exitPrice - trade.fillPrice;
-    const pnlTotal    = pnlPerShare * 100 * trade.contracts;
+    const pnlTotal    = pnlPerShare * 100 * trade.contracts;   // remaining-leg pnl
     const pnlPct      = (pnlPerShare / trade.fillPrice) * 100;
     const holdMins    = (Date.now() - trade.fillTime) / 60000;
-    const win         = pnlTotal > 0;
+    // P1-5: include partial-leg P&L from any prior SCALE_OUT_PARTIAL events
+    const partialPnL  = trade.cumulativePartialPnL || 0;
+    const finalPnL    = pnlTotal + partialPnL;   // total realized for this trade
+    const win         = finalPnL > 0;
 
     trade.exitPrice  = exitPrice;
     trade.exitTime   = Date.now();
     trade.exitTimeET = getETString();
     trade.exitReason = exitReason;
-    trade.pnl        = parseFloat(pnlTotal.toFixed(2));
-    trade.pnlPct     = parseFloat(pnlPct.toFixed(2));
+    trade.pnl        = parseFloat(finalPnL.toFixed(2));    // includes partials
+    trade.pnlRemainingLeg = parseFloat(pnlTotal.toFixed(2));
+    trade.pnlPct     = parseFloat(pnlPct.toFixed(2));      // remaining-leg only (partial had its own pct)
     trade.holdMins   = parseFloat(holdMins.toFixed(1));
     trade.status     = 'CLOSED';
     trade.win        = win;
@@ -1100,22 +1341,55 @@ export function evaluateOpenPositions(priceFeeder) {
         _mfeMaeTracker.set(t.requestId, ex);
       } catch {}
 
-      // P0-3 (2026-05-14 EOD): underlying-price stop check. Replaces
-      // premium-% stop. CALLS: fed.underlyingPrice <= stopUnderlyingPrice.
-      // PUTS: fed.underlyingPrice >= stopUnderlyingPrice. Fired BEFORE
-      // IV-crush + hard-exit so a stop hit during IV crush still records
-      // as STOP_LOSS (the relevant exit reason for risk-control accounting).
-      if (t.stopActive && t.stopUnderlyingPrice != null && fed.underlyingPrice != null) {
-        const isCalls = t.signal === 'CALLS';
+      // P0-3 + P1-5 + P1-6 (2026-05-14 EOD): mechanical exit hierarchy.
+      // Exit priority on a single tick (first match wins):
+      //   1. STOP_LOSS (initial stop or BREAKEVEN_STOP or PROFIT_LOCKED_STOP)
+      //   2. TARGET (1:2 hit → triggers STAGE_2 scale-out → STAGE_3)
+      //   3. TRAIL_STOP (STAGE_3 trail breach)
+      //   4. SIGNAL_REVERSAL (handled separately by webhook on opposite alert)
+      //   5. IV_CRUSH_EXIT / HARD_EXIT (legacy, lower priority than mechanical)
+      const isCalls = t.signal === 'CALLS';
+      const liveU   = fed.underlyingPrice;
+
+      // 1. STOP check — respects current effective stop (may be BE or
+      //    profit-locked level after STAGE_3 transitions).
+      if (t.stopActive && t.stopUnderlyingPrice != null && liveU != null) {
         const breached = isCalls
-          ? (fed.underlyingPrice <= t.stopUnderlyingPrice)
-          : (fed.underlyingPrice >= t.stopUnderlyingPrice);
+          ? (liveU <= t.stopUnderlyingPrice)
+          : (liveU >= t.stopUnderlyingPrice);
         if (breached) {
-          exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'STOP_LOSS' });
+          // Map exit reason based on which stop level fired
+          let exitReason = 'STOP_LOSS';
+          if (t.lockedStopLevel === '1R' || t.lockedStopLevel === '2R') exitReason = 'PROFIT_LOCKED_STOP';
+          else if (t.stage === 'STAGE_3_TRAILING' && t.entryUnderlyingPrice != null
+                   && Math.abs(t.stopUnderlyingPrice - t.entryUnderlyingPrice) < 0.01) {
+            exitReason = 'BREAKEVEN_STOP';
+          }
+          exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: exitReason });
           pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
-            `Stop loss on ${t.instrument} ${t.signal}. Underlying breached ${t.stopUnderlyingPrice.toFixed(2)}. Closing.`);
-          continue;  // skip IV/hard exits on this tick — the stop owns the close
+            `${exitReason} on ${t.instrument} ${t.signal}. Underlying ${liveU.toFixed(2)} breached ${t.stopUnderlyingPrice.toFixed(2)}.`);
+          continue;
         }
+      }
+
+      // 2. STAGE_1 → STAGE_2 transition: target hit triggers scale-out
+      if (t.stage === 'STAGE_1_ARMED' && t.targetUnderlyingPrice != null && liveU != null) {
+        const targetHit = isCalls
+          ? (liveU >= t.targetUnderlyingPrice)
+          : (liveU <= t.targetUnderlyingPrice);
+        if (targetHit) {
+          try { _executeScaleOut(t.requestId, fed.optionPrice, liveU); } catch (e) { jError('scale-out', e.message, { requestId: t.requestId }); }
+          continue;  // STAGE_2 is transient; trade is now in STAGE_3 with reduced contracts
+        }
+      }
+
+      // 3. STAGE_3 logic: update peak, trail, R-multiple locks
+      if (t.stage === 'STAGE_3_TRAILING' && liveU != null && t.entryUnderlyingPrice != null && t.stopDistance != null) {
+        try { _updateStage3(t.requestId, liveU); } catch (e) { jError('stage3-update', e.message, { requestId: t.requestId }); }
+        // Re-check trail breach immediately after update — if peak just moved
+        // OR new trail computed lower than current price, may need to exit.
+        // The next tick's stop-check above will catch it; for instant-tick
+        // trailing-stop precision, future enhancement: re-read fresh from ledger.
       }
 
       // IV-crush exit: vega drag eating gains and we're up >200%
