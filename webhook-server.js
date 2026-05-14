@@ -37,7 +37,7 @@
 
 import 'dotenv/config';   // 2026-05-14: load .env BEFORE paperTrading.js's module-load env reads
 import http from 'http';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { orderGate, sendOrder, closePosition } from './paperTrading.js';
@@ -158,6 +158,25 @@ async function handlePineAlert(req, res) {
   try {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
   } catch {}
+
+  // P0-1 (2026-05-14 EOD): write latest underlying price per instrument so
+  // monitor.js's evaluateOpenPositions feeder can resolve futures (ES1!/NQ1!/
+  // MES1!/MNQ1!) prices. Today's catastrophe: futures stops never fired
+  // because monitor.js's underlyingMap only had SPY/QQQ/IWM. Pine alerts
+  // arrive with `price` (instrument underlying); cache it on disk so the
+  // monitor process can read it at evaluation time. Writes are atomic-ish
+  // — single small JSON file, infrequent enough that race risk is minimal.
+  try {
+    const PRICE_CACHE_FILE = join(__dirname, 'latest-prices.json');
+    let cache = {};
+    if (existsSync(PRICE_CACHE_FILE)) {
+      try { cache = JSON.parse(readFileSync(PRICE_CACHE_FILE, 'utf8')) || {}; } catch {}
+    }
+    cache[instrument] = { price, ts: Date.now(), et: etTimeString() };
+    writeFileSync(PRICE_CACHE_FILE, JSON.stringify(cache, null, 2));
+  } catch (e) {
+    try { jError('WEBHOOK', 'PRICE_CACHE_WRITE_FAIL', { instrument, error: e.message }); } catch {}
+  }
 
   // ── Session gate (2026-05-14 EOD TASK 4) ─────────────────────────────
   // Instrument-aware time gating. Equity (SPY/QQQ/IWM) blocked pre-09:30

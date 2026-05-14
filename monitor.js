@@ -3028,8 +3028,35 @@ async function poll() {
 
   // theta.js evaluation — per-position greeks, IV crush, hard-exit, portfolio theta
   // monitor.js is the canonical writer of portfolio-theta.json (knows SPY/QQQ/IWM).
+  // P0-1 (2026-05-14 EOD): underlyingMap extended with futures via
+  // latest-prices.json cache (webhook writes on each Pine alert). Futures
+  // stops were silently broken before — feeder returned null for ES1!/NQ1!/
+  // MES1!/MNQ1!, so STOP_LOSS never fired on futures. Now resolved.
   if (evaluateOpenPositions && _bs && _gtr) {
-    const underlyingMap = { SPY: _spyPrice, QQQ: _qqqPrice, IWM: _iwmPrice };
+    let _futuresCache = {};
+    try {
+      const _pcf = join(__dirname, 'latest-prices.json');
+      if (existsSync(_pcf)) {
+        const raw = JSON.parse(readFileSync(_pcf, 'utf8'));
+        // Stale-tolerance: accept any cached price <60s old. Older = futures
+        // chart hasn't ticked recently, treat as no-feed (don't risk stale stop).
+        const cutoff = Date.now() - 60_000;
+        for (const [k, v] of Object.entries(raw || {})) {
+          if (v?.price != null && v.ts >= cutoff) _futuresCache[k] = v.price;
+        }
+      }
+    } catch {}
+    const underlyingMap = {
+      SPY: _spyPrice, QQQ: _qqqPrice, IWM: _iwmPrice,
+      'ES1!': _futuresCache['ES1!'] ?? _futuresCache['ES'],
+      'NQ1!': _futuresCache['NQ1!'] ?? _futuresCache['NQ'],
+      'MES1!': _futuresCache['MES1!'] ?? _futuresCache['MES'],
+      'MNQ1!': _futuresCache['MNQ1!'] ?? _futuresCache['MNQ'],
+      ES: _futuresCache['ES'] ?? _futuresCache['ES1!'],
+      NQ: _futuresCache['NQ'] ?? _futuresCache['NQ1!'],
+      MES: _futuresCache['MES'] ?? _futuresCache['MES1!'],
+      MNQ: _futuresCache['MNQ'] ?? _futuresCache['MNQ1!'],
+    };
     const feeder = (trade) => {
       const u = underlyingMap[trade.instrument];
       if (!u) return null;
