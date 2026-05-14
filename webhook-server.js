@@ -35,6 +35,7 @@
  * Pattern: matches dashboard-server.js — uses Node built-in http module, no Express.
  */
 
+import 'dotenv/config';   // 2026-05-14: load .env BEFORE paperTrading.js's module-load env reads
 import http from 'http';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
