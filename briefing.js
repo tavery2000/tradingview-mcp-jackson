@@ -47,7 +47,8 @@ const C = {
   cyan: '\x1b[36m', gray: '\x1b[90m', white: '\x1b[97m',
 };
 
-const WATCHLIST = ['SPY', 'NVDA', 'AAPL', 'MSFT', 'META', 'AMZN', 'GOOGL', 'IWM', 'QQQ', 'TSLA', 'IBM'];
+// IWM retired 2026-05-15 — dropped from briefing watchlist.
+const WATCHLIST = ['SPY', 'NVDA', 'AAPL', 'MSFT', 'META', 'AMZN', 'GOOGL', 'QQQ', 'TSLA', 'IBM'];
 
 function speak(text) {
   const clean = text.replace(/'/g, '').replace(/"/g, '').replace(/[^\w\s.,!?$%:-]/g, ' ').slice(0, 500);
@@ -510,7 +511,6 @@ ${esSection}
 ${nqSection}
 ${fmtETF('SPY', spy)}
 ${fmtETF('QQQ', qqq)}
-${fmtETF('IWM', iwm)}
 ${mag6Section}
 P/C Ratio: ${pcRatio ? pcRatio + (pcRatio < 0.70 ? ' (bullish)' : pcRatio > 1.0 ? ' (fearful)' : ' — neutral') : 'Unavailable'}
 
@@ -527,7 +527,7 @@ Write in exactly this format. Use ONLY real numbers above:
 
 1. MACRO BIAS: [BULLISH/BEARISH/NEUTRAL] — [one sentence why, max 20 words]
 2. OVERNIGHT SUMMARY: [2-3 sentences using real high/low/range data from ES/NQ]
-3. KEY LEVELS TO WATCH: List specific real price levels for SPY, QQQ, and IWM — support and resistance
+3. KEY LEVELS TO WATCH: List specific real price levels for SPY and QQQ — support and resistance
 4. TODAY'S CATALYSTS: Events, earnings, and relevant news headlines that could move markets today
 5. RISK FACTORS: Specific risks from overnight action, news, and today's calendar
 6. DAILY PREDICTION: [CALLS BIAS / PUTS BIAS / NEUTRAL] — Key levels: [list 3-4 specific prices] — Entry trigger: [one specific setup description] — Risk: [one main risk]

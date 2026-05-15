@@ -9,12 +9,12 @@ echo  Window 2:  ngrok Tunnel       (yiddish-composure-amusing → :9001)
 echo  Window 3:  MOO/MOC Engine     (FJ imbalance — start first)
 echo  Window 4:  SPY Monitor        (Mag-6 + SPY + wsServer :8080 in-process)
 echo  Window 5:  QQQ Monitor        (W3 + QQQ standalone)
-echo  Window 6:  IWM Monitor        (Mag-3 + IWM standalone)
-echo  Window 7:  News Terminal      (RSS + SEC + TTS + MOC writer)
-echo  Window 8:  MOC Engine         (15:50 confirmation + hard exit)
-echo  Window 9:  Morning Briefing   (08:30 ET daily brief)
-echo  Window 10: Dashboard Server   (http://localhost:3000)
-echo  Window 11: Theta Monitor      (per-position greeks + burn zone → /api/theta)
+echo  Window 6:  News Terminal      (RSS + SEC + TTS + MOC writer)
+echo  Window 7:  MOC Engine         (15:50 confirmation + hard exit)
+echo  Window 8:  Morning Briefing   (08:30 ET daily brief)
+echo  Window 9:  Dashboard Server   (http://localhost:3000)
+echo  Window 10: Theta Monitor      (per-position greeks + burn zone → /api/theta)
+echo  (IWM retired 2026-05-15)
 echo  ============================================================
 echo.
 echo  Prerequisites:
@@ -22,7 +22,6 @@ echo  - TradingView running with --remote-debugging-port=9222
 echo  - Claude 6-Chart tab open  (NVDA AAPL MSFT META AMZN GOOGL)
 echo  - Claude SPY tab open      (SPY + VWAP + Volume Delta + VRRS + Tick)
 echo  - Claude QQQ tab open      (QQQ AMD AVGO TSLA ARM NVDA + same stack)
-echo  - Claude IWM tab open      (IWM BE CRDO FN + same stack)
 echo  - Webull authenticated     (.webull_token present)
 echo  ============================================================
 echo.
@@ -60,12 +59,11 @@ start "HANK QQQ" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && e
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 6: IWM Monitor ─────────────────────────────────────────────────────
-start "HANK IWM" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK IWM MONITOR  ^|  Mag-3 + IWM && echo. && node supervise.js monitor-iwm.js"
+:: ── Window 6 RETIRED 2026-05-15: IWM Monitor removed per operator directive.
+::    monitor-iwm.js + hank-iwm.pine archived under _archive/. Webhook server
+::    rejects inbound IWM alerts with INSTRUMENT_RETIRED.
 
-timeout /t 2 /nobreak > nul
-
-:: ── Window 7: News Terminal ───────────────────────────────────────────────────
+:: ── Window 6: News Terminal ───────────────────────────────────────────────────
 start "HANK News" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NEWS TERMINAL && echo  RSS + SEC filings + TTS + MOC data writer && echo. && node supervise.js news.js"
 
 timeout /t 2 /nobreak > nul
@@ -93,7 +91,7 @@ start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. &&
 
 echo.
 echo  ============================================================
-echo  All 11 HANK engines launched.
+echo  All 10 HANK engines launched. (IWM retired 2026-05-15)
 echo.
 echo  Startup order:
 echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
@@ -101,12 +99,11 @@ echo    2.  ngrok     (yiddish-composure-amusing → :9001, 2s after webhook)
 echo    3.  MOO/MOC   (FJ imbalance — MOO fires at 09:20, MOC at 15:50)
 echo    4.  SPY       (wsServer :8080 in-process + Mag-6 CDP — 6s head start)
 echo    5.  QQQ       (W3 standalone)
-echo    6.  IWM       (Mag-3 standalone)
-echo    7.  News      (RSS + MOC data writer)
-echo    8.  MOC       (reads moc-data.json + wsServer)
-echo    9.  Briefing  (ready for 08:30 ET)
-echo    10. Dashboard (http://localhost:3000)
-echo    11. Theta     (per-position greeks, depends on wsServer + CDP)
+echo    6.  News      (RSS + MOC data writer)
+echo    7.  MOC       (reads moc-data.json + wsServer)
+echo    8.  Briefing  (ready for 08:30 ET)
+echo    9.  Dashboard (http://localhost:3000)
+echo    10. Theta     (per-position greeks, depends on wsServer + CDP)
 echo  ============================================================
 echo.
 pause

@@ -183,10 +183,22 @@ async function handlePineAlert(req, res) {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
   } catch {}
 
+  // 2026-05-15 Task 6: hardcoded retired-instrument list (permanent). Distinct
+  // from INSTRUMENT_DISABLED below (env-driven, temporary). Retired = removed
+  // from system, won't come back without explicit code change. IWM retired
+  // 2026-05-15 per operator directive: post-Pine-republish IWM still showed
+  // structurally weak edge despite 4H/1H gates; capital reallocated to futures.
+  const RETIRED_INSTRUMENTS = new Set(['IWM']);
+  if (RETIRED_INSTRUMENTS.has((instrument || '').toUpperCase())) {
+    jGateBlock(engine, instrument, direction, 'INSTRUMENT_RETIRED', {
+      etTime: etTimeString(), retiredAt: '2026-05-15',
+    });
+    return send(res, 200, { ok: false, reason: 'INSTRUMENT_RETIRED', et: etTimeString() });
+  }
+
   // P1-8 (2026-05-14 EOD): instrument suspension. Comma-separated env var
-  // INSTRUMENT_DISABLED rejects all alerts on listed instruments. Today
-  // IWM = 13.2% WR / -$973 net — structurally broken, suspended pending
-  // logic review. Add others to the list as needed; web/restart picks up.
+  // INSTRUMENT_DISABLED rejects all alerts on listed instruments. Temporary —
+  // use RETIRED_INSTRUMENTS above for permanent removal.
   const _disabledList = (process.env.INSTRUMENT_DISABLED || '')
     .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
   if (_disabledList.includes((instrument || '').toUpperCase())) {

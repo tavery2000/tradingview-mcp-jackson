@@ -105,8 +105,10 @@ const EDGAR_POLL_MS   = 120_000;  // SEC EDGAR — every 2 min
 const MAX_AGE_MS      = 10 * 60 * 1000;
 const SHOWN_GUIDS     = new Set();
 
+// IWM retired 2026-05-15 (Task 6). BE/CRDO/FN correlation watchers dropped
+// with it — they were IWM-cluster proxies and have no value for SPY/QQQ.
 const WATCHLIST = ['SPY', 'NVDA', 'AAPL', 'MSFT', 'META', 'AMZN', 'GOOGL',
-                   'IWM', 'QQQ', 'SOXX', 'CAR', 'CRWV', 'CBRS', 'TSLA', 'IBM'];
+                   'QQQ', 'SOXX', 'CAR', 'CRWV', 'CBRS', 'TSLA', 'IBM'];
 
 // ─── Tier Keyword System ──────────────────────────────────────────────────────
 //
@@ -514,7 +516,7 @@ async function fullAutoAnalysis(title, tier, tickers, sourceCred, contradiction)
 
   lastAnalysisTs = now;
 
-  const instrContext = 'HANK trades SPY/QQQ/IWM 0DTE options (CALLS and PUTS) intraday.';
+  const instrContext = 'HANK trades SPY/QQQ 0DTE options + ES/NQ/MES/MNQ futures intraday.';
   const contString = contradiction
     ? `\nWARNING: Contradicts recent headline "${truncate(contradiction.against, 80)}" on topic "${contradiction.keyword}". Note the contradiction.`
     : '';
@@ -529,7 +531,7 @@ Affected tickers: ${tickers.length ? tickers.join(', ') : 'none/macro'}${contStr
 
 Respond in exactly this format (one line each, no extra text):
 DIRECTION: [BULLISH|BEARISH|NEUTRAL|MIXED]
-INSTRUMENTS: [which of SPY/QQQ/IWM are most affected and why, max 15 words]
+INSTRUMENTS: [which of SPY/QQQ are most affected and why, max 15 words]
 TRADE: [CALLS|PUTS|HOLD|WATCH] on [instrument], [entry note max 10 words]
 CONFIDENCE: [HIGH|MEDIUM|LOW]
 REASONING: [one sentence, max 25 words]`;

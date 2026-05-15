@@ -139,6 +139,10 @@ const cfg          = JSON.parse(readFileSync(join(__dirname, 'config.json'), 'ut
 const STOCKS       = ['NVDA', 'AAPL', 'MSFT', 'META', 'AMZN', 'GOOGL'];
 const QQQ_STOCKS   = ['QQQ', 'AMD', 'AVGO', 'TSLA', 'ARM', 'NVDA'];  // QQQ watchlist tab
 const QQQ_CHART_ID = cfg.qqqChartId   ?? 'f4zZcgs4';
+// 2026-05-15 Task 6: IWM retired. IwmSwingEngine gated below; webhook-server.js
+// rejects inbound IWM alerts with INSTRUMENT_RETIRED. IWM tab + price reads
+// kept intact to avoid regressing the SPY/QQQ display paths that share helpers.
+const IWM_RETIRED  = true;
 const IWM_STOCKS   = ['IWM', 'BE', 'CRDO', 'FN'];
 const IWM_CHART_ID = cfg.iwmChartId   ?? 'Jo9vWQ37';
 const SPY_CHART_ID = cfg.spyChartId   ?? 'vjeNFMBX';
@@ -2812,7 +2816,10 @@ async function poll() {
     await drawChartAnnotations('IWM', iwmClient, iwm.levels);
 
     const iwmEma9 = computeEMA9fromBars(iwm?.bars);
-    iwmSwingState = IwmSwingEngine.update(iwm?.price, iwm?.vwap, iwmEma9, iwm?.bars);
+    // 2026-05-15 Task 6: IWM_RETIRED — swing engine update gated so no new
+    // IWM SWING entries fire. Reading IwmSwingEngine.getState() elsewhere
+    // still returns the cleared state object.
+    iwmSwingState = IWM_RETIRED ? null : IwmSwingEngine.update(iwm?.price, iwm?.vwap, iwmEma9, iwm?.bars);
 
     // IWM Swing order wiring
     if (iwmSwingState) {
