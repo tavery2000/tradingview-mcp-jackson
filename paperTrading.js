@@ -172,11 +172,11 @@ const CAPITAL_CAP_FUTURES   = parseFloat(process.env.CAPITAL_CAP_FUTURES || '100
 const CAPITAL_CAP_PER_INSTRUMENT = {
   'ES':   parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
   'NQ':   parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
-  'MES':  parseFloat(process.env.CAPITAL_CAP_MES || '1000'),
+  'MES':  parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
   'MNQ':  parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
   'ES1!': parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
   'NQ1!': parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
-  'MES1!':parseFloat(process.env.CAPITAL_CAP_MES || '1000'),
+  'MES1!':parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
   'MNQ1!':parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
   'SPY':  parseFloat(process.env.CAPITAL_CAP_SPY || '1000'),
   'QQQ':  parseFloat(process.env.CAPITAL_CAP_QQQ || '1000'),
