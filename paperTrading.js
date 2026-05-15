@@ -137,7 +137,21 @@ const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak un
 // P1-11 (2026-05-14 EOD): per-trade capital cap. tradeCapital = entryPremium
 // × contracts × 100 (options); reject if > cap. Default $1,000 for the $1k
 // account discipline. Set 0 to disable cap (back-compat for $25k account).
-const CAPITAL_CAP_PER_TRADE = parseFloat(process.env.CAPITAL_CAP_PER_TRADE || '1000');
+// EMERGENCY HOTFIX 2026-05-15: cap split by instrument class. Single
+// CAPITAL_CAP_PER_TRADE=$1k blocked all futures-options entries because
+// 1 contract premium (e.g., NQ1! $59 × 100 = $5,900) exceeds the cap.
+// Equity stays at $1k; futures temporarily at $10k pending operator's
+// final sizing decision (operator requested $3k but MNQ premium check
+// pending). Legacy CAPITAL_CAP_PER_TRADE env still respected as fallback.
+const _legacyCap            = process.env.CAPITAL_CAP_PER_TRADE;
+const CAPITAL_CAP_EQUITY    = parseFloat(process.env.CAPITAL_CAP_EQUITY  || _legacyCap || '1000');
+const CAPITAL_CAP_FUTURES   = parseFloat(process.env.CAPITAL_CAP_FUTURES || '10000');
+const _CAP_FUTURES_INSTRUMENTS = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
+function _capForInstrument(inst) {
+  return _CAP_FUTURES_INSTRUMENTS.has((inst || '').toUpperCase())
+    ? CAPITAL_CAP_FUTURES
+    : CAPITAL_CAP_EQUITY;
+}
 // P1-12 (2026-05-14 EOD): 1% account-risk position sizing.
 // contracts = floor((account_balance × ACCOUNT_RISK_PCT) / (stop_distance × multiplier)).
 // Combined with CAPITAL_CAP_PER_TRADE: smaller of the two governs.
@@ -224,6 +238,7 @@ function getContractMultiplier(instrument) {
     `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']} ` +
     `(50/50 scale-out + BE + ${TRAIL_PCT}% trail + R-locks at +3R/+4R)`);
   console.log(`  [paperTrading] Structure stop (P1-5-B): ${STRUCTURE_STOP_ENABLED ? `ENABLED on ${[...STRUCTURE_STOP_INSTRUMENTS].join(',')} (priority above point-based)` : 'disabled'}`);
+  console.log(`  [paperTrading] Capital cap per trade: equity=$${CAPITAL_CAP_EQUITY.toLocaleString()}  futures=$${CAPITAL_CAP_FUTURES.toLocaleString()} (HOTFIX 2026-05-15)`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
 }
 
@@ -727,7 +742,7 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   // entry × multiplier where multiplier is futures point-value ($50 ES,
   // $20 NQ, $5 MES, $2 MNQ). Not yet wired — Path 2 is weekend work.)
   const _entryPremium = consensus.entryPrice ?? 0;
-  const _capPerTrade  = CAPITAL_CAP_PER_TRADE;
+  const _capPerTrade  = _capForInstrument(consensus.instrument);
   if (_entryPremium > 0 && _capPerTrade > 0) {
     const _capImpliedContracts = Math.floor(_capPerTrade / (_entryPremium * 100));
     if (_capImpliedContracts < 1) {
