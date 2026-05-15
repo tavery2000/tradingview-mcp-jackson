@@ -857,11 +857,20 @@ plot(liveSellCount,       title="LiveSellCount",      color=color.new(color.red,
 // payloads — SPY chart emitting "ES1!" was observed 2026-05-12 ~11:40 ET.
 // Setting the override explicitly per chart prevents the mislabel and
 // gives operators full control over what reaches webhook-server.js.
+// P1-5-B (2026-05-15): emit invalidation_level + structure_type so structure-
+// based stop layer fires regardless of whether chart runs this legacy script
+// or the hank-*-family split. CALLS use prevSwingLow (HL pivot), PUTS use
+// prevSwingHigh (LH pivot). null when no recent pivot exists.
 payloadJSON(direction, engine, confidence) =>
     instStr = instrumentOverride == "AUTO" ? syminfo.ticker : instrumentOverride
+    invalLevel = direction == "CALLS" ? prevSwingLow : prevSwingHigh
+    structType = direction == "CALLS" ? "HL" : "LH"
+    invalStr   = na(invalLevel) ? "null" : str.tostring(invalLevel, "#.####")
     '{"instrument":"' + instStr + '","direction":"' + direction +
       '","engine":"' + engine + '","confidence":"' + confidence +
       '","price":' + str.tostring(close, "#.##") +
+      ',"invalidation_level":' + invalStr +
+      ',"structure_type":"' + structType + '"' +
       ',"alertName":"' + engine + ' ' + direction + '"}'
 
 // Confirmed-bar signals (barstate.isconfirmed gated upstream) — once per bar close
