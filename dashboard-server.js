@@ -390,6 +390,47 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, out);
   }
 
+  // 2026-05-15 Task 10: PANIC kill endpoint. Proxies to ask.answerQuestion
+  // which calls closePosition / closeFuturesPosition with lock-serialized writes.
+  if (req.method === 'POST' && url === '/api/kill') {
+    try {
+      const raw = await readBody(req);
+      let filter = null;
+      try { filter = JSON.parse(raw || '{}').filter ?? null; } catch {}
+      const { answerQuestion } = await import('./ask.js');
+      const cmd = filter ? `kill ${String(filter).toUpperCase()}` : 'flatten';
+      const text = await answerQuestion(cmd);
+      // Parse the trailing summary line for counts. Format from ask.js:
+      //   "KILLED  N options + M futures   realized +$X.XX"
+      const m = text.match(/KILLED\s+(\d+)\s+options\s+\+\s+(\d+)\s+futures\s+realized\s+([+-]?\$[\d,.]+)/);
+      const killedPaper = m ? parseInt(m[1], 10) : 0;
+      const killedFut   = m ? parseInt(m[2], 10) : 0;
+      const totalPnL    = m ? parseFloat(m[3].replace(/[$,]/g, '')) : 0;
+      return sendJson(res, { ok: true, killedPaper, killedFut, totalPnL, text });
+    } catch (e) {
+      return sendError(res, 500, e.message);
+    }
+  }
+
+  // 2026-05-15 Task 11: session-state endpoint. Computes RTH/FUTURES_OPEN/
+  // FUTURES_MAINTENANCE/WEEKEND from current ET time + day-of-week so the
+  // dashboard banner doesn't have to duplicate the schedule logic.
+  if (req.method === 'GET' && url === '/api/session-state') {
+    const etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const [h, m] = etHMS.split(':').map(Number);
+    const mins = h * 60 + m;
+    const dayShort = new Date().toLocaleDateString('en-US', { timeZone:'America/New_York', weekday: 'short' });
+    const dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[dayShort];
+    let state;
+    if (dow === 6) state = 'WEEKEND';
+    else if (dow === 0 && mins < 17 * 60) state = 'WEEKEND';
+    else if (dow === 5 && mins >= 16 * 60 + 59) state = 'WEEKEND';
+    else if (dow >= 1 && dow <= 4 && mins >= 16 * 60 + 59 && mins < 18 * 60) state = 'FUTURES_MAINTENANCE';
+    else if (dow >= 1 && dow <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60) state = 'RTH';
+    else state = 'FUTURES_OPEN';
+    return sendJson(res, { state, etTime: etHMS, dow, dayShort });
+  }
+
   sendError(res, 404, 'Not found');
 });
 

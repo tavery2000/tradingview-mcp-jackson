@@ -107,6 +107,23 @@ body {
   animation: tier-pulse 1.4s ease-in-out infinite;
 }
 .tb-tier-up:hover { background: #0f2a0f; }
+/* 2026-05-15 Task 10: PANIC button — top-right, red, always-visible */
+.tb-panic {
+  margin-left: auto;
+  background: #1a0606;
+  border: 1px solid #ff4444;
+  color: #ff4444;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: bold;
+  padding: 4px 12px;
+  cursor: pointer;
+  letter-spacing: 2px;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+.tb-panic:hover { background: #330808; box-shadow: 0 0 10px 2px rgba(255,68,68,0.4); }
+.tb-panic:active { background: #ff4444; color: #fff; }
 @keyframes tier-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.5); }
   50%      { box-shadow: 0 0 8px 2px rgba(0,255,136,0.4); }
@@ -1460,6 +1477,8 @@ button:disabled { opacity: 0.4; cursor: default; }
     <div class="tb-dot-group"><div class="tb-dot g" id="dot-sec"></div><span class="tb-dot-lbl">SEC</span></div>
     <div class="tb-dot-group"><div class="tb-dot y" id="dot-wb"></div><span class="tb-dot-lbl">WB</span></div>
   </div>
+  <!-- 2026-05-15 Task 10: global PANIC button — closes ALL open positions. -->
+  <button class="tb-panic" id="tb-panic-btn" onclick="hankPanic()" title="Close ALL open positions at current market price">🛑 PANIC</button>
 </div>
 
 <!-- ══ MAIN AREA ══════════════════════════════════════════════ -->
@@ -4260,6 +4279,28 @@ async function promoteTier() {
   } finally {
     if (btn) btn.disabled = false;
     pollTier();
+  }
+}
+
+// 2026-05-15 Task 10: PANIC button handler. Confirmation prompt + POST to
+// /api/kill on dashboard-server.js, which proxies to ask.answerQuestion('flatten').
+async function hankPanic() {
+  if (!window.confirm('🛑 PANIC — close ALL open positions at current market price?\n\nThis cannot be undone.')) return;
+  const btn = document.getElementById('tb-panic-btn');
+  const orig = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ closing…'; }
+  try {
+    const r = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filter: null }) });
+    const j = await r.json();
+    if (j.ok) {
+      showFill('PANIC executed', `${j.killedPaper || 0} options + ${j.killedFut || 0} futures, realized $${(j.totalPnL || 0).toFixed(2)}`);
+    } else {
+      showFill('PANIC failed', j.error || 'unknown');
+    }
+  } catch (e) {
+    showFill('PANIC failed', e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '🛑 PANIC'; }
   }
 }
 
