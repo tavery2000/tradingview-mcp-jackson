@@ -4486,7 +4486,9 @@ async function loadJournal() {
     const eng = r.engine || r.scope || '';
     const inst = r.instrument || '';
     const dir = r.direction || r.signal || r.exitReason || '';
-    const msg = r.reason || r.blockedBy || r.message || r.pattern || (r.fillPrice ? `fill ${r.fillPrice}` : '') || (r.pnl != null ? `pnl ${r.pnl}` : '') || '';
+    // 2026-05-15 Task 16: signed P&L formatting (-$X.XX / +$X.XX) for journal rows.
+    const fmtPnL = (n) => `${n >= 0 ? '+' : '-'}$${Math.abs(n).toFixed(2)}`;
+    const msg = r.reason || r.blockedBy || r.message || r.pattern || (r.fillPrice ? `fill ${r.fillPrice}` : '') || (r.pnl != null ? `pnl ${fmtPnL(r.pnl)}` : '') || '';
     return `<div class="jt-row">
       <span class="jt-time">${time}</span>
       <span class="jt-type ${r.type}">${r.type}</span>
