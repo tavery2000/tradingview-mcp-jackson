@@ -19,6 +19,7 @@ AGENTS.md
 logs/
 paper-ledger.json
 profit-protection-state.json
+pre-switch-kill-state.json
 portfolio-theta.json
 voice-queue.json
 daily-bias.json

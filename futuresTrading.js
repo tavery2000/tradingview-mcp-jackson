@@ -40,6 +40,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { jFutEntry, jFutExit, jError, jAlert, jGateBlock } from './journal.js';
 import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
+import { isTradingPaused } from './preSwitchKill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE  = join(__dirname, 'futures-ledger.json');
@@ -295,6 +296,13 @@ export function placeFuturesOrder(consensus, requestId) {
     jGateBlock(consensus.engine, inst, direction, 'FUT_PROFIT_PROTECTION',
       { tier: _pp.tier, dailyPnL: _pp.dailyPnL, peakDailyPnL: _pp.peakDailyPnL, reason: _pp.reason });
     return { vetoed: true, reason: _pp.reason };
+  }
+  // 2026-05-15 Task 7: pre-12:00 pause for futures (mirrors paperTrading).
+  const _psk = isTradingPaused();
+  if (_psk.paused) {
+    futuresOrderGate.markVetoed(requestId, _psk.reason);
+    jGateBlock(consensus.engine, inst, direction, 'FUT_PRE_SWITCH_PAUSE', { reason: _psk.reason });
+    return { vetoed: true, reason: _psk.reason };
   }
   if (MAX_TRADES_PER_DAY > 0 && todayTrades >= MAX_TRADES_PER_DAY) {
     const reason = `Max trades per day (${todayTrades}/${MAX_TRADES_PER_DAY})`;

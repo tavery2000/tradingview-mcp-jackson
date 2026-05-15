@@ -41,6 +41,7 @@ import {
   applyTierDown, updateEquity,
 } from './tier.js';
 import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
+import { isTradingPaused } from './preSwitchKill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -743,6 +744,17 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       { tier: _pp.tier, dailyPnL: _pp.dailyPnL, peakDailyPnL: _pp.peakDailyPnL, reason: _pp.reason });
     console.log(`  ${C.red}🛑 ${_pp.reason}${C.reset}`);
     return { vetoed: true, reason: _pp.reason };
+  }
+
+  // 2026-05-15 Task 7: pre-12:00-ET-timeframe-switch pause. preSwitchKill
+  // scheduler closes all positions at 11:58 ET and sets a pause window
+  // through TRADING_RESUME_ET (default 12:02). This gate enforces it.
+  const _psk = isTradingPaused();
+  if (_psk.paused) {
+    orderGate.markVetoed(requestId, _psk.reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PRE_SWITCH_PAUSE', { reason: _psk.reason });
+    console.log(`  ${C.yellow}⏸ ${_psk.reason}${C.reset}`);
+    return { vetoed: true, reason: _psk.reason };
   }
 
   // 2026-05-14 EOD: All concurrency / correlation / opposition gates removed
