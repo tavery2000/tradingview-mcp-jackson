@@ -13,6 +13,7 @@ echo  Window 6:  Morning Briefing   (08:30 ET daily brief)
 echo  Window 7:  Dashboard Server   (http://localhost:3000)
 echo  Window 8:  Theta Monitor      (per-position greeks + burn zone → /api/theta)
 echo  Window 9:  Futures Status     (read-only tail of futures-ledger + prices, 2s refresh)
+echo  Window 10: Ask HANK REPL      (natural-language Q&A + kill/flatten WRITE commands)
 echo  (IWM retired 2026-05-15)
 echo  (MOO/MOC + MOC engines retired 2026-05-15 — NYSE feed too delayed without subscription)
 echo  ============================================================
@@ -94,9 +95,21 @@ timeout /t 2 /nobreak > nul
 :: duplicate timer). Pure visibility surface, no logic.
 start "HANK Futures" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK FUTURES STATUS && echo  Read-only tail of futures-ledger.json + latest-prices.json && echo. && node supervise.js futures-status.js"
 
+timeout /t 2 /nobreak > nul
+
+:: ── Window 10: Ask HANK REPL ─────────────────────────────────────────────────
+:: 2026-05-15: interactive Q&A REPL. Mostly read-only (snapshot SPY/QQQ price,
+:: signals, positions, pnl, tier, flow, theta) plus two WRITE commands:
+::   kill [SYM]   — close all open positions (optional symbol filter)
+::   flatten      — alias for `kill` (no filter, close ALL)
+:: NOT wrapped in supervise.js — readline-driven interactive shell; supervisor
+:: respawn on Ctrl-C / clean exit would break the terminal session. Just run
+:: it again manually if it dies.
+start "HANK Ask" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK ASK REPL && echo  Type 'help' for commands. kill/flatten WRITE; everything else read-only. && echo. && node ask-cli.js"
+
 echo.
 echo  ============================================================
-echo  All 9 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
+echo  All 10 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
 echo.
 echo  Startup order:
 echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
@@ -108,6 +121,7 @@ echo    6.  Briefing  (ready for 08:30 ET)
 echo    7.  Dashboard (http://localhost:3000)
 echo    8.  Theta     (per-position greeks, depends on wsServer + CDP)
 echo    9.  Futures   (read-only status tail, refreshes every 2s)
+echo    10. Ask       (interactive Q&A REPL — type 'help')
 echo  ============================================================
 echo.
 pause
