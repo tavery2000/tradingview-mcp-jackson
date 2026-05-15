@@ -124,6 +124,12 @@ body {
 }
 .tb-panic:hover { background: #330808; box-shadow: 0 0 10px 2px rgba(255,68,68,0.4); }
 .tb-panic:active { background: #ff4444; color: #fff; }
+/* 2026-05-15 Task 11: schedule-state pill */
+.tb-schedule { border-color: var(--dim); color: var(--dim); }
+.tb-schedule[data-state="RTH"]                  { border-color: var(--green);  color: var(--green); }
+.tb-schedule[data-state="FUTURES_OPEN"]         { border-color: var(--cyan);   color: var(--cyan); }
+.tb-schedule[data-state="FUTURES_MAINTENANCE"]  { border-color: var(--yellow); color: var(--yellow); }
+.tb-schedule[data-state="WEEKEND"]              { border-color: var(--red);    color: var(--red); }
 @keyframes tier-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.5); }
   50%      { box-shadow: 0 0 8px 2px rgba(0,255,136,0.4); }
@@ -1453,6 +1459,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   <span class="tb-clock" id="tb-clock">--:--:-- ET</span>
   <span class="tb-div">│</span>
   <span class="tb-session" id="tb-session">◉ PRE-MARKET</span>
+  <span class="tb-div">│</span>
+  <!-- 2026-05-15 Task 11: instrument-class session banner (RTH/FUTURES/MAINTENANCE/WEEKEND) -->
+  <span class="tb-pill tb-schedule" id="tb-schedule" title="Trading-window state from /api/session-state"><span class="lbl">SCHED</span><span id="tb-schedule-val">—</span></span>
   <span class="tb-div">│</span>
   <span class="tb-screen" id="tb-screen">◈ AUTONOMOUS</span>
   <span class="tb-div">│</span>
@@ -4304,11 +4313,26 @@ async function hankPanic() {
   }
 }
 
+// 2026-05-15 Task 11: schedule-state poller — pulls /api/session-state
+// and paints the topbar pill. Computed server-side so dashboard doesn't
+// duplicate the Task 9 schedule logic.
+async function pollScheduleState() {
+  try {
+    const r = await fetch('/api/session-state');
+    const j = await r.json();
+    const el = document.getElementById('tb-schedule-val');
+    const pill = document.getElementById('tb-schedule');
+    if (el)   el.textContent = j.state || '—';
+    if (pill) pill.dataset.state = j.state || '';
+  } catch {}
+}
+
 function pollAll() {
   pollLedger(); pollBias(); pollTheta(); pollFlow();
   pollVoice(); pollGates(); pollAlerts(); pollSignals(); pollLevels();
   pollTier();
   pollTriggers();
+  pollScheduleState();
   loadWebullStatus();
 }
 
