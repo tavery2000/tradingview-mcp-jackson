@@ -1695,53 +1695,7 @@ button:disabled { opacity: 0.4; cursor: default; }
       </div>
     </div>
 
-    <!-- ── IWM COLUMN (monitor-iwm.js) ─────────────────────── -->
-    <div class="inst-col" id="iwm-col">
-      <div class="sig-card">
-        <div class="sc-sym">IWM</div>
-        <div class="sc-price bull" id="iwm-price">198.44</div>
-        <div class="sc-action sca-calls">⬡ CALLS — B2 READY</div>
-        <div class="sc-conf">
-          <span class="conf-md">MEDIUM</span>
-          <span style="font-size:13px;color:#555;">3/5 BULL</span>
-        </div>
-        <div class="sc-reason">VWAP +$0.88 · 9EMA rising · TICK +380 · small-cap aligned</div>
-      </div>
-
-      <div class="mkt-state">
-        <div class="mkt-row"><span class="mkt-k">PRICE</span><span class="mkt-v pos">198.44</span></div>
-        <div class="mkt-row"><span class="mkt-k">VWAP</span><span class="mkt-v pos">197.56 ↑</span></div>
-        <div class="mkt-row"><span class="mkt-k">9EMA</span><span class="mkt-v pos">198.10 ↑</span></div>
-        <div class="mkt-row"><span class="mkt-k">$TICK</span><span class="mkt-v pos">+380</span></div>
-        <div class="mkt-row"><span class="mkt-k">DELTA</span><span class="mkt-v pos">+890 buyers</span></div>
-        <div class="mkt-row"><span class="mkt-k">RESIST</span><span class="mkt-v neg">$199.00 PDH</span></div>
-        <div class="mkt-row"><span class="mkt-k">SUPPORT</span><span class="mkt-v pos">$197.56 VWAP</span></div>
-        <div class="mkt-row"><span class="mkt-k">VOL</span><span class="mkt-v neu" id="iwm-vol">—</span></div>
-        <div class="mkt-row"><span class="mkt-k">IV RANK</span><span class="mkt-v" id="iwm-ivr" style="color:#888;">N/A (synthetic)</span></div>
-        <div class="mkt-row"><span class="mkt-k">STRUCTURE</span><span class="mkt-v" id="iwm-struct" style="color:#888;">—</span></div>
-        <div class="mkt-row"><span class="mkt-k">SOURCE</span><span class="mkt-v" style="color:#aaaaaa;font-size:13px;">monitor-iwm.js</span></div>
-      </div>
-
-      
-      <!-- OPTION C MINI CHAIN -->
-      <div class="opt-mini">
-        <div class="opt-mini-title">
-          <span style="color:#aaaaaa;font-size:13px;letter-spacing:2px;">OPTIONS</span>
-          <div class="opt-mini-tabs">
-            <button class="om-tab active" onclick="setOptTab(this,'0DTE','iwm-opt')">0DTE</button>
-            <button class="om-tab" onclick="setOptTab(this,'1DTE','iwm-opt')">1DTE</button>
-            <span class="om-refresh">⟳ 60s</span>
-          </div>
-        </div>
-        <table class="om-table">
-          <thead><tr><th>STRIKE</th><th>MID</th><th>Δ</th></tr></thead>
-          <tbody id="iwm-opt-rows"><tr class=""><td>$197.0</td><td>0.75</td><td>0.67</td></tr><tr class=""><td>$197.5</td><td>0.77</td><td>0.58</td></tr><tr class=""><td>$198.0</td><td>0.79</td><td>0.50</td></tr><tr class="om-hank-pick"><td><span style="color:#1a3a1a;font-size:11px;">⬡</span> $198.5</td><td>0.77</td><td>0.42</td></tr><tr class=""><td>$199.0</td><td>0.75</td><td>0.33</td></tr></tbody>
-        </table>
-        <button class="om-exec-btn " onclick="handleMiniExec('IWM','calls','198.5')">
-          ▶ EXECUTE $198.5C 0DTE
-        </button>
-      </div>
-    </div>
+    <!-- IWM column retired 2026-05-15 (Task 12) — monitor-iwm.js archived. -->
 
     <!-- ── ANALYSIS COLUMN ──────────────────────────────────── -->
     <div class="analysis-col">
@@ -3074,13 +3028,7 @@ button:disabled { opacity: 0.4; cursor: default; }
               <button class="set-btn" onclick="svcToggle('qqq')">STOP</button>
             </div>
           </div>
-          <div class="s-row">
-            <span class="s-lbl">monitor-iwm.js</span>
-            <div style="display:flex;gap:6px;align-items:center;">
-              <div class="svc-dot-sm run"></div>
-              <button class="set-btn" onclick="svcToggle('iwm')">STOP</button>
-            </div>
-          </div>
+          <!-- monitor-iwm.js retired 2026-05-15 (Task 12) — archived. -->
           <div class="s-row">
             <span class="s-lbl">news.js</span>
             <div style="display:flex;gap:6px;align-items:center;">
@@ -3648,7 +3596,8 @@ function haltFutAll() {
 }
 
 // ── SERVICES ──────────────────────────────────────────────────
-const svcState = { monitor:true, qqq:true, iwm:true, news:true, moc:false, mailer:false, theta:false, ws:false };
+// iwm retired 2026-05-15 (Task 12).
+const svcState = { monitor:true, qqq:true, news:true, moc:false, mailer:false, theta:false, ws:false };
 function svcToggle(name) {
   svcState[name] = !svcState[name];
   const dot = document.getElementById('sd-' + name);
@@ -4128,7 +4077,7 @@ async function pollFlow() {
   }
 
   // IVR per instrument
-  ['SPY', 'QQQ', 'IWM'].forEach(sym => {
+  ['SPY', 'QQQ'].forEach(sym => {
     const ivr = j[sym]?.ivRank;
     const el = document.getElementById(sym.toLowerCase() + '-ivr');
     if (!el) return;
@@ -4233,7 +4182,7 @@ async function pollSignals() {
 
   // STRUCTURE row in MKT STATE per instrument
   const structRecs = recs.filter(r => r.engine === 'STRUCTURE' && r.pattern);
-  ['SPY','QQQ','IWM'].forEach(sym => {
+  ['SPY','QQQ'].forEach(sym => {
     const r = structRecs.find(x => (x.instrument || '').toUpperCase() === sym);
     const el = document.getElementById(sym.toLowerCase() + '-struct');
     if (!el) return;
