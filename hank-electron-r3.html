@@ -1812,8 +1812,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 <!-- ══════════════════ TAB 2: FUTURES ═══════════════════════ -->
 <div class="tab-panel" id="tab-futures">
 
-  <!-- GO-LIVE BANNER -->
-  <div class="fut-banner">⚠ FUTURES TRADING GOES LIVE 2026-05-18 — placeholder data until live wiring on Sunday</div>
+  <!-- 2026-05-15 Task 13: futures-direct (Path 2) is LIVE as of d431225 (MES1! v1).
+       Banner kept as a 24/5 status row instead of a "coming-soon" notice. -->
+  <div class="fut-banner" id="fut-banner">◆ FUTURES 24/5 MONITORING — paper mode (Path 2 direct dispatch)</div>
 
   <!-- INFOBAR -->
   <div class="infobar">
@@ -4276,12 +4277,41 @@ async function pollScheduleState() {
   } catch {}
 }
 
+// 2026-05-15 Task 13: FUTURES tab data poller. Pulls futures-ledger.json
+// + latest-prices.json (cached by webhook-server on every Pine alert) and
+// paints the infobar ES/NQ price, balance, day P&L.
+async function pollFuturesTab() {
+  try {
+    const [fr, pr] = await Promise.all([fetch('/api/futures-ledger'), fetch('/api/latest-prices')]);
+    const fut    = await fr.json().catch(() => null);
+    const prices = await pr.json().catch(() => ({}));
+    const today  = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    const esVal = prices['ES1!']?.last  ?? prices['ES']?.last;
+    const nqVal = prices['NQ1!']?.last  ?? prices['NQ']?.last;
+    const elES = document.getElementById('fut-es-px');
+    const elNQ = document.getElementById('fut-nq-px');
+    if (elES && Number.isFinite(esVal)) elES.textContent = esVal.toLocaleString();
+    if (elNQ && Number.isFinite(nqVal)) elNQ.textContent = nqVal.toLocaleString();
+    if (fut) {
+      const balEl = document.getElementById('fut-bal');
+      const pnlEl = document.getElementById('fut-pnl');
+      if (balEl) balEl.textContent = `$${(fut.balance || 0).toFixed(2)}`;
+      const dayPnL = fut.dailyPnL?.[today] || 0;
+      if (pnlEl) {
+        pnlEl.textContent = `${dayPnL >= 0 ? '+' : ''}$${dayPnL.toFixed(2)}`;
+        pnlEl.style.color = dayPnL > 0 ? 'var(--green)' : dayPnL < 0 ? 'var(--red)' : '';
+      }
+    }
+  } catch {}
+}
+
 function pollAll() {
   pollLedger(); pollBias(); pollTheta(); pollFlow();
   pollVoice(); pollGates(); pollAlerts(); pollSignals(); pollLevels();
   pollTier();
   pollTriggers();
   pollScheduleState();
+  pollFuturesTab();
   loadWebullStatus();
 }
 

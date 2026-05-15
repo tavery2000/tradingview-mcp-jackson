@@ -412,6 +412,21 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // 2026-05-15 Task 13: futures ledger endpoint. Path 2 futures-direct writes
+  // to futures-ledger.json (separate from paper-ledger.json options book).
+  // FUTURES tab consumes this for live ES/NQ/MES/MNQ positions + day P&L.
+  if (req.method === 'GET' && url === '/api/futures-ledger') {
+    const data = readJson('futures-ledger.json');
+    if (!data) return sendError(res, 404, 'futures-ledger.json not found');
+    return sendJson(res, data);
+  }
+
+  // 2026-05-15 Task 13: latest underlying prices written by webhook-server on
+  // every Pine alert (P0-1 cache). Includes futures (ES1!/NQ1!/MES1!/MNQ1!).
+  if (req.method === 'GET' && url === '/api/latest-prices') {
+    return sendJson(res, readJson('latest-prices.json') ?? {});
+  }
+
   // 2026-05-15 Task 11: session-state endpoint. Computes RTH/FUTURES_OPEN/
   // FUTURES_MAINTENANCE/WEEKEND from current ET time + day-of-week so the
   // dashboard banner doesn't have to duplicate the schedule logic.
