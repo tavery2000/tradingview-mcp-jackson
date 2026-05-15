@@ -587,10 +587,11 @@ function etDate() {
  */
 export async function sendOrder(consensus, requestId, lastQuote = null) {
 
-  // ── Defense-in-depth session gate (2026-05-14 EOD TASK 4) ───
-  // Equity (SPY/QQQ/IWM): reject pre-09:30 (PRE_MARKET), 09:30-09:40
-  // (EXPLORATION_WINDOW), and >=16:00 (OUT_OF_HOURS). Futures bypass
-  // (24/5 session per operator directive). Mirrors the webhook-server.js
+  // ── Defense-in-depth session gate (2026-05-14 EOD TASK 4 + 2026-05-15) ───
+  // Equity (SPY/QQQ/IWM): reject pre-09:30 (PRE_MARKET) and >=16:00
+  // (OUT_OF_HOURS). EXPLORATION_WINDOW gate REMOVED 2026-05-15 per
+  // operator directive — equity entries 09:30-09:40 now allowed.
+  // Futures bypass (24/5 session). Mirrors the webhook-server.js
   // session-gate logic so direct sendOrder() callers (monitor SWING
   // entries) are also covered.
   const _SESSION_EQUITY = new Set(['SPY', 'QQQ', 'IWM']);
@@ -600,7 +601,6 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     const _etMins = _eh * 60 + _em;
     let _gateReason = null;
     if (_etMins < 9 * 60 + 30)       _gateReason = 'PRE_MARKET';
-    else if (_etMins < 9 * 60 + 40)  _gateReason = 'EXPLORATION_WINDOW';
     else if (_etMins >= 16 * 60)     _gateReason = 'OUT_OF_HOURS_SENDORDER';
     if (_gateReason) {
       const reason = `${_gateReason} — sendOrder rejected at ${_etHMS} ET (equity ${consensus.instrument})`;

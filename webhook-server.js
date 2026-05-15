@@ -198,14 +198,11 @@ async function handlePineAlert(req, res) {
     try { jError('WEBHOOK', 'PRICE_CACHE_WRITE_FAIL', { instrument, error: e.message }); } catch {}
   }
 
-  // ── Session gate (2026-05-14 EOD TASK 4) ─────────────────────────────
-  // Instrument-aware time gating. Equity (SPY/QQQ/IWM) blocked pre-09:30
-  // (PRE_MARKET) and 09:30-09:40 (EXPLORATION_WINDOW per operator rule:
-  // no trades on equity until exploration completes). Equity also blocked
-  // post-16:00 ET (OUT_OF_HOURS, market closed). Futures (ES/NQ/MES/MNQ
-  // and continuous-front-month forms) are exempt — 24/5 session per
-  // operator directive. The existing LATE_DAY_ENTRY_0DTE gate below
-  // handles equity 15:30-15:45.
+  // ── Session gate (2026-05-14 EOD TASK 4 + EXPLORATION_WINDOW removal 2026-05-15) ─
+  // EXPLORATION_WINDOW gate REMOVED per operator directive 2026-05-15:
+  // 09:30-09:40 equity entries no longer blocked. PRE_MARKET (pre-09:30)
+  // and OUT_OF_HOURS (post-16:00) gates remain for equity. Futures
+  // (ES/NQ/MES/MNQ + 1!) bypass all time gates — 24/5 session.
   const SESSION_GATE_EQUITY = new Set(['SPY', 'QQQ', 'IWM']);
   const _gateETMins = (() => {
     const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
@@ -217,10 +214,8 @@ async function handlePineAlert(req, res) {
       jGateBlock(engine, instrument, direction, 'PRE_MARKET', { etTime: etTimeString(), etMins: _gateETMins, openMins: 9 * 60 + 30 });
       return send(res, 200, { ok: false, reason: 'PRE_MARKET', et: etTimeString() });
     }
-    if (_gateETMins < 9 * 60 + 40) {
-      jGateBlock(engine, instrument, direction, 'EXPLORATION_WINDOW', { etTime: etTimeString(), etMins: _gateETMins, gateOpensAtMins: 9 * 60 + 40 });
-      return send(res, 200, { ok: false, reason: 'EXPLORATION_WINDOW', et: etTimeString() });
-    }
+    // EXPLORATION_WINDOW gate REMOVED 2026-05-15 per operator directive.
+    // Equity entries 09:30-09:40 now allowed (previously blocked).
     if (_gateETMins >= 16 * 60) {
       jGateBlock(engine, instrument, direction, 'OUT_OF_HOURS', { etTime: etTimeString(), etMins: _gateETMins, closeMins: 16 * 60 });
       return send(res, 200, { ok: false, reason: 'OUT_OF_HOURS', et: etTimeString() });
