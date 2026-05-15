@@ -412,6 +412,11 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // 2026-05-15 Task 15: pre-switch-kill state for dashboard TTS warning.
+  if (req.method === 'GET' && url === '/api/pre-switch-state') {
+    return sendJson(res, readJson('pre-switch-kill-state.json') ?? { warningFired: false, killFired: false });
+  }
+
   // 2026-05-15 Task 13: futures ledger endpoint. Path 2 futures-direct writes
   // to futures-ledger.json (separate from paper-ledger.json options book).
   // FUTURES tab consumes this for live ES/NQ/MES/MNQ positions + day P&L.

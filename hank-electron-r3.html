@@ -4284,6 +4284,45 @@ async function pollScheduleState() {
   } catch {}
 }
 
+// 2026-05-15 Task 15: pre-switch TTS warning. Polls /api/pre-switch-state and
+// fires a one-shot browser TTS announcement when warningFired or killFired
+// transitions to true. Uses sessionStorage to dedupe across page reloads
+// within the same browser session.
+async function pollPreSwitchTTS() {
+  try {
+    const r = await fetch('/api/pre-switch-state');
+    const s = await r.json();
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    const speak = (text) => {
+      if (!window.speechSynthesis) return;
+      try {
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.0; u.volume = 1.0;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } catch {}
+    };
+    if (s.warningFired && s.date === today) {
+      const key = `pre-switch-warning-spoken-${today}`;
+      if (!sessionStorage.getItem(key)) {
+        sessionStorage.setItem(key, '1');
+        speak('Time interval switch in 3 minutes. Auto kill at 11:58 Eastern.');
+      }
+    }
+    if (s.killFired && s.date === today) {
+      const key = `pre-switch-kill-spoken-${today}`;
+      if (!sessionStorage.getItem(key)) {
+        sessionStorage.setItem(key, '1');
+        const summary = s.killSummary;
+        const msg = summary
+          ? `Pre switch kill executed. Closed ${summary.killedPaper || 0} options and ${summary.killedFut || 0} futures. Realized ${summary.totalPnL >= 0 ? 'plus' : 'minus'} ${Math.abs(summary.totalPnL || 0).toFixed(0)} dollars. Trading resumes at 12:02.`
+          : 'Pre switch kill executed. Trading resumes at 12:02 Eastern.';
+        speak(msg);
+      }
+    }
+  } catch {}
+}
+
 // 2026-05-15 Task 14: compute current streak from most-recent closed trades
 // across BOTH ledgers (options + futures). Walks newest→oldest by exitTime
 // until win/loss alternates. Voided/corrupted rows skipped.
@@ -4355,6 +4394,7 @@ function pollAll() {
   pollScheduleState();
   pollFuturesTab();
   pollStreak();
+  pollPreSwitchTTS();
   loadWebullStatus();
 }
 
