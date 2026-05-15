@@ -672,6 +672,19 @@ let briefingDelivered = false;
 let lastBriefingDate  = '';
 
 async function runBriefing({ skipEmail = false } = {}) {
+  // 2026-05-15 Task 17: weekend briefing suppression. Skip Sat (6) and Sun (0)
+  // — markets closed, no briefing value. Manual --now invocations still send
+  // unless WEEKEND_BRIEFING_FORCE=false. Otherwise skip with a console note.
+  const dayShort = new Date().toLocaleDateString('en-US', { timeZone:'America/New_York', weekday: 'short' });
+  const _dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[dayShort];
+  const _weekend = (_dow === 0 || _dow === 6);
+  const _forceWeekend = (process.env.WEEKEND_BRIEFING_FORCE || 'false').toLowerCase() === 'true';
+  if (_weekend && !_forceWeekend) {
+    console.log(`\n  ${C.gray}Weekend (${dayShort}) — briefing suppressed. Set WEEKEND_BRIEFING_FORCE=true to override.${C.reset}\n`);
+    briefingDelivered = true;
+    lastBriefingDate = etDate();
+    return;
+  }
   console.log(`\n  ${C.cyan}${C.bold}⬡ Building morning briefing...${C.reset}`);
   console.log(`  ${C.dim}Live data via wsServer (port 8080) + file fallback + Yahoo Finance${skipEmail ? ' · TEST MODE — no email' : ''}${C.reset}\n`);
 
