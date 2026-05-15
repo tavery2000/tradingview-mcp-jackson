@@ -97,4 +97,54 @@ export function jExit(trade) {
 export function jAlert(level, message, detail = {}) { journal({ type: 'ALERT', level, message, ...detail }); }
 export function jError(scope, message, detail = {}) { journal({ type: 'ERROR', scope, message, ...detail }); }
 
+// Path 2 (2026-05-15): futures-direct journal subtypes. Distinct from
+// jEntry/jExit so analytics can grep `"type":"FUT_ENTRY"` cleanly without
+// having to inspect requestId prefixes. Schema includes the futures-specific
+// fields (tier, stopPrice/targetPrice as underlying prices, stage, etc.).
+export function jFutEntry(trade) {
+  journal({
+    type:        'FUT_ENTRY',
+    requestId:   trade.requestId,
+    instrument:  trade.instrument,
+    direction:   trade.signal ?? trade.direction ?? null,
+    engine:      trade.engine,
+    confidence:  trade.confidence ?? null,
+    tier:        trade.tier ?? null,
+    contracts:   trade.contracts ?? null,
+    originalContracts: trade.originalContracts ?? null,
+    entryPrice:  trade.entryPrice ?? null,
+    pointValue:  trade.pointValue ?? null,
+    stage:       trade.stage ?? null,
+    stopPrice:   trade.stopPrice ?? null,
+    stopPoints:  trade.stopPoints ?? null,
+    targetPrice: trade.targetPrice ?? null,
+    targetPoints:trade.targetPoints ?? null,
+    invalidationLevel: trade.invalidationLevel ?? null,
+    structureType:     trade.structureType ?? null,
+    macro4H:     trade.macro4H ?? null,
+  });
+}
+export function jFutExit(trade) {
+  journal({
+    type:        'FUT_EXIT',
+    requestId:   trade.requestId,
+    instrument:  trade.instrument,
+    direction:   trade.signal ?? trade.direction ?? null,
+    engine:      trade.engine ?? null,
+    tier:        trade.tier ?? null,
+    contracts:   trade.contracts ?? null,
+    exitReason:  trade.exitReason,
+    entryPrice:  trade.entryPrice ?? null,
+    exitPrice:   trade.exitPrice,
+    pnl:         trade.pnl,
+    pnlPoints:   trade.pnlPoints ?? null,
+    pnlRemainingLeg: trade.pnlRemainingLeg ?? null,
+    cumulativePartialPnL: trade.cumulativePartialPnL ?? null,
+    holdMins:    trade.holdMins,
+    win:         trade.win,
+    stage:       trade.stage ?? null,
+    lockedStopLevel: trade.lockedStopLevel ?? null,
+  });
+}
+
 export function getJournalPath() { return journalPath(); }

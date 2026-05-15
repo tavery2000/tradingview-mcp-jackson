@@ -38,7 +38,7 @@
 import { readFileSync, writeFileSync, existsSync, openSync, unlinkSync, closeSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { jEntry, jExit, jError, jAlert, jGateBlock } from './journal.js';
+import { jFutEntry, jFutExit, jError, jAlert, jGateBlock } from './journal.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE  = join(__dirname, 'futures-ledger.json');
@@ -370,7 +370,7 @@ export function placeFuturesOrder(consensus, requestId) {
   _recentSignals.push({ instrument: inst, direction, ts: fillTime, requestId });
 
   futuresOrderGate.markExecuted(requestId, trade);
-  try { jEntry({ ...trade, type: 'FUT_ENTRY' }); } catch {}
+  try { jFutEntry(trade); } catch {}
   console.log(`\n  🟦 FUT_ENTRY  ${inst} ${direction} ${consensus.engine}  tier=${tier}  ${contracts}c @ ${entryUnderlying} | stop=${stopPrice} target=${targetPrice} (stacked=${stacked})`);
   return trade;
 }
@@ -466,7 +466,7 @@ export function closeFuturesPosition(requestId, exitPrice, exitReason = 'MANUAL'
 
     const sign = win ? '+' : '';
     console.log(`  🟦 FUT_EXIT ${exitReason}  ${trade.instrument} ${trade.signal}  ${trade.contracts}c  ${trade.entryPrice}→${exitPrice}  ${sign}${pnlPoints.toFixed(2)}pt  ${sign}$${finalPnL.toFixed(0)}  held ${holdMins.toFixed(1)}m`);
-    try { jExit({ ...trade, type: 'FUT_EXIT' }); } catch {}
+    try { jFutExit(trade); } catch {}
 
     _whipsawState.delete(requestId);
     return trade;
@@ -524,7 +524,7 @@ function _executeScaleOut(requestId, exitPrice, liveU) {
     ledger.dailyPnL[today] = fresh.dailyPnL[today];
 
     console.log(`  🟢 FUT_SCALE_OUT  ${trade.instrument} ${trade.signal}  closed ${halfContracts}/${trade.originalContracts} @ ${exitPrice}  +$${partialPnl.toFixed(0)}  remainder ${remainingContracts}c → BE@${trade.entryPrice} + trail`);
-    try { jExit({ ...trade, exitPrice, exitTime: Date.now(), exitTimeET: getETString(), exitReason: 'FUT_SCALE_OUT_PARTIAL', pnl: parseFloat(partialPnl.toFixed(2)), contracts: halfContracts, type: 'FUT_EXIT' }); } catch {}
+    try { jFutExit({ ...trade, exitPrice, exitTime: Date.now(), exitTimeET: getETString(), exitReason: 'FUT_SCALE_OUT_PARTIAL', pnl: parseFloat(partialPnl.toFixed(2)), contracts: halfContracts }); } catch {}
 
     return trade;
   } finally {
