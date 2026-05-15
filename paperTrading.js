@@ -631,23 +631,43 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   // Futures bypass (24/5 session). Mirrors the webhook-server.js
   // session-gate logic so direct sendOrder() callers (monitor SWING
   // entries) are also covered.
-  const _SESSION_EQUITY = new Set(['SPY', 'QQQ', 'IWM']);
-  if (_SESSION_EQUITY.has((consensus.instrument || '').toUpperCase())) {
+  // 2026-05-15 Task 9: instrument-class session schedules.
+  //   Equity (SPY/QQQ): RTH only — 09:30-16:00 ET Mon-Fri.
+  //                     IWM retired Task 6; left in set as defense-in-depth.
+  //   Futures (ES/NQ/MES/MNQ): 23/5 CME schedule. Daily maintenance gap
+  //                     16:59-18:00 ET. Friday close 16:59 → Sunday open 17:00.
+  const _SESSION_EQUITY  = new Set(['SPY', 'QQQ', 'IWM']);
+  const _SESSION_FUTURES = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
+  {
     const _etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
-    const [_eh, _em, _es] = _etHMS.split(':').map(Number);
+    const [_eh, _em] = _etHMS.split(':').map(Number);
     const _etMins = _eh * 60 + _em;
+    const _dayShort = new Date().toLocaleDateString('en-US', { timeZone:'America/New_York', weekday: 'short' });
+    const _dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[_dayShort] ?? new Date().getDay();
+    const _inst = (consensus.instrument || '').toUpperCase();
     let _gateReason = null;
-    if (_etMins < 9 * 60 + 30)       _gateReason = 'PRE_MARKET';
-    else if (_etMins >= 16 * 60)     _gateReason = 'OUT_OF_HOURS_SENDORDER';
+    if (_SESSION_EQUITY.has(_inst)) {
+      if (_dow === 0 || _dow === 6)               _gateReason = 'EQUITY_WEEKEND';
+      else if (_etMins < 9 * 60 + 30)             _gateReason = 'EQUITY_HOURS_CLOSED';
+      else if (_etMins >= 16 * 60)                _gateReason = 'EQUITY_HOURS_CLOSED';
+    } else if (_SESSION_FUTURES.has(_inst)) {
+      // CME futures: weekend = Fri 16:59 onward through Sun 17:00.
+      if (_dow === 6)                                                     _gateReason = 'FUTURES_WEEKEND';   // Saturday — full block
+      else if (_dow === 0 && _etMins < 17 * 60)                           _gateReason = 'FUTURES_WEEKEND';   // Sunday pre-open
+      else if (_dow === 5 && _etMins >= 16 * 60 + 59)                     _gateReason = 'FUTURES_WEEKEND';   // Friday late close
+      // Daily maintenance break Mon-Thu 16:59-18:00 ET (Fri caught above).
+      else if (_dow >= 1 && _dow <= 4
+        && _etMins >= 16 * 60 + 59
+        && _etMins <  18 * 60)                                            _gateReason = 'FUTURES_MAINTENANCE';
+    }
     if (_gateReason) {
-      const reason = `${_gateReason} — sendOrder rejected at ${_etHMS} ET (equity ${consensus.instrument})`;
+      const reason = `${_gateReason} — sendOrder rejected at ${_etHMS} ET (${_inst})`;
       orderGate.markVetoed(requestId, reason);
-      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, _gateReason, { etHMS: _etHMS, etMins: _etMins });
-      console.log(`  ${C.red}🛑 ${_gateReason} — sendOrder rejected: ${_etHMS} ET (${consensus.instrument})${C.reset}`);
+      jGateBlock(consensus.engine, consensus.instrument, consensus.signal, _gateReason, { etHMS: _etHMS, etMins: _etMins, dow: _dow });
+      console.log(`  ${C.red}🛑 ${_gateReason} — sendOrder rejected: ${_etHMS} ET (${_inst})${C.reset}`);
       return { vetoed: true, reason };
     }
   }
-  // Futures: no time gate at sendOrder layer. 24/5 trading allowed.
 
   // ── Tier-aware risk + sizing gate ─────────────────────
   const tierState  = loadTier();

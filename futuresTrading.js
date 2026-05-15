@@ -260,8 +260,28 @@ export function placeFuturesOrder(consensus, requestId) {
     return { vetoed: true, reason };
   }
 
-  // RTH-ish gate — futures are 24/5 but skip clearly closed times
-  // (operator-tunable; for v1 we accept everything)
+  // 2026-05-15 Task 9: CME 23/5 schedule. Daily maintenance 16:59-18:00 ET.
+  // Friday close 16:59 → Sunday reopen 17:00. Saturday fully blocked.
+  {
+    const _etHMS = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const [_eh, _em] = _etHMS.split(':').map(Number);
+    const _etMins = _eh * 60 + _em;
+    const _dayShort = new Date().toLocaleDateString('en-US', { timeZone:'America/New_York', weekday: 'short' });
+    const _dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[_dayShort] ?? new Date().getDay();
+    let _gateReason = null;
+    if (_dow === 6)                                            _gateReason = 'FUTURES_WEEKEND';
+    else if (_dow === 0 && _etMins < 17 * 60)                  _gateReason = 'FUTURES_WEEKEND';
+    else if (_dow === 5 && _etMins >= 16 * 60 + 59)            _gateReason = 'FUTURES_WEEKEND';
+    else if (_dow >= 1 && _dow <= 4
+      && _etMins >= 16 * 60 + 59
+      && _etMins <  18 * 60)                                   _gateReason = 'FUTURES_MAINTENANCE';
+    if (_gateReason) {
+      const reason = `${_gateReason} — futures sendOrder rejected at ${_etHMS} ET (${inst})`;
+      futuresOrderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, inst, direction, _gateReason, { etHMS: _etHMS, etMins: _etMins, dow: _dow });
+      return { vetoed: true, reason };
+    }
+  }
 
   // Daily envelope
   const today = getETDate();
