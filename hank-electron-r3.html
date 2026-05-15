@@ -519,6 +519,24 @@ body {
   overflow: hidden;
   min-height: 0;
 }
+/* 2026-05-15: futures live-status panel (mirrors futures-status.js CLI) */
+.fut-status-panel { background: var(--bg2, #0d1117); border: 1px solid var(--border, #1e2733); border-radius: 6px; margin: 0 8px 8px 8px; padding: 10px 12px; }
+.fut-status-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.fut-status-header .fsp-title { color: var(--cyan, #00d4ff); font-size: 13px; letter-spacing: 2px; font-weight: bold; }
+.fut-status-header .fsp-meta { color: var(--dim, #5a6478); font-size: 12px; }
+.fut-status-tbl-wrap { max-height: 220px; overflow-y: auto; border: 1px solid var(--border, #1e2733); border-radius: 4px; }
+.fut-status-tbl { width: 100%; border-collapse: collapse; font-family: var(--mono, 'Courier New', monospace); font-size: 12px; }
+.fut-status-tbl thead { position: sticky; top: 0; background: var(--bg3, #141924); }
+.fut-status-tbl th { color: var(--cyan, #00d4ff); padding: 6px 8px; text-align: left; font-size: 11px; letter-spacing: 1px; border-bottom: 1px solid var(--border, #1e2733); }
+.fut-status-tbl td { padding: 5px 8px; border-bottom: 1px solid rgba(30,39,51,0.4); color: #cccccc; }
+.fut-status-tbl tr:last-child td { border-bottom: none; }
+.fut-status-tbl tr:hover td { background: rgba(255,255,255,0.02); }
+.fut-status-tbl .fsp-empty { text-align: center; color: var(--dim, #5a6478); font-style: italic; padding: 12px; }
+.fut-status-tbl .fsp-calls { color: var(--green, #00ff88); font-weight: bold; }
+.fut-status-tbl .fsp-puts  { color: var(--red, #ff4444); font-weight: bold; }
+.fut-status-tbl .fsp-pos   { color: var(--green, #00ff88); }
+.fut-status-tbl .fsp-neg   { color: var(--red, #ff4444); }
+.fut-status-tbl .fsp-num   { text-align: right; }
 .fut-spec {
   padding: 10px 14px;
   border-bottom: 1px solid #0e0e1e;
@@ -2064,6 +2082,36 @@ button:disabled { opacity: 0.4; cursor: default; }
     </div>
 
   </div><!-- end fut-layout -->
+
+  <!-- ── 2026-05-15: live futures status panel (mirrors futures-status.js CLI window) ── -->
+  <div class="fut-status-panel">
+    <div class="fut-status-header">
+      <span class="fsp-title">OPEN FUTURES POSITIONS</span>
+      <span class="fsp-meta" id="fut-open-count">—</span>
+    </div>
+    <div class="fut-status-tbl-wrap">
+      <table class="fut-status-tbl">
+        <thead><tr>
+          <th>TIME</th><th>INST</th><th>DIR</th><th>ENG</th><th>TIER</th><th>Cs</th>
+          <th>ENTRY</th><th>LIVE</th><th>STOP</th><th>TARGET</th><th>uPnL</th><th>STAGE</th>
+        </tr></thead>
+        <tbody id="fut-open-tbody"><tr><td colspan="12" class="fsp-empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="fut-status-header" style="margin-top:14px;">
+      <span class="fsp-title">RECENT CLOSES (TODAY)</span>
+      <span class="fsp-meta" id="fut-closed-count">—</span>
+    </div>
+    <div class="fut-status-tbl-wrap">
+      <table class="fut-status-tbl">
+        <thead><tr>
+          <th>EXIT</th><th>INST</th><th>DIR</th><th>ENG</th><th>REASON</th><th>HOLD</th><th>P&amp;L</th>
+        </tr></thead>
+        <tbody id="fut-closed-tbody"><tr><td colspan="7" class="fsp-empty">No closed futures trades today.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 
   <!-- ── MANUAL TRADING — full-width, collapsible ──────────── -->
   <div class="fut-manual collapsed" id="futManual">
@@ -4358,9 +4406,11 @@ async function pollStreak() {
   } catch {}
 }
 
-// 2026-05-15 Task 13: FUTURES tab data poller. Pulls futures-ledger.json
-// + latest-prices.json (cached by webhook-server on every Pine alert) and
-// paints the infobar ES/NQ price, balance, day P&L.
+// 2026-05-15 Task 13 + futures-status panel: FUTURES tab data poller.
+// Pulls futures-ledger.json + latest-prices.json (cached by webhook-server on
+// every Pine alert), paints the infobar (ES/NQ price, balance, day P&L) and
+// renders the open-positions + recent-closes tables that mirror the
+// futures-status.js CLI window.
 async function pollFuturesTab() {
   try {
     const [fr, pr] = await Promise.all([fetch('/api/futures-ledger'), fetch('/api/latest-prices')]);
@@ -4381,6 +4431,69 @@ async function pollFuturesTab() {
       if (pnlEl) {
         pnlEl.textContent = `${dayPnL >= 0 ? '+' : ''}$${dayPnL.toFixed(2)}`;
         pnlEl.style.color = dayPnL > 0 ? 'var(--green)' : dayPnL < 0 ? 'var(--red)' : '';
+      }
+
+      // ── OPEN POSITIONS table ──
+      const open = (fut.trades || []).filter(t => t.status === 'OPEN');
+      const openCnt = document.getElementById('fut-open-count');
+      if (openCnt) openCnt.textContent = `${open.length} open`;
+      const openTbody = document.getElementById('fut-open-tbody');
+      if (openTbody) {
+        if (!open.length) {
+          openTbody.innerHTML = '<tr><td colspan="12" class="fsp-empty">No open futures positions.</td></tr>';
+        } else {
+          openTbody.innerHTML = open.map(t => {
+            const live = prices[t.instrument]?.last;
+            const dirMult = t.signal === 'CALLS' ? 1 : -1;
+            const uPnL = Number.isFinite(live) ? (live - t.entryPrice) * dirMult * (t.pointValue || 0) * (t.contracts || 0) : null;
+            const fmtN = n => n == null || !Number.isFinite(n) ? '—' : n.toLocaleString();
+            const fmtUPnL = n => n == null ? '<span class="fsp-empty">—</span>' : `<span class="${n >= 0 ? 'fsp-pos' : 'fsp-neg'}">${n >= 0 ? '+' : '-'}$${Math.abs(n).toFixed(2)}</span>`;
+            const dirCls = t.signal === 'CALLS' ? 'fsp-calls' : 'fsp-puts';
+            return `<tr>
+              <td>${escapeHtml(t.fillTimeET || '—')}</td>
+              <td>${escapeHtml(t.instrument)}</td>
+              <td class="${dirCls}">${escapeHtml(t.signal)}</td>
+              <td>${escapeHtml(t.engine || '—')}</td>
+              <td>${escapeHtml(t.tier || '—')}</td>
+              <td class="fsp-num">${t.contracts ?? '—'}</td>
+              <td class="fsp-num">${fmtN(t.entryPrice)}</td>
+              <td class="fsp-num">${fmtN(live)}</td>
+              <td class="fsp-num">${fmtN(t.stopPrice)}</td>
+              <td class="fsp-num">${fmtN(t.targetPrice)}</td>
+              <td class="fsp-num">${fmtUPnL(uPnL)}</td>
+              <td>${escapeHtml(t.stage || '—')}</td>
+            </tr>`;
+          }).join('');
+        }
+      }
+
+      // ── RECENT CLOSES (today) table — last 10 ──
+      const closedToday = (fut.trades || [])
+        .filter(t => t.status === 'CLOSED' && t.fillTime
+          && new Date(t.fillTime).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === today)
+        .slice(-10)
+        .reverse();
+      const closedCnt = document.getElementById('fut-closed-count');
+      if (closedCnt) closedCnt.textContent = `${closedToday.length} today`;
+      const closedTbody = document.getElementById('fut-closed-tbody');
+      if (closedTbody) {
+        if (!closedToday.length) {
+          closedTbody.innerHTML = '<tr><td colspan="7" class="fsp-empty">No closed futures trades today.</td></tr>';
+        } else {
+          closedTbody.innerHTML = closedToday.map(t => {
+            const pnl = t.pnl ?? 0;
+            const dirCls = t.signal === 'CALLS' ? 'fsp-calls' : 'fsp-puts';
+            return `<tr>
+              <td>${escapeHtml(t.exitTimeET || '—')}</td>
+              <td>${escapeHtml(t.instrument)}</td>
+              <td class="${dirCls}">${escapeHtml(t.signal)}</td>
+              <td>${escapeHtml(t.engine || '—')}</td>
+              <td>${escapeHtml(t.exitReason || '—')}</td>
+              <td class="fsp-num">${(t.holdMins ?? 0).toFixed(0)}m</td>
+              <td class="fsp-num ${pnl >= 0 ? 'fsp-pos' : 'fsp-neg'}">${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</td>
+            </tr>`;
+          }).join('');
+        }
       }
     }
   } catch {}

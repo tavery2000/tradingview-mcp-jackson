@@ -12,6 +12,7 @@ echo  Window 5:  News Terminal      (RSS + SEC + TTS + MOC data writer)
 echo  Window 6:  Morning Briefing   (08:30 ET daily brief)
 echo  Window 7:  Dashboard Server   (http://localhost:3000)
 echo  Window 8:  Theta Monitor      (per-position greeks + burn zone → /api/theta)
+echo  Window 9:  Futures Status     (read-only tail of futures-ledger + prices, 2s refresh)
 echo  (IWM retired 2026-05-15)
 echo  (MOO/MOC + MOC engines retired 2026-05-15 — NYSE feed too delayed without subscription)
 echo  ============================================================
@@ -84,9 +85,18 @@ timeout /t 2 /nobreak > nul
 :: and CDP :9222 for futures. Writes portfolio-theta.json every 5s.
 start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK THETA MONITOR && echo  Per-position greeks + burn zone  ^|  /api/theta + hank^>theta && echo. && node supervise.js theta-monitor.js"
 
+timeout /t 2 /nobreak > nul
+
+:: ── Window 9: Futures Status ─────────────────────────────────────────────────
+:: 2026-05-15: thin read-only futures tail. Reads futures-ledger.json + latest-
+:: prices.json every 2s; does NOT import futuresTrading.js (that module's
+:: eval loop lives inside webhook-server.js — double-importing would spin a
+:: duplicate timer). Pure visibility surface, no logic.
+start "HANK Futures" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK FUTURES STATUS && echo  Read-only tail of futures-ledger.json + latest-prices.json && echo. && node supervise.js futures-status.js"
+
 echo.
 echo  ============================================================
-echo  All 8 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
+echo  All 9 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
 echo.
 echo  Startup order:
 echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
@@ -97,6 +107,7 @@ echo    5.  News      (RSS + MOC data writer — kept for future re-enable)
 echo    6.  Briefing  (ready for 08:30 ET)
 echo    7.  Dashboard (http://localhost:3000)
 echo    8.  Theta     (per-position greeks, depends on wsServer + CDP)
+echo    9.  Futures   (read-only status tail, refreshes every 2s)
 echo  ============================================================
 echo.
 pause
