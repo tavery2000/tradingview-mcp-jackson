@@ -18,6 +18,7 @@ AGENTS.md
 # Runtime state — process-local
 logs/
 paper-ledger.json
+profit-protection-state.json
 portfolio-theta.json
 voice-queue.json
 daily-bias.json

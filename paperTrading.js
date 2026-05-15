@@ -40,6 +40,7 @@ import {
   checkTierUpEligibility, checkTierDown,
   applyTierDown, updateEquity,
 } from './tier.js';
+import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -715,6 +716,20 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
       }
     } catch {}
     return { vetoed: true, reason };
+  }
+
+  // 2026-05-15 Task 3: multi-tier profit-protection gate. Uses combined options
+  // + futures daily P&L (read from both ledgers by the module). Tiers escalate
+  // at +$5K (LIGHT), +$10K (MEDIUM), +$15K (HARD). On trail breach: LIGHT/
+  // MEDIUM pause new entries for N minutes; HARD locks the day. Disabled by
+  // default — enable with PROFIT_PROTECTION_ENABLED=true in .env.
+  const _pp = profitProtectionEvaluate({ today });
+  if (_pp.blocked) {
+    orderGate.markVetoed(requestId, _pp.reason);
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PROFIT_PROTECTION',
+      { tier: _pp.tier, dailyPnL: _pp.dailyPnL, peakDailyPnL: _pp.peakDailyPnL, reason: _pp.reason });
+    console.log(`  ${C.red}🛑 ${_pp.reason}${C.reset}`);
+    return { vetoed: true, reason: _pp.reason };
   }
 
   // 2026-05-14 EOD: All concurrency / correlation / opposition gates removed

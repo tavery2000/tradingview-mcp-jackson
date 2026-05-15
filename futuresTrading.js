@@ -39,6 +39,7 @@ import { readFileSync, writeFileSync, existsSync, openSync, unlinkSync, closeSyn
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { jFutEntry, jFutExit, jError, jAlert, jGateBlock } from './journal.js';
+import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE  = join(__dirname, 'futures-ledger.json');
@@ -283,6 +284,17 @@ export function placeFuturesOrder(consensus, requestId) {
     futuresOrderGate.markVetoed(requestId, reason);
     jGateBlock(consensus.engine, inst, direction, 'FUT_FRIDAY_LOSS_CAP', { dailyPnL: todayPnL, cap: FRIDAY_LOSS_CAP });
     return { vetoed: true, reason };
+  }
+  // 2026-05-15 Task 3: multi-tier profit-protection gate (combined P&L).
+  // Mirrors the gate in paperTrading.sendOrder so futures-direct entries are
+  // suppressed under the same tier/pause/lock conditions. Module reads both
+  // ledgers internally; disabled by default until PROFIT_PROTECTION_ENABLED=true.
+  const _pp = profitProtectionEvaluate({ today });
+  if (_pp.blocked) {
+    futuresOrderGate.markVetoed(requestId, _pp.reason);
+    jGateBlock(consensus.engine, inst, direction, 'FUT_PROFIT_PROTECTION',
+      { tier: _pp.tier, dailyPnL: _pp.dailyPnL, peakDailyPnL: _pp.peakDailyPnL, reason: _pp.reason });
+    return { vetoed: true, reason: _pp.reason };
   }
   if (MAX_TRADES_PER_DAY > 0 && todayTrades >= MAX_TRADES_PER_DAY) {
     const reason = `Max trades per day (${todayTrades}/${MAX_TRADES_PER_DAY})`;
