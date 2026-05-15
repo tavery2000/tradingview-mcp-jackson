@@ -130,6 +130,10 @@ body {
 .tb-schedule[data-state="FUTURES_OPEN"]         { border-color: var(--cyan);   color: var(--cyan); }
 .tb-schedule[data-state="FUTURES_MAINTENANCE"]  { border-color: var(--yellow); color: var(--yellow); }
 .tb-schedule[data-state="WEEKEND"]              { border-color: var(--red);    color: var(--red); }
+/* 2026-05-15 Task 14: streak pill */
+.tb-streak                       { border-color: var(--dim);   color: var(--dim); }
+.tb-streak[data-streak="win"]    { border-color: var(--green); color: var(--green); }
+.tb-streak[data-streak="loss"]   { border-color: var(--red);   color: var(--red); }
 @keyframes tier-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.5); }
   50%      { box-shadow: 0 0 8px 2px rgba(0,255,136,0.4); }
@@ -1462,6 +1466,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   <span class="tb-div">│</span>
   <!-- 2026-05-15 Task 11: instrument-class session banner (RTH/FUTURES/MAINTENANCE/WEEKEND) -->
   <span class="tb-pill tb-schedule" id="tb-schedule" title="Trading-window state from /api/session-state"><span class="lbl">SCHED</span><span id="tb-schedule-val">—</span></span>
+  <span class="tb-div">│</span>
+  <!-- 2026-05-15 Task 14: current win/loss streak -->
+  <span class="tb-pill tb-streak" id="tb-streak" title="Consecutive wins (W) or losses (L) on closed trades"><span class="lbl">STREAK</span><span id="tb-streak-val">—</span></span>
   <span class="tb-div">│</span>
   <span class="tb-screen" id="tb-screen">◈ AUTONOMOUS</span>
   <span class="tb-div">│</span>
@@ -4277,6 +4284,41 @@ async function pollScheduleState() {
   } catch {}
 }
 
+// 2026-05-15 Task 14: compute current streak from most-recent closed trades
+// across BOTH ledgers (options + futures). Walks newest→oldest by exitTime
+// until win/loss alternates. Voided/corrupted rows skipped.
+async function pollStreak() {
+  try {
+    const [pr, fr] = await Promise.all([
+      fetch('/api/ledger').then(r => r.json()).catch(() => null),
+      fetch('/api/futures-ledger').then(r => r.json()).catch(() => null),
+    ]);
+    const trades = [];
+    for (const src of [pr, fr]) {
+      if (!src || !Array.isArray(src.trades)) continue;
+      for (const t of src.trades) {
+        if (t.status !== 'CLOSED' || t.win == null) continue;   // skip OPEN + voided
+        trades.push({ exitTime: t.exitTime || t.fillTime || 0, win: !!t.win });
+      }
+    }
+    trades.sort((a, b) => b.exitTime - a.exitTime);
+    if (!trades.length) {
+      const el = document.getElementById('tb-streak-val');
+      const pill = document.getElementById('tb-streak');
+      if (el)   el.textContent = '—';
+      if (pill) delete pill.dataset.streak;
+      return;
+    }
+    const direction = trades[0].win;
+    let count = 0;
+    for (const t of trades) { if (t.win === direction) count++; else break; }
+    const el   = document.getElementById('tb-streak-val');
+    const pill = document.getElementById('tb-streak');
+    if (el)   el.textContent = `${count}${direction ? 'W' : 'L'}`;
+    if (pill) pill.dataset.streak = direction ? 'win' : 'loss';
+  } catch {}
+}
+
 // 2026-05-15 Task 13: FUTURES tab data poller. Pulls futures-ledger.json
 // + latest-prices.json (cached by webhook-server on every Pine alert) and
 // paints the infobar ES/NQ price, balance, day P&L.
@@ -4312,6 +4354,7 @@ function pollAll() {
   pollTriggers();
   pollScheduleState();
   pollFuturesTab();
+  pollStreak();
   loadWebullStatus();
 }
 
