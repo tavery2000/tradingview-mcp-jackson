@@ -99,3 +99,37 @@ export function getCurrentTimeframeRegime() {
   const switchHour = parseInt(process.env.TIMEFRAME_SWITCH_HOUR_ET || '12', 10);
   return getETMins() >= switchHour * 60 ? 'PM' : 'AM';
 }
+
+// 2026-05-15 Task 8: futures-chart switch hint.
+// monitor.js doesn't currently hold a dedicated CDP client to the single
+// futures-chart tab (cycles between ES/NQ/MES/MNQ via tab selection). Until
+// that wiring lands, broadcast a wsServer hint at 09:30 and 12:00 prompting
+// the operator to confirm the futures chart matches the equity-chart
+// resolution. Fires once per transition per ET-date.
+const _futuresHintFired = new Map();   // key: `${transition}|${ET-date}`
+export function maybeBroadcastFuturesSwitchHint() {
+  const enabled = (process.env.AUTO_TIMEFRAME_SWITCH || 'true').toLowerCase() === 'true';
+  if (!enabled) return null;
+  const switchHour = parseInt(process.env.TIMEFRAME_SWITCH_HOUR_ET || '12', 10);
+  const today = getETDate();
+  const mins = getETMins();
+  let transition = null;
+  if (mins >= 9 * 60 + 30 && mins < 9 * 60 + 35) transition = 'am';
+  else if (mins >= switchHour * 60 && mins < switchHour * 60 + 5) transition = 'pm';
+  if (!transition) return null;
+  const key = `${transition}|${today}`;
+  if (_futuresHintFired.get(key)) return null;
+  _futuresHintFired.set(key, true);
+  const resolution = transition === 'am' ? (process.env.AM_RESOLUTION || '1') : (process.env.PM_RESOLUTION || '5');
+  const payload = {
+    kind: 'FUTURES_TF_HINT',
+    transition,
+    resolution,
+    message: `Verify futures chart timeframe is now ${resolution}m (${transition.toUpperCase()} regime active).`,
+  };
+  if (typeof global.wsBroadcast === 'function') {
+    try { global.wsBroadcast({ type: 'info', payload }); } catch {}
+  }
+  console.log(`  [TF-SWITCH] futures-chart hint: ${payload.message}`);
+  return payload;
+}

@@ -2624,9 +2624,18 @@ async function poll() {
   // P2-13 (2026-05-14 EOD): auto-timeframe switch. Fires once per day at
   // 09:30 ET (→1m) and 12:00 ET (→5m). Idempotent — won't re-issue if
   // already switched today. Skips silently if AUTO_TIMEFRAME_SWITCH=false.
+  // 2026-05-15 Task 8: extended to QQQ + futures-chart hint. CDP-driven
+  // switch covers whichever client is connected to that tab. Futures
+  // chart (single tab cycling ES/NQ/MES/MNQ) gets switched too if its
+  // client is wired; if not, the maybeBroadcastFuturesSwitchHint helper
+  // fires a wsBroadcast prompting the operator to verify manually.
   try {
-    const { maybeSwitchTimeframe } = await import('./timeframeSwitcher.js');
+    const { maybeSwitchTimeframe, maybeBroadcastFuturesSwitchHint } = await import('./timeframeSwitcher.js');
     if (spyClient) await maybeSwitchTimeframe(spyClient, { name: 'monitor.js[SPY]' });
+    if (qqqClient) await maybeSwitchTimeframe(qqqClient, { name: 'monitor.js[QQQ]' });
+    if (typeof maybeBroadcastFuturesSwitchHint === 'function') {
+      maybeBroadcastFuturesSwitchHint();
+    }
   } catch {}
 
   if (!isMarketHours()) {
