@@ -6,15 +6,14 @@ echo  HANK Trading Terminal — Startup Sequence
 echo  ============================================================
 echo  Window 1:  Webhook Supervisor (Pine alert receiver :9001 — auto-restart)
 echo  Window 2:  ngrok Tunnel       (yiddish-composure-amusing → :9001)
-echo  Window 3:  MOO/MOC Engine     (FJ imbalance — start first)
-echo  Window 4:  SPY Monitor        (Mag-6 + SPY + wsServer :8080 in-process)
-echo  Window 5:  QQQ Monitor        (W3 + QQQ standalone)
-echo  Window 6:  News Terminal      (RSS + SEC + TTS + MOC writer)
-echo  Window 7:  MOC Engine         (15:50 confirmation + hard exit)
-echo  Window 8:  Morning Briefing   (08:30 ET daily brief)
-echo  Window 9:  Dashboard Server   (http://localhost:3000)
-echo  Window 10: Theta Monitor      (per-position greeks + burn zone → /api/theta)
+echo  Window 3:  SPY Monitor        (Mag-6 + SPY + wsServer :8080 in-process)
+echo  Window 4:  QQQ Monitor        (W3 + QQQ standalone)
+echo  Window 5:  News Terminal      (RSS + SEC + TTS + MOC data writer)
+echo  Window 6:  Morning Briefing   (08:30 ET daily brief)
+echo  Window 7:  Dashboard Server   (http://localhost:3000)
+echo  Window 8:  Theta Monitor      (per-position greeks + burn zone → /api/theta)
 echo  (IWM retired 2026-05-15)
+echo  (MOO/MOC + MOC engines retired 2026-05-15 — NYSE feed too delayed without subscription)
 echo  ============================================================
 echo.
 echo  Prerequisites:
@@ -42,19 +41,18 @@ start "HANK ngrok" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. &&
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 3: MOO/MOC Engine ──────────────────────────────────────────────────
-:: P0-2 (2026-05-14 EOD): all monitors now launched under supervise.js for
-:: auto-restart on death. theta-monitor + monitor-iwm died silently mid-
-:: session today; supervisor pattern catches future deaths within 2s.
-start "HANK MOO/MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOO/MOC ENGINE && echo  MOO window 09:20-09:29  MOC window 15:50-15:59 && echo. && node supervise.js moo-moc.js"
+:: ── Window 3 RETIRED 2026-05-15: MOO/MOC engine removed — NYSE imbalance
+::    feed is too delayed without a paid NYSE subscription. moo-moc.js +
+::    moc-engine.js archived under _archive/. news.js still writes
+::    moc-data.json for downstream consumers; revisit once NYSE feed lands.
 
-:: ── Window 4: SPY Monitor ─────────────────────────────────────────────────────
+:: ── Window 3: SPY Monitor ─────────────────────────────────────────────────────
 :: Hosts wsServer on :8080. QQQ + IWM monitors connect to it. Start before them.
 start "HANK SPY" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK SPY MONITOR  ^|  Mag-6 + SPY && echo  wsServer broadcasting on ws://localhost:8080 && echo. && node supervise.js monitor.js"
 
 timeout /t 6 /nobreak > nul
 
-:: ── Window 5: QQQ Monitor ─────────────────────────────────────────────────────
+:: ── Window 4: QQQ Monitor ─────────────────────────────────────────────────────
 start "HANK QQQ" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK QQQ MONITOR  ^|  W3 + QQQ && echo. && node supervise.js monitor-qqq.js"
 
 timeout /t 2 /nobreak > nul
@@ -63,47 +61,42 @@ timeout /t 2 /nobreak > nul
 ::    monitor-iwm.js + hank-iwm.pine archived under _archive/. Webhook server
 ::    rejects inbound IWM alerts with INSTRUMENT_RETIRED.
 
-:: ── Window 6: News Terminal ───────────────────────────────────────────────────
+:: ── Window 5: News Terminal ───────────────────────────────────────────────────
 start "HANK News" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK NEWS TERMINAL && echo  RSS + SEC filings + TTS + MOC data writer && echo. && node supervise.js news.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 8: MOC Engine ──────────────────────────────────────────────────────
-:: Arms 15:45. Reads moc-data.json + wsServer TICK. Hard exit 15:59.
-start "HANK MOC" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK MOC ENGINE && echo  Arms 15:45  Snapshot 15:50  Trigger 15:51  Exit 15:59 && echo. && node supervise.js moc-engine.js"
+:: ── Window 7 RETIRED 2026-05-15: MOC Engine removed alongside MOO/MOC.
+::    Same NYSE-feed-too-delayed rationale.
 
-timeout /t 2 /nobreak > nul
-
-:: ── Window 9: Morning Briefing ────────────────────────────────────────────────
+:: ── Window 6: Morning Briefing ────────────────────────────────────────────────
 start "HANK Briefing" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK BRIEFING ENGINE && echo  Daily brief at 08:30 ET && echo. && node supervise.js briefing.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 10: Dashboard Server ──────────────────────────────────────────────
+:: ── Window 7: Dashboard Server ──────────────────────────────────────────────
 start "HANK Dashboard" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK DASHBOARD SERVER && echo  Open: http://localhost:3000 && echo. && node supervise.js dashboard-server.js"
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 11: Theta Monitor ─────────────────────────────────────────────────
+:: ── Window 8: Theta Monitor ─────────────────────────────────────────────────
 :: Per-position greeks + burn zone — depends on wsServer (Window 4 monitor.js)
 :: and CDP :9222 for futures. Writes portfolio-theta.json every 5s.
 start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK THETA MONITOR && echo  Per-position greeks + burn zone  ^|  /api/theta + hank^>theta && echo. && node supervise.js theta-monitor.js"
 
 echo.
 echo  ============================================================
-echo  All 10 HANK engines launched. (IWM retired 2026-05-15)
+echo  All 8 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
 echo.
 echo  Startup order:
 echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
 echo    2.  ngrok     (yiddish-composure-amusing → :9001, 2s after webhook)
-echo    3.  MOO/MOC   (FJ imbalance — MOO fires at 09:20, MOC at 15:50)
-echo    4.  SPY       (wsServer :8080 in-process + Mag-6 CDP — 6s head start)
-echo    5.  QQQ       (W3 standalone)
-echo    6.  News      (RSS + MOC data writer)
-echo    7.  MOC       (reads moc-data.json + wsServer)
-echo    8.  Briefing  (ready for 08:30 ET)
-echo    9.  Dashboard (http://localhost:3000)
-echo    10. Theta     (per-position greeks, depends on wsServer + CDP)
+echo    3.  SPY       (wsServer :8080 in-process + Mag-6 CDP)
+echo    4.  QQQ       (W3 standalone)
+echo    5.  News      (RSS + MOC data writer — kept for future re-enable)
+echo    6.  Briefing  (ready for 08:30 ET)
+echo    7.  Dashboard (http://localhost:3000)
+echo    8.  Theta     (per-position greeks, depends on wsServer + CDP)
 echo  ============================================================
 echo.
 pause
