@@ -70,12 +70,12 @@ const rl = readline.createInterface({
 banner();
 rl.prompt();
 
-rl.on('line', (line) => {
+rl.on('line', async (line) => {
   if (isExit(line)) { rl.close(); return; }
   const text = line.trim();
   if (!text) { rl.prompt(); return; }
   try {
-    const ans = answerQuestion(text);
+    const ans = await answerQuestion(text);
     console.log(colorize(ans));
   } catch (e) {
     // ask.js shouldn't throw, but if it does we don't want to kill the REPL

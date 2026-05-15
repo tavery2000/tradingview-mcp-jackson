@@ -1,9 +1,12 @@
 /**
  * ask.js — Natural-language Q&A over HANK's local state files.
  *
- * Pure additive module. Reads only — never writes, never imports from
- * monitors. Caller (ask-cli.js) feeds raw text; this module routes it
- * to one of ~10 read-only handlers and returns a formatted string.
+ * Mostly read-only. Two exceptions added 2026-05-15 Task 5:
+ *   - `kill [SYM]`  — close open positions matching SYM (or ALL if no arg)
+ *   - `flatten`     — alias for `kill` (close ALL open positions)
+ * These are the only WRITE paths. Everything else stays pure-read. Caller
+ * (ask-cli.js) feeds raw text; this module routes it to one of ~12 handlers
+ * and returns a formatted string.
  *
  * Schemas verified against the actual files on disk before shipping:
  *   {sym}-levels.json   — { pdHigh, pdLow, pdClose, todayOpen, current,
@@ -342,7 +345,7 @@ function answerTheta() {
 
 function helpText() {
   return [
-    'HANK ASK — local-state Q&A (no internet, no LLM, file reads only)',
+    'HANK ASK — local-state Q&A (mostly read-only; kill/flatten WRITE)',
     '',
     '  spy / qqq / iwm           per-instrument snapshot (price, vwap, levels)',
     '  signal / master / overview master view + daily-bias verdict',
@@ -355,15 +358,100 @@ function helpText() {
     '  flow [sym]                options-flow 0DTE verdict (default SPY)',
     '  moc                       MOC ALERT entries + hank_stats.moc summary',
     '  theta / greeks / burn     portfolio theta + per-position greeks/burn-zone',
+    '  kill [SYM] / flatten      ⚠ CLOSE all open positions (optional symbol filter)',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
-    '  combine: "why spy"  "spy flow"  "spy"  "flow qqq"',
+    '  combine: "why spy"  "spy flow"  "spy"  "flow qqq"  "kill iwm"',
   ].join('\n');
 }
 
+// ─── Kill / flatten handler ────────────────────────────────
+// Writes to paper-ledger.json + futures-ledger.json via the canonical
+// closePosition / closeFuturesPosition exports (which acquire LOCK_FILE).
+// Safe to run concurrently with the live process — the lock serializes.
+async function answerKill(symFilter) {
+  const matchSym = symFilter ? symFilter.toUpperCase() : null;
+  const out = [];
+  out.push(matchSym ? `KILL — closing all open ${matchSym} positions` : 'FLATTEN — closing ALL open positions');
+  // Late-imported to keep ask.js's cold start cheap when not killing
+  let closePosition, closeFuturesPosition, blackScholes;
+  try { ({ closePosition } = await import('./paperTrading.js')); } catch (e) { out.push(`  ✗ failed to import paperTrading: ${e.message}`); }
+  try { ({ closeFuturesPosition } = await import('./futuresTrading.js')); } catch (e) { out.push(`  ✗ failed to import futuresTrading: ${e.message}`); }
+  try { ({ blackScholes } = await import('./theta.js')); } catch {}
+
+  const prices  = readJsonSafe('latest-prices.json') || {};
+  const theta   = readJsonSafe('portfolio-theta.json') || {};
+  const thetaPos = Array.isArray(theta.positions) ? theta.positions : [];
+  const thetaByReq = new Map();
+  for (const p of thetaPos) if (p.requestId) thetaByReq.set(p.requestId, p);
+
+  // ── Options leg (paper-ledger.json) ─────────────────────
+  const paper = readJsonSafe('paper-ledger.json');
+  const openPaper = paper?.trades?.filter(t => t.status === 'OPEN' && (!matchSym || t.instrument === matchSym)) ?? [];
+
+  let killedPaper = 0, paperPnL = 0;
+  for (const t of openPaper) {
+    let exitPrice = null;
+    const tp = thetaByReq.get(t.requestId);
+    if (tp && Number.isFinite(tp.currentEstOption)) exitPrice = tp.currentEstOption;
+    if (exitPrice == null && blackScholes && prices[t.instrument]?.last && t.strike && t.entryIV) {
+      try {
+        const T = Math.max(0.5/24/365, (t.expiry ? (new Date(t.expiry).getTime() - Date.now()) : 4*3600*1000) / (365*24*3600*1000));
+        exitPrice = blackScholes(prices[t.instrument].last, t.strike, T, t.entryIV, 0.05, t.type === 'put' ? 'put' : 'call');
+      } catch {}
+    }
+    if (exitPrice == null) exitPrice = t.fillPrice;  // last-resort: 0 P&L close
+    if (!closePosition) { out.push(`  ✗ ${t.instrument} ${t.signal} ${t.engine} — closePosition unavailable`); continue; }
+    try {
+      const closed = closePosition(t.requestId, exitPrice, 'MANUAL_KILL');
+      if (closed) {
+        killedPaper++;
+        paperPnL += closed.pnl ?? 0;
+        out.push(`  ✓ ${pad(t.instrument, 4)} ${pad(t.signal, 5)} ${pad(t.engine, 9)} exit ${fmtPrice(exitPrice)}  pnl ${fmtMoney(closed.pnl ?? 0)}`);
+      } else {
+        out.push(`  · ${t.instrument} ${t.signal} ${t.engine} — already closed (race)`);
+      }
+    } catch (e) {
+      out.push(`  ✗ ${t.instrument} ${t.signal} ${t.engine} — ${e.message}`);
+    }
+  }
+
+  // ── Futures leg (futures-ledger.json) ───────────────────
+  const fut = readJsonSafe('futures-ledger.json');
+  const openFut = fut?.trades?.filter(t => t.status === 'OPEN' && (!matchSym || t.instrument === matchSym)) ?? [];
+  let killedFut = 0, futPnL = 0;
+  for (const t of openFut) {
+    const live = prices[t.instrument]?.last;
+    const exitPrice = Number.isFinite(live) ? live : t.entryPrice;
+    if (!closeFuturesPosition) { out.push(`  ✗ ${t.instrument} ${t.signal} — closeFuturesPosition unavailable`); continue; }
+    try {
+      const closed = closeFuturesPosition(t.requestId, exitPrice, 'MANUAL_KILL');
+      if (closed) {
+        killedFut++;
+        futPnL += closed.pnl ?? 0;
+        out.push(`  ✓ ${pad(t.instrument, 5)} ${pad(t.signal, 5)} ${pad(t.engine, 9)} exit ${fmtPrice(exitPrice)}  pnl ${fmtMoney(closed.pnl ?? 0)}`);
+      } else {
+        out.push(`  · ${t.instrument} ${t.signal} — already closed (race)`);
+      }
+    } catch (e) {
+      out.push(`  ✗ ${t.instrument} ${t.signal} — ${e.message}`);
+    }
+  }
+
+  if (killedPaper === 0 && killedFut === 0) {
+    out.push('  No matching open positions.');
+  } else {
+    out.push('', `KILLED  ${killedPaper} options + ${killedFut} futures   realized ${fmtMoney(paperPnL + futPnL)}`);
+  }
+  return out.join('\n');
+}
+
 // ─── Public router ──────────────────────────────────────
-export function answerQuestion(text) {
+// Async because `kill` / `flatten` mutate ledgers via dynamic imports. All
+// non-kill handlers stay sync; the async wrapper just lets the router
+// await answerKill when the command requires it.
+export async function answerQuestion(text) {
   if (text == null) return helpText();
   const q = String(text).trim();
   if (!q) return helpText();
@@ -375,6 +463,11 @@ export function answerQuestion(text) {
     : /\bqqq\b/i.test(q) ? 'QQQ'
     : /\biwm\b/i.test(q) ? 'IWM'
     : null;
+
+  // Kill / flatten — WRITE commands, handled first so symbol-routing doesn't swallow them
+  if (/^(kill|flatten)\b/.test(lo) || /\b(flatten)\b/.test(lo)) {
+    return answerKill(sym);
+  }
 
   // Symbol-bound topic combinations come first
   if (sym && /\b(why|block|gate)\b/.test(lo))      return answerWhy(sym);
