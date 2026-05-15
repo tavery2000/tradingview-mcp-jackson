@@ -160,20 +160,33 @@ const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak un
 // P1-11 (2026-05-14 EOD): per-trade capital cap. tradeCapital = entryPremium
 // × contracts × 100 (options); reject if > cap. Default $1,000 for the $1k
 // account discipline. Set 0 to disable cap (back-compat for $25k account).
-// EMERGENCY HOTFIX 2026-05-15: cap split by instrument class. Single
-// CAPITAL_CAP_PER_TRADE=$1k blocked all futures-options entries because
-// 1 contract premium (e.g., NQ1! $59 × 100 = $5,900) exceeds the cap.
-// Equity stays at $1k; futures temporarily at $10k pending operator's
-// final sizing decision (operator requested $3k but MNQ premium check
-// pending). Legacy CAPITAL_CAP_PER_TRADE env still respected as fallback.
+// 2026-05-15 Task 4: per-instrument caps (operator-revised tighter for testing).
+// NQ@$3K means NQ premium $59 × 100 = $5,900 > $3K → rejects NQ entries;
+// operator accepts trade-off (NQ is highest-variance, safer testing without).
+// Legacy CAPITAL_CAP_PER_TRADE and class-bucket CAPITAL_CAP_EQUITY/FUTURES
+// still respected as fallbacks.
 const _legacyCap            = process.env.CAPITAL_CAP_PER_TRADE;
 const CAPITAL_CAP_EQUITY    = parseFloat(process.env.CAPITAL_CAP_EQUITY  || _legacyCap || '1000');
 const CAPITAL_CAP_FUTURES   = parseFloat(process.env.CAPITAL_CAP_FUTURES || '10000');
+const CAPITAL_CAP_PER_INSTRUMENT = {
+  'ES':   parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
+  'NQ':   parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
+  'MES':  parseFloat(process.env.CAPITAL_CAP_MES || '1000'),
+  'MNQ':  parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
+  'ES1!': parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
+  'NQ1!': parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
+  'MES1!':parseFloat(process.env.CAPITAL_CAP_MES || '1000'),
+  'MNQ1!':parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
+  'SPY':  parseFloat(process.env.CAPITAL_CAP_SPY || '1000'),
+  'QQQ':  parseFloat(process.env.CAPITAL_CAP_QQQ || '1000'),
+  'IWM':  parseFloat(process.env.CAPITAL_CAP_IWM || '1000'),
+};
 const _CAP_FUTURES_INSTRUMENTS = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
 function _capForInstrument(inst) {
-  return _CAP_FUTURES_INSTRUMENTS.has((inst || '').toUpperCase())
-    ? CAPITAL_CAP_FUTURES
-    : CAPITAL_CAP_EQUITY;
+  const k = (inst || '').toUpperCase();
+  // Per-instrument cap takes precedence; fall back to class bucket if instrument unknown.
+  if (CAPITAL_CAP_PER_INSTRUMENT[k] != null) return CAPITAL_CAP_PER_INSTRUMENT[k];
+  return _CAP_FUTURES_INSTRUMENTS.has(k) ? CAPITAL_CAP_FUTURES : CAPITAL_CAP_EQUITY;
 }
 // P1-12 (2026-05-14 EOD): 1% account-risk position sizing.
 // contracts = floor((account_balance × ACCOUNT_RISK_PCT) / (stop_distance × multiplier)).
