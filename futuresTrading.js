@@ -534,12 +534,22 @@ function _executeScaleOut(requestId, exitPrice, liveU) {
 
 // ─── STAGE_3 update (peak + trail + R-locks) ───────────────────────────
 
+// 2026-05-15: underlying-price sanity threshold (defaults to 50% from .env)
+// Mirrors paperTrading.js gate. Prevents bogus feeder values from poisoning
+// peakFavorablePrice / R-lock state in Path 2 (futures-direct) trades.
+const _FUT_SANITY_THRESHOLD = parseFloat(process.env.UNDERLYING_SANITY_THRESHOLD || '0.5');
+function _futIsSane(liveU, entryU) {
+  if (!Number.isFinite(liveU) || !Number.isFinite(entryU) || entryU <= 0) return false;
+  return Math.abs(liveU - entryU) / entryU <= _FUT_SANITY_THRESHOLD;
+}
+
 function _updateStage3(requestId, liveU) {
   const locked = acquireLock();
   try {
     const fresh = loadLedger();
     const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
     if (!trade || trade.stage !== 'STAGE_3_TRAILING') return null;
+    if (!_futIsSane(liveU, trade.entryPrice)) return null;
 
     const isCalls = trade.signal === 'CALLS';
     const isFavorable = isCalls
@@ -620,6 +630,13 @@ export function evaluateOpenFutures() {
   for (const t of open) {
     const liveU = readLatestPrice(t.instrument);
     if (liveU == null) continue;   // no fresh price
+    // 2026-05-15: sanity gate. Reject ticks that deviate >50% from entry.
+    if (!_futIsSane(liveU, t.entryPrice)) {
+      try { jError('fut-eval-unsane',
+        `${t.instrument} liveU=${liveU} entryPrice=${t.entryPrice} — tick rejected`,
+        { requestId: t.requestId, liveU, entryPrice: t.entryPrice }); } catch {}
+      continue;
+    }
 
     const isCalls = t.signal === 'CALLS';
 

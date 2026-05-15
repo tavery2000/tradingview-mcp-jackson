@@ -63,6 +63,28 @@ let _dailyLossWarningFiredFor = null;
 // troughU, lastPnl, lastU, ticks}>. Cleared on process restart (acceptable
 // — pre-restart open positions get partial MFE/MAE coverage).
 const _mfeMaeTracker = new Map();
+
+// 2026-05-15 EOD: underlying-price sanity gate. 2026-05-15 had a feeder
+// corruption that returned _qqqPrice=211 (real QQQ ~$711) on a QQQ trade,
+// poisoning the MFE/MAE tracker (peakUnrealizedPnL=$49,757 phantom),
+// STAGE_3 R-lock math (RMultiple ~952×), trailStopPrice (211.07 vs $711),
+// and Black-Scholes exit-price computation (~$499 intrinsic from bogus
+// underlying). One trade landed +$49,757 phantom profit in the ledger.
+//
+// Defense: reject per-tick fed.underlyingPrice when it deviates from the
+// trade's entryUnderlyingPrice by more than UNDERLYING_SANITY_THRESHOLD
+// (default 50%). Real intraday underlying moves don't approach 50% — any
+// deviation that large is a price-feed corruption, not real market action.
+// Rejected ticks skip MFE/MAE update, stop checks, target/trail logic,
+// and stale Black-Scholes pricing for this tick.
+const UNDERLYING_SANITY_THRESHOLD = parseFloat(process.env.UNDERLYING_SANITY_THRESHOLD || '0.5');
+function _isUnderlyingSane(liveU, entryU) {
+  if (!Number.isFinite(liveU) || !Number.isFinite(entryU) || entryU <= 0) return false;
+  const deviation = Math.abs(liveU - entryU) / entryU;
+  return deviation <= UNDERLYING_SANITY_THRESHOLD;
+}
+let _saneRejectsThisRun = 0;
+const _saneRejectLogged = new Set();
 // RULE 2 — daily realized P&L target. On hit, fire TARGET_REACHED once
 // per ET-date per process. Trading CONTINUES (operator default).
 const DAILY_TARGET = parseFloat(process.env.DAILY_TARGET || '0');
@@ -1097,6 +1119,11 @@ function _updateStage3(requestId, liveU) {
     const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
     if (!trade || trade.stage !== 'STAGE_3_TRAILING') return null;
     if (!trade.entryUnderlyingPrice || !trade.stopDistance) return null;
+    // 2026-05-15: sanity-gate defense — refuse to mutate peakFavorablePrice
+    // or R-lock state with a bogus liveU. The eval-loop gate above should
+    // catch this already; this is the second-line of defense in case a
+    // direct caller invokes _updateStage3 with bogus input.
+    if (!_isUnderlyingSane(liveU, trade.entryUnderlyingPrice)) return null;
 
     const isCalls = trade.signal === 'CALLS';
     let dirty = false;
@@ -1462,6 +1489,36 @@ export function evaluateOpenPositions(priceFeeder) {
           reason:      'missing_strike_or_entry_underlying',
         });
         continue;
+      }
+
+      // 2026-05-15 EOD: underlying-price sanity gate. Reject the tick if
+      // fed.underlyingPrice deviates >50% from this trade's entry underlying.
+      // The QQQ-$211 phantom +$49,757 trade on 5/15 was caused by a feeder
+      // returning ~$211 for QQQ when actual was ~$711. Bogus liveU poisoned
+      // peakFavorablePrice, R-locks, trail stops, and BS pricing. This gate
+      // catches the same class of corruption at the entry to the eval loop.
+      const _entryU = t.entryUnderlyingPrice ?? t.entryUnderlying;
+      if (!_isUnderlyingSane(fed.underlyingPrice, _entryU)) {
+        _saneRejectsThisRun++;
+        // Log first occurrence per requestId to avoid spam; rest counted silently
+        if (!_saneRejectLogged.has(t.requestId)) {
+          _saneRejectLogged.add(t.requestId);
+          const deviation = Math.abs(fed.underlyingPrice - _entryU) / _entryU * 100;
+          try { jError('eval-unsane-price',
+            `${t.instrument} liveU=${fed.underlyingPrice} entryU=${_entryU} deviation=${deviation.toFixed(0)}% — tick rejected`,
+            { requestId: t.requestId, instrument: t.instrument, liveU: fed.underlyingPrice, entryU: _entryU, threshold: UNDERLYING_SANITY_THRESHOLD }); } catch {}
+          console.log(`  ${C.red}⚠ UNSANE FEED  ${t.instrument} liveU=${fed.underlyingPrice} vs entryU=${_entryU.toFixed(2)} (${deviation.toFixed(0)}% — tick rejected, MFE/stop/target skipped)${C.reset}`);
+        }
+        positions.push({
+          requestId:   t.requestId,
+          instrument:  t.instrument,
+          direction:   t.signal,
+          fillPrice:   t.fillPrice,
+          burnZone:    burn.current.label,
+          analysis:    null,
+          reason:      'unsane_underlying_feed',
+        });
+        continue;   // skip MFE/MAE update, stop check, target/trail
       }
 
       analysis = monitorPosition({
