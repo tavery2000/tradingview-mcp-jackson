@@ -110,14 +110,14 @@ const RESERVE_VETO_ENABLED  = (process.env.RESERVE_VETO_ENABLED || 'false').toLo
 // futures point-value × multiplier governs $-risk), dollars for equity
 // options (price-distance on the underlying ETF).
 const STOP_POINTS = {
-  'ES1!':  parseFloat(process.env.STOP_ES_POINTS  || '3.0'),
-  'NQ1!':  parseFloat(process.env.STOP_NQ_POINTS  || '10.0'),
-  'MES1!': parseFloat(process.env.STOP_MES_POINTS || '3.0'),
-  'MNQ1!': parseFloat(process.env.STOP_MNQ_POINTS || '10.0'),
-  'ES':    parseFloat(process.env.STOP_ES_POINTS  || '3.0'),
-  'NQ':    parseFloat(process.env.STOP_NQ_POINTS  || '10.0'),
-  'MES':   parseFloat(process.env.STOP_MES_POINTS || '3.0'),
-  'MNQ':   parseFloat(process.env.STOP_MNQ_POINTS || '10.0'),
+  'ES1!':  parseFloat(process.env.STOP_ES_POINTS  || '2.0'),
+  'NQ1!':  parseFloat(process.env.STOP_NQ_POINTS  || '8.0'),
+  'MES1!': parseFloat(process.env.STOP_MES_POINTS || '2.0'),
+  'MNQ1!': parseFloat(process.env.STOP_MNQ_POINTS || '8.0'),
+  'ES':    parseFloat(process.env.STOP_ES_POINTS  || '2.0'),
+  'NQ':    parseFloat(process.env.STOP_NQ_POINTS  || '8.0'),
+  'MES':   parseFloat(process.env.STOP_MES_POINTS || '2.0'),
+  'MNQ':   parseFloat(process.env.STOP_MNQ_POINTS || '8.0'),
 };
 const STOP_DOLLARS = {
   'SPY': parseFloat(process.env.STOP_SPY_DOLLARS || '0.30'),
@@ -135,14 +135,14 @@ function _getStopDistance(instrument) {
 // to compute targetUnderlyingPrice at fill time. STAGE_2 fires when the
 // target is breached → 50% scale-out, BE stop, trail-active on remainder.
 const TARGET_POINTS = {
-  'ES1!':  parseFloat(process.env.TARGET_ES_POINTS  || '6.0'),
-  'NQ1!':  parseFloat(process.env.TARGET_NQ_POINTS  || '20.0'),
-  'MES1!': parseFloat(process.env.TARGET_MES_POINTS || '6.0'),
-  'MNQ1!': parseFloat(process.env.TARGET_MNQ_POINTS || '20.0'),
-  'ES':    parseFloat(process.env.TARGET_ES_POINTS  || '6.0'),
-  'NQ':    parseFloat(process.env.TARGET_NQ_POINTS  || '20.0'),
-  'MES':   parseFloat(process.env.TARGET_MES_POINTS || '6.0'),
-  'MNQ':   parseFloat(process.env.TARGET_MNQ_POINTS || '20.0'),
+  'ES1!':  parseFloat(process.env.TARGET_ES_POINTS  || '4.0'),
+  'NQ1!':  parseFloat(process.env.TARGET_NQ_POINTS  || '16.0'),
+  'MES1!': parseFloat(process.env.TARGET_MES_POINTS || '4.0'),
+  'MNQ1!': parseFloat(process.env.TARGET_MNQ_POINTS || '16.0'),
+  'ES':    parseFloat(process.env.TARGET_ES_POINTS  || '4.0'),
+  'NQ':    parseFloat(process.env.TARGET_NQ_POINTS  || '16.0'),
+  'MES':   parseFloat(process.env.TARGET_MES_POINTS || '4.0'),
+  'MNQ':   parseFloat(process.env.TARGET_MNQ_POINTS || '16.0'),
 };
 const TARGET_DOLLARS = {
   'SPY': parseFloat(process.env.TARGET_SPY_DOLLARS || '0.60'),
