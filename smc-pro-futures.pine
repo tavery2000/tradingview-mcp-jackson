@@ -231,8 +231,14 @@ if not na(pl) and showStruct
 // §14 — early-structure raw signals (HL→BUY, LH→SELL)
 // Compute BEFORE the prevSwing update below, otherwise the comparison is against itself.
 // HL = new pivot low above prior pivot low; LH = new pivot high below prior pivot high.
-bullHLraw = enableHLBuy and not na(pl) and not na(prevSwingLow)  and pl > prevSwingLow
-bearLHraw = enableHLBuy and not na(ph) and not na(prevSwingHigh) and ph < prevSwingHigh
+// P1 (2026-05-15 EOD): trend-state gate suppresses HL/LH inside an active
+// opposing trend. HL→BUY only when trend != -1; LH→SELL only when trend != 1.
+// Liquidity-sweep wicks in opposing trends previously fired alerts that
+// looked like geometric pivots but were structurally false (today's 14:15
+// MES1! catastrophe). Requires the auto-recovery mechanism to un-mutate
+// trend when a CHoCH turns out false (existing logic, unchanged).
+bullHLraw = enableHLBuy and not na(pl) and not na(prevSwingLow)  and pl > prevSwingLow  and trend != -1
+bearLHraw = enableHLBuy and not na(ph) and not na(prevSwingHigh) and ph < prevSwingHigh and trend != 1
 
 // Update prev-swing references (used for next HH/HL/LH/LL classification)
 if not na(ph)

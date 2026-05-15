@@ -222,8 +222,18 @@ if not na(pl) and showStruct
 // §14 — early-structure raw signals (HL→BUY, LH→SELL)
 // Compute BEFORE the prevSwing update below, otherwise the comparison is against itself.
 // HL = new pivot low above prior pivot low; LH = new pivot high below prior pivot high.
-bullHLraw = enableHLBuy and not na(pl) and not na(prevSwingLow)  and pl > prevSwingLow
-bearLHraw = enableHLBuy and not na(ph) and not na(prevSwingHigh) and ph < prevSwingHigh
+//
+// P1 (2026-05-15 EOD): added trend-state gate to suppress false-break entries.
+// The 14:15 MES1! catastrophe came from an HL print inside an active bearish
+// trend (trend == -1) — Pine's pure-geometry HL check fired CALLS even though
+// the prior CHoCH was bearish and the HL was a liquidity sweep wick about to
+// reverse. Now: HL→BUY only fires when trend is bullish (1) or undefined (0).
+// LH→SELL only fires when trend is bearish (-1) or undefined (0).
+// HL signals during an active bear trend require a bullish CHoCH FIRST
+// (which flips trend to 1); the next HL then becomes a legitimate
+// continuation-entry, not a fade-the-downtrend trap.
+bullHLraw = enableHLBuy and not na(pl) and not na(prevSwingLow)  and pl > prevSwingLow  and trend != -1
+bearLHraw = enableHLBuy and not na(ph) and not na(prevSwingHigh) and ph < prevSwingHigh and trend != 1
 
 // Update prev-swing references (used for next HH/HL/LH/LL classification)
 if not na(ph)
