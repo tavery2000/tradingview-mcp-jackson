@@ -43,6 +43,23 @@ import { dirname, join } from 'path';
 import { orderGate, sendOrder, closePosition } from './paperTrading.js';
 import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { evaluateCounterTrend }               from './signalConfidence.js';
+// Path 2 (2026-05-15 EOD): in-HANK futures-direct paper dispatch.
+// Loaded conditionally so legacy options-only deploys don't pay the cost.
+let futuresTrading = null;
+const _FUTURES_DIRECT_ENABLED = (process.env.FUTURES_DIRECT_ENABLED || 'false').toLowerCase() === 'true';
+const _FUTURES_DIRECT_INSTRUMENTS = new Set(
+  (process.env.FUT_INSTRUMENTS || 'MES1!')
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+);
+if (_FUTURES_DIRECT_ENABLED) {
+  try {
+    futuresTrading = await import('./futuresTrading.js');
+    console.log(`  [WEBHOOK] futures-direct dispatch ENABLED for ${[..._FUTURES_DIRECT_INSTRUMENTS].join(',')}`);
+  } catch (e) {
+    console.error(`  [WEBHOOK] FAILED to load futuresTrading.js: ${e.message}`);
+    futuresTrading = null;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -363,6 +380,26 @@ async function handlePineAlert(req, res) {
     invalidationLevel:      invalidation_level,
     structureType:          structure_type,
   };
+
+  // Path 2 (2026-05-15): futures-direct dispatch routing. When enabled
+  // AND the instrument is in the allowlist, route to futuresTrading
+  // (separate ledger, point-based stops, scale-out + trail per locked
+  // decisions). Equity (SPY/QQQ/IWM) and other non-futures instruments
+  // continue through paperTrading.sendOrder unchanged.
+  if (futuresTrading && _FUTURES_DIRECT_INSTRUMENTS.has(instrument.toUpperCase())) {
+    let futReqId, futTrade;
+    try {
+      futReqId = futuresTrading.futuresOrderGate.createRequest({ signal: direction, engine });
+      futTrade = futuresTrading.placeFuturesOrder(consensus, futReqId);
+    } catch (e) {
+      jError('WEBHOOK', 'PLACE_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument, direction, engine, price, futReqId });
+      return send(res, 500, { ok: false, reason: 'PLACE_FUTURES_ORDER_THREW', error: e.message });
+    }
+    if (futTrade && futTrade.vetoed) {
+      return send(res, 200, { ok: false, reason: 'FUT_VETOED', detail: futTrade.reason });
+    }
+    return send(res, 200, { ok: true, dispatch: 'futures-direct', requestId: futReqId, tier: futTrade?.tier, contracts: futTrade?.contracts });
+  }
 
   // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
   // uncaught throw here (e.g., paper-ledger.json lock contention,

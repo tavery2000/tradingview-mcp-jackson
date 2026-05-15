@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "created": "2026-05-15T17:59:27.475Z",
+  "mode": "PAPER",
+  "instruments": [
+    "MES1!"
+  ],
+  "balance": 1000,
+  "startBalance": 1000,
+  "totalPnL": 0,
+  "totalTrades": 0,
+  "wins": 0,
+  "losses": 0,
+  "trades": [],
+  "dailyPnL": {},
+  "tierStats": {
+    "A": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "pnl": 0
+    },
+    "B": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "pnl": 0
+    },
+    "C": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "pnl": 0
+    }
+  }
+}
