@@ -2889,6 +2889,27 @@ async function poll() {
     }));
   } catch {}
 
+  // P0 (2026-05-15 EOD): 1H structural bias for counter-trend gate v2.
+  // Catches today's bug: macro4H=UP but 1H structurePattern was bearish
+  // (LH_LL), and an HL CALLS print inside that downtrend was a liquidity
+  // sweep, not a real continuation. 1H gate blocks when trendBias or
+  // structurePattern opposes signal direction.
+  let _spy1H = { trendBias: 'NEUTRAL', structurePattern: 'NEUTRAL' };
+  if (barCache.SPY) {
+    try {
+      const bars1H = await barCache.SPY.get('60');
+      if (bars1H && bars1H.length) {
+        const a = analyze1H(bars1H, spy?.price);
+        _spy1H = { trendBias: a.trendBias, structurePattern: a.structurePattern };
+      }
+    } catch {}
+  }
+  try {
+    writeFileSync(join(__dirname, 'macro1h-spy.json'), JSON.stringify({
+      instrument: 'SPY', ..._spy1H, ts: Date.now(), time: getETString(),
+    }));
+  } catch {}
+
   // Triple engine: TREND + FADE + STRUCTURE
   const trendSig     = trendEngine(bulls, bears, spy, spySummary, isChop, w3Score, spy.tick);
   const fadeSig      = isTradingHours() ? fadeEngine(spy) : null;

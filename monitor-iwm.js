@@ -1208,6 +1208,23 @@ async function poll() {
     }));
   } catch {}
 
+  // P0 (2026-05-15 EOD): 1H structural bias for counter-trend gate v2.
+  let _iwm1H = { trendBias: 'NEUTRAL', structurePattern: 'NEUTRAL' };
+  if (barCache) {
+    try {
+      const bars1H = await barCache.get('60');
+      if (bars1H && bars1H.length) {
+        const a = analyze1H(bars1H, etf?.price);
+        _iwm1H = { trendBias: a.trendBias, structurePattern: a.structurePattern };
+      }
+    } catch {}
+  }
+  try {
+    writeFileSync(join(__dirname, 'macro1h-iwm.json'), JSON.stringify({
+      instrument: 'IWM', ..._iwm1H, ts: Date.now(), time: getETString(),
+    }));
+  } catch {}
+
   // Journal — IWM-scoped poll snapshot + actionable signal records
   try {
     jPoll({

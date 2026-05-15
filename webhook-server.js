@@ -308,6 +308,8 @@ async function handlePineAlert(req, res) {
   // Mode = off | down_weight (default) | block — set via COUNTER_TREND_MODE env.
   let _macro4H    = 'UNKNOWN';
   let _macro4HSrc = 'no-lookup';
+  let _macro1H    = { trendBias: 'NEUTRAL', structurePattern: 'NEUTRAL' };
+  let _macro1HSrc = 'no-lookup';
   try {
     const family =
       instrument === 'SPY'  || instrument === 'ES1!' || instrument === 'MES1!' ? 'spy' :
@@ -323,6 +325,20 @@ async function handlePineAlert(req, res) {
         _macro4H    = data.macro4H ?? 'UNKNOWN';
         _macro4HSrc = `${family}:${ageMin.toFixed(1)}min`;
       }
+      // P0 (2026-05-15 EOD): read 1H bias for the structural gate
+      try {
+        const f1H = join(__dirname, `macro1h-${family}.json`);
+        const d1H = JSON.parse(readFileSync(f1H, 'utf8'));
+        const age1H = (Date.now() - (d1H.ts ?? 0)) / 60000;
+        if (age1H > 5) {
+          _macro1HSrc = `stale:${age1H.toFixed(1)}min`;
+        } else {
+          _macro1H = { trendBias: d1H.trendBias ?? 'NEUTRAL', structurePattern: d1H.structurePattern ?? 'NEUTRAL' };
+          _macro1HSrc = `${family}:${age1H.toFixed(1)}min`;
+        }
+      } catch (e) {
+        _macro1HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
+      }
     } else {
       _macro4HSrc = `no-family-mapping:${instrument}`;
     }
@@ -330,15 +346,18 @@ async function handlePineAlert(req, res) {
     _macro4HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
   }
 
-  // P1-7 (2026-05-14 EOD): pass instrument so evaluateCounterTrend can
-  // resolve mode by class (COUNTER_TREND_FUTURES_MODE vs EQUITY_MODE).
-  const ctGate = evaluateCounterTrend(_macro4H, direction, engine, instrument);
+  // P1-7 (2026-05-14) + P0 (2026-05-15): pass instrument AND macro1H so
+  // evaluateCounterTrend can apply instrument-class mode AND block on
+  // opposing 1H trendBias / structurePattern (today's 14:15 MES1! bug).
+  const ctGate = evaluateCounterTrend(_macro4H, direction, engine, instrument, _macro1H);
   if (ctGate.action === 'block') {
     jGateBlock(engine, instrument, direction, 'COUNTER_TREND_BLOCK', {
-      macro4H: _macro4H, macro4HSrc: _macro4HSrc, mode: 'block',
+      macro4H: _macro4H, macro4HSrc: _macro4HSrc,
+      macro1H: _macro1H, macro1HSrc: _macro1HSrc,
+      mode: 'block', source: ctGate.source ?? '4H',
       instrumentClass: ctGate.instrumentClass ?? null,
     });
-    return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H });
+    return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H, macro1H: _macro1H, source: ctGate.source ?? '4H' });
   }
 
   // Select contract (strike + expiry)

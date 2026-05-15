@@ -287,10 +287,46 @@ export function gateMacro4H(signal, ctx) {
 // FADE engine exempted (counter-trend by design). RANGING / UNKNOWN never trigger.
 const _FUTURES_SET = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
 
-export function evaluateCounterTrend(macro4H, direction, engine, instrument = null) {
+// P0 (2026-05-15 EOD): structurePattern opposes signal when
+//   CALLS + (LH_LL | HH_LL | LH_HL) — bearish or mixed-bearish 1H
+//   PUTS  + (HH_HL | LH_HL | HH_LL) — bullish or mixed-bullish 1H
+// LH_HL and HH_LL are mixed; counted as opposing because they indicate
+// structural ambiguity, not clean trend support.
+function _oneHourOpposesSignal(macro1H, direction) {
+  if (!macro1H || direction == null) return false;
+  const tb = macro1H.trendBias;
+  const sp = macro1H.structurePattern;
+  if (direction === 'CALLS') {
+    if (tb === 'DOWN') return true;
+    if (sp === 'LH_LL' || sp === 'HH_LL' || sp === 'LH_HL') return true;
+  } else if (direction === 'PUTS') {
+    if (tb === 'UP') return true;
+    if (sp === 'HH_HL' || sp === 'LH_HL' || sp === 'HH_LL') return true;
+  }
+  return false;
+}
+
+export function evaluateCounterTrend(macro4H, direction, engine, instrument = null, macro1H = null) {
   const pass = { action: 'pass', multiplier: 1.0 };
   if (!direction) return pass;
   if (engine === 'FADE') return pass;
+
+  // P0 (2026-05-15 EOD): 1H structural counter-trend takes precedence over
+  // 4H gate. When 1H trendBias OR structurePattern opposes signal direction,
+  // block REGARDLESS of 4H or instrument class. The 1H is closer to
+  // execution timeframe; today's 14:15 MES1! catastrophe came from an HL
+  // CALLS print inside a 1H downtrend that 4H (UP) failed to catch.
+  const oneHourEnabled = (process.env.COUNTER_TREND_1H_ENABLED || 'true').toLowerCase() === 'true';
+  if (oneHourEnabled && _oneHourOpposesSignal(macro1H, direction)) {
+    const instUpper = (instrument || '').toUpperCase();
+    const isFutures = _FUTURES_SET.has(instUpper);
+    return {
+      action: 'block', multiplier: 0,
+      instrumentClass: isFutures ? 'futures' : 'equity',
+      source: '1H',
+      macro1H,
+    };
+  }
 
   // Resolve mode by instrument class
   const instUpper = (instrument || '').toUpperCase();
@@ -311,12 +347,12 @@ export function evaluateCounterTrend(macro4H, direction, engine, instrument = nu
     (macro4H === 'DOWN' && direction === 'CALLS');
   if (!isCounter) return pass;
 
-  if (mode === 'block') return { action: 'block', multiplier: 0, instrumentClass: isFutures ? 'futures' : 'equity' };
+  if (mode === 'block') return { action: 'block', multiplier: 0, instrumentClass: isFutures ? 'futures' : 'equity', source: '4H' };
 
   // down_weight (default)
   const raw = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
   const mult = Number.isFinite(raw) && raw > 0 && raw <= 1.0 ? raw : 0.6;
-  return { action: 'down_weight', multiplier: mult, instrumentClass: isFutures ? 'futures' : 'equity' };
+  return { action: 'down_weight', multiplier: mult, instrumentClass: isFutures ? 'futures' : 'equity', source: '4H' };
 }
 
 // ─── VWAP wrong-side gate ───────────────────────────────────────────────
