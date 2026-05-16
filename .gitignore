@@ -20,6 +20,7 @@ logs/
 paper-ledger.json
 profit-protection-state.json
 pre-switch-kill-state.json
+calibration-scheduler-state.json
 portfolio-theta.json
 voice-queue.json
 daily-bias.json

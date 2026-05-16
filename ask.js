@@ -359,11 +359,53 @@ function helpText() {
     '  moc                       MOC ALERT entries + hank_stats.moc summary',
     '  theta / greeks / burn     portfolio theta + per-position greeks/burn-zone',
     '  kill [SYM] / flatten      ⚠ CLOSE all open positions (optional symbol filter)',
+    '  calibrate / calibration   show calibration cache stats',
+    '  reload calibration        ⚠ force-reload calibration-lookup.json from disk',
+    '  rebuild calibration       ⚠ run analyze-calibration.js NOW (out of schedule)',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
     '  combine: "why spy"  "spy flow"  "spy"  "flow qqq"  "kill iwm"',
   ].join('\n');
+}
+
+// ─── Calibration handlers ──────────────────────────────────
+// `calibrate` / `calibration` — read-only stats (cache size, mtime, version).
+// `reload calibration` — bypass mtime throttle, force re-read of JSON.
+// `rebuild calibration` — spawn analyze-calibration.js NOW (out of schedule).
+async function answerCalibration() {
+  let getCacheStats;
+  try { ({ getCacheStats } = await import('./calibrationCache.js')); }
+  catch (e) { return `calibrationCache import failed: ${e.message}`; }
+  const s = getCacheStats();
+  const out = [
+    'CALIBRATION CACHE',
+    `  loaded       ${s.loaded ? 'yes' : 'no'}`,
+    `  entries      ${s.entries}`,
+    `  by level     L1=${s.by_level?.[1] ?? 0}  L2=${s.by_level?.[2] ?? 0}  L3=${s.by_level?.[3] ?? 0}  L4=${s.by_level?.[4] ?? 0}  L5=${s.by_level?.[5] ?? 0}`,
+    `  file mtime   ${s.mtime || 'n/a'}`,
+    `  last read    ${s.last_read_at || 'n/a'}`,
+    `  version      ${s.meta?.version || 'n/a'}`,
+    `  trades-in    ${s.meta?.total_trades_after_exclusions ?? 'n/a'}`,
+    `  file         ${s.file}`,
+  ];
+  return out.join('\n');
+}
+async function answerReloadCalibration() {
+  try {
+    const { reloadCache, getCacheStats } = await import('./calibrationCache.js');
+    const ok = reloadCache();
+    const s = getCacheStats();
+    return `RELOAD CALIBRATION ${ok ? '✓' : '✗ (file missing or invalid)'}\n  entries=${s.entries}  mtime=${s.mtime || 'n/a'}`;
+  } catch (e) { return `reload failed: ${e.message}`; }
+}
+async function answerRebuildCalibration() {
+  try {
+    const { rebuildNow } = await import('./calibrationScheduler.js');
+    const r = await rebuildNow();
+    if (r.ok) return `REBUILD CALIBRATION ✓  cells=${r.cellsCount}  duration=${r.durationMs}ms`;
+    return `REBUILD CALIBRATION ✗  code=${r.code}  duration=${r.durationMs}ms\n  ${r.stderr || ''}`;
+  } catch (e) { return `rebuild failed: ${e.message}`; }
 }
 
 // ─── Kill / flatten handler ────────────────────────────────
@@ -468,6 +510,10 @@ export async function answerQuestion(text) {
   if (/^(kill|flatten)\b/.test(lo) || /\b(flatten)\b/.test(lo)) {
     return answerKill(sym);
   }
+  // Calibration commands (must come before generic symbol-routing)
+  if (/^rebuild\s+calibration\b/.test(lo))    return answerRebuildCalibration();
+  if (/^reload\s+calibration\b/.test(lo))     return answerReloadCalibration();
+  if (/^(calibrate|calibration)\b/.test(lo))  return answerCalibration();
 
   // Symbol-bound topic combinations come first
   if (sym && /\b(why|block|gate)\b/.test(lo))      return answerWhy(sym);

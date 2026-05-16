@@ -42,6 +42,7 @@ import {
 } from './tier.js';
 import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
 import { isTradingPaused } from './preSwitchKill.js';
+import { lookupCalibration } from './calibrationCache.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -777,6 +778,85 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason: _psk.reason };
   }
 
+  // 2026-05-16 Phase 1 Additional: confidence calibration lookup. Reads
+  // data/calibration-lookup.json (built by analyze-calibration.js). When
+  // CALIBRATION_ENABLED=true (default), the lookup runs and the decision
+  // is journaled on every entry. When CALIBRATION_BLOCK_ENABLED=true,
+  // BLOCK actions actually veto the trade. When CALIBRATION_APPLY_MULTIPLIER=
+  // true, sizing-tier multipliers actually scale the contract count.
+  // Default config: lookup + log only (dry-run) so operator can review the
+  // calibration deliverable before live sizing changes go in.
+  const _calibEnabled       = (process.env.CALIBRATION_ENABLED || 'true').toLowerCase() === 'true';
+  const _calibBlockEnabled  = (process.env.CALIBRATION_BLOCK_ENABLED || 'false').toLowerCase() === 'true';
+  const _calibApplyMult     = (process.env.CALIBRATION_APPLY_MULTIPLIER || 'false').toLowerCase() === 'true';
+  let _calibDecision = null;
+  if (_calibEnabled) {
+    // Derive the same time-bucket + session-type the analyzer uses.
+    const _etMins = (() => {
+      const t = new Date().toLocaleTimeString('en-US', { timeZone:'America/New_York', hour12:false, hour:'2-digit', minute:'2-digit' });
+      const [h, m] = t.split(':').map(Number); return h * 60 + m;
+    })();
+    const _timeBucket = (() => {
+      const m = _etMins;
+      if (m < 9 * 60 + 30) return '04:00-09:30';
+      if (m < 10 * 60)     return '09:30-10:00';
+      if (m < 11 * 60)     return '10:00-11:00';
+      if (m < 12 * 60)     return '11:00-12:00';
+      if (m < 13 * 60)     return '12:00-13:00';
+      if (m < 14 * 60)     return '13:00-14:00';
+      if (m < 15 * 60)     return '14:00-15:00';
+      if (m < 15 * 60 + 30) return '15:00-15:30';
+      if (m < 16 * 60)     return '15:30-16:00';
+      if (m < 18 * 60)     return '16:00-18:00';
+      if (m < 22 * 60)     return '18:00-22:00';
+      return '22:00-04:00';
+    })();
+    const _dayShort = new Date().toLocaleDateString('en-US', { timeZone:'America/New_York', weekday: 'short' });
+    const _dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[_dayShort];
+    const _sessionType = (_dow === 0 || _dow === 6) ? 'GLOBEX_NIGHT'
+      : (_etMins >= 9 * 60 + 30 && _etMins < 16 * 60) ? 'REGULAR'
+      : (_etMins >= 4 * 60 && _etMins < 9 * 60 + 30)  ? 'PREMARKET'
+      : (_etMins >= 16 * 60 && _etMins < 22 * 60)     ? 'GLOBEX_EVENING'
+      : 'GLOBEX_NIGHT';
+    try {
+      _calibDecision = lookupCalibration({
+        engine:     consensus.engine,
+        conf:       consensus.confidence,
+        macro4H:    consensus.macro4H,
+        instrument: consensus.instrument,
+        timeBucket: _timeBucket,
+        sessionType:_sessionType,
+        direction:  consensus.signal,
+      });
+      // Always log the decision — gives Phase 3 diagnostics a paper trail.
+      jAlert('info', 'CALIBRATION_LOOKUP', {
+        requestId,
+        engine: consensus.engine, instrument: consensus.instrument, direction: consensus.signal,
+        calibration_key_used: _calibDecision.key,
+        calibration_level: _calibDecision.level,
+        calibration_multiplier: _calibDecision.multiplier,
+        calibration_action: _calibDecision.action,
+        calibration_blocked_reason: _calibDecision.blocked_reason,
+        calibration_fallback_default: _calibDecision.fallback,
+        apply_multiplier: _calibApplyMult,
+        block_enabled: _calibBlockEnabled,
+      });
+      // Optional veto path (off by default until operator review)
+      if (_calibBlockEnabled && _calibDecision.action === 'block') {
+        const reason = `CONFIDENCE_CALIBRATION_BLOCK (${_calibDecision.blocked_reason}; key=${_calibDecision.key}, L${_calibDecision.level}, N=${_calibDecision.sample_size})`;
+        orderGate.markVetoed(requestId, reason);
+        jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'CONFIDENCE_CALIBRATION_BLOCK', {
+          key: _calibDecision.key, level: _calibDecision.level, blocked_reason: _calibDecision.blocked_reason,
+          win_rate: _calibDecision.win_rate, profit_factor: _calibDecision.profit_factor,
+        });
+        console.log(`  ${C.red}🛑 ${reason}${C.reset}`);
+        return { vetoed: true, reason };
+      }
+    } catch (e) {
+      try { jError('CALIBRATION', 'lookup-failed', { requestId, error: e.message }); } catch {}
+    }
+  }
+
   // 2026-05-14 EOD: All concurrency / correlation / opposition gates removed
   // permanently per RULE 1. Single-instrument multi-direction is allowed,
   // family correlations are unconstrained, and there is no max-open count.
@@ -814,6 +894,18 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     return { vetoed: true, reason };
   }
   contracts = Math.min(contracts, MAX_CONTRACTS);
+
+  // 2026-05-16 Phase 1 Additional: calibration sizing multiplier. Only
+  // applied when CALIBRATION_APPLY_MULTIPLIER=true (default false, dry-run).
+  // Floored at 1 so we never go below a single contract; ceilinged at
+  // MAX_CONTRACTS so 1.5× tier can't bust the safety cap.
+  if (_calibApplyMult && _calibDecision && _calibDecision.action !== 'block' && _calibDecision.action !== 'default') {
+    const _before = contracts;
+    contracts = Math.max(1, Math.min(MAX_CONTRACTS, Math.round(contracts * _calibDecision.multiplier)));
+    if (contracts !== _before) {
+      console.log(`  ${C.cyan}⊙ CALIBRATION_SIZED  ${_before}c → ${contracts}c  (${_calibDecision.action}, ${_calibDecision.multiplier}×, key=${_calibDecision.key} L${_calibDecision.level})${C.reset}`);
+    }
+  }
 
   // ── P1-11 (2026-05-14 EOD): per-trade capital cap ──────────────────
   // tradeCapital = entryPremium × contracts × 100  (options-on-anything)

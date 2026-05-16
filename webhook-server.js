@@ -44,6 +44,7 @@ import { orderGate, sendOrder, closePosition } from './paperTrading.js';
 import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { evaluateCounterTrend }               from './signalConfidence.js';
 import { startPreSwitchScheduler }            from './preSwitchKill.js';
+import { startCalibrationScheduler }          from './calibrationScheduler.js';
 // Path 2 (2026-05-15 EOD): in-HANK futures-direct paper dispatch.
 // Loaded conditionally so legacy options-only deploys don't pay the cost.
 let futuresTrading = null;
@@ -526,6 +527,8 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK] Counter-trend gates: futures=${_ctFut}  equity=${_ctEq}  downweight×${_ctMult}`);
   // 2026-05-15 Task 7: arm the pre-12:00-ET kill scheduler. Idempotent.
   startPreSwitchScheduler();
+  // 2026-05-16 Phase 1 Additional: arm the daily calibration rebuild.
+  startCalibrationScheduler();
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║
