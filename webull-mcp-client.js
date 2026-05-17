@@ -20,7 +20,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
@@ -154,9 +154,42 @@ function _spawnEnv() {
   return env;
 }
 
+function _checkUvxHealth() {
+  // 2026-05-17: Windows Defender / antivirus has been observed truncating
+  // uvx.exe to 0 bytes (seen 14:28 ET — file went from valid PE32 to empty
+  // between two restarts of HANK). Surface this clearly instead of letting
+  // node's spawn return cryptic EFTYPE.
+  try {
+    if (!MCP_COMMAND || MCP_COMMAND === 'uvx') return { ok: true, note: 'using bare uvx from PATH' };
+    if (!existsSync(MCP_COMMAND)) {
+      return { ok: false, reason: 'missing', msg: `uvx.exe not found at ${MCP_COMMAND} — reinstall with: pip install --force-reinstall uv` };
+    }
+    const st = statSync(MCP_COMMAND);
+    if (st.size === 0) {
+      return { ok: false, reason: 'empty', msg: `uvx.exe is 0 bytes at ${MCP_COMMAND} — likely quarantined by antivirus. Recover with: pip install --force-reinstall uv  (then add Defender exclusion for Scripts/ dir)` };
+    }
+    if (st.size < 1000) {
+      return { ok: true, note: `uvx.exe is suspiciously small (${st.size} bytes) — may be a stub` };
+    }
+    return { ok: true, size: st.size };
+  } catch (e) {
+    return { ok: false, reason: 'stat-failed', msg: e.message };
+  }
+}
+
 async function _connect() {
   if (_connecting || _connected) return;
   _connecting = true;
+  // Pre-flight: check uvx.exe is alive before asking node to spawn it
+  const health = _checkUvxHealth();
+  if (!health.ok) {
+    _connecting = false;
+    _heartbeat('uvx-unhealthy', { reason: health.reason });
+    try { jError('WEBULL_MCP', 'uvx-unhealthy', { reason: health.reason, msg: health.msg, path: MCP_COMMAND }); } catch {}
+    console.error(`  [webull-mcp] ⚠ ${health.msg}`);
+    _scheduleReconnect();
+    return;
+  }
   try {
     _transport = new StdioClientTransport({
       command: MCP_COMMAND,
