@@ -379,7 +379,32 @@ export function getLastVerifyResponse() { return _verifyLastResponse; }
 let _futuresSymbolMap = new Map();
 let _futuresResolverLastResponse = null;
 
+// 2026-05-17 18:45 ET hardcoded fallback.
+// `get_futures_instruments(symbols='ES,NQ,MES,MNQ')` returns "No data
+// available" — wrong parameter shape. Per Webull docs there are three
+// separate tools: get_futures_products / get_futures_instruments /
+// get_futures_instrument_by_code, likely needs product_code per call.
+// Dynamic resolver investigation deferred to Monday; hardcode the
+// May 2026 front-month codes (M6 = June 2026) to unblock tonight's trades.
+// Operator: set FUTURES_RESOLVER_HARDCODE=false in .env to re-attempt
+// dynamic resolution after schema is figured out.
+const _HARDCODED_FUTURES_MAP = new Map([
+  ['ES',    'ESM6'],   ['ES1!',  'ESM6'],
+  ['NQ',    'NQM6'],   ['NQ1!',  'NQM6'],
+  ['MES',   'MESM6'],  ['MES1!', 'MESM6'],
+  ['MNQ',   'MNQM6'],  ['MNQ1!', 'MNQM6'],
+]);
+
 async function _resolveFuturesSymbols() {
+  const useHardcode = (process.env.FUTURES_RESOLVER_HARDCODE || 'false').toLowerCase() === 'true';
+  if (useHardcode) {
+    _futuresSymbolMap = new Map(_HARDCODED_FUTURES_MAP);
+    console.log(`  [webull-mcp] futures resolver: HARDCODED FALLBACK (${_futuresSymbolMap.size} entries) ESM6/NQM6/MESM6/MNQM6`);
+    console.log(`  [webull-mcp]   ⚠ Static map. Quarterly contract roll (next: ~2026-06-15) will require update`);
+    console.log(`  [webull-mcp]   To re-attempt dynamic resolver: set FUTURES_RESOLVER_HARDCODE=false`);
+    try { jAlert('info', 'WEBULL_FUTURES_SYMBOLS_HARDCODED', { entries: Object.fromEntries(_futuresSymbolMap) }); } catch {}
+    return true;
+  }
   try {
     const resp = await _callTool('get_futures_instruments', { symbols: 'ES,NQ,MES,MNQ' });
     _futuresResolverLastResponse = resp;
