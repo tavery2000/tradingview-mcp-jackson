@@ -1,5 +1,12 @@
 # HANK Session Handoff — 2026-05-17 EOD
 
+> **⚠ SUPERSEDED FOR §7 (Upcoming Timeline):**
+> The week-ahead timeline in §7 below is replaced by
+> [`docs/HANK_WEEKLY_PLAN_2026-05-18.md`](HANK_WEEKLY_PLAN_2026-05-18.md)
+> (locked 2026-05-17 17:35 ET). Read the weekly plan FIRST for the
+> authoritative day-by-day execution order; use this handoff doc for
+> state at Sun EOD + code/file map + known issues + lessons learned.
+
 > **For a new Claude Code session.** This doc captures everything an incoming session
 > needs to pick up where 2026-05-17's marathon ended. Read top-to-bottom; the
 > "Immediate Next Action" section tells you exactly what's pending operator validation

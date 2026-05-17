@@ -2,6 +2,14 @@
 
 **Author:** Claude Code (Phase 1: complete — A through E plus locked decisions per operator)
 **Status:** No code changes. Pure analysis. Implementation starts Monday 5/18.
+
+> **⚠ §D.2 TIMELINE SUPERSEDED:** The week-ahead schedule in §D.2 is replaced by
+> [`docs/HANK_WEEKLY_PLAN_2026-05-18.md`](HANK_WEEKLY_PLAN_2026-05-18.md)
+> (locked 2026-05-17 17:35 ET). Three material changes: calibration multiplier+block
+> reported LIVE (verify Monday), Vision Phase 5 moves Sat 5/23 → Fri 5/22 17:30 ET,
+> Webull market-data Phase 1 lands Fri 5/22 15:00 ET. Sections A-C, B.5, D.1, D.3,
+> D.4, E.1-E.9 of this doc remain authoritative for ARCHITECTURE; only §D.2's
+> day-by-day timeline is superseded.
 **Source repos:**
 - [webull-inc/webull-mcp-server](https://github.com/webull-inc/webull-mcp-server) — **PRIMARY target** (last release v0.1.1 dated 2026-04-18; 2 releases, 3 commits visible — newly published)
 - [webull-inc/webull-openapi-python-sdk](https://github.com/webull-inc/webull-openapi-python-sdk) — pinned dependency of MCP server (v2.0.5)
