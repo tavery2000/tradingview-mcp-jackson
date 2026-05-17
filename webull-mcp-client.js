@@ -215,8 +215,24 @@ async function _connect() {
     _connecting = false;
     _reconnectAttempts = 0;
     _heartbeat('connected', { tools: [..._availableTools].slice(0, 20) });
-    try { jAlert('info', 'WEBULL_MCP_CONNECTED', { toolCount: _availableTools.size, env: process.env.WEBULL_ENVIRONMENT || 'uat' }); } catch {}
-    console.log(`  [webull-mcp] CONNECTED — ${_availableTools.size} tools available, env=${process.env.WEBULL_ENVIRONMENT || 'uat'}`);
+    const _env = (process.env.WEBULL_ENVIRONMENT || 'uat').toLowerCase();
+    try { jAlert('info', 'WEBULL_MCP_CONNECTED', { toolCount: _availableTools.size, env: _env }); } catch {}
+    // 2026-05-17 EOD: LOUD environment banner — earlier today's session
+    // burned hours because env=prod hit a live (empty) account when the
+    // operator intent was paper. Make it impossible to miss which env is
+    // active at every reconnect.
+    if (_env === 'prod') {
+      console.log(`  ████████████████████████████████████████████████████████`);
+      console.log(`  ██  ⚠  WEBULL MCP ENVIRONMENT: PROD (LIVE TRADING)  ⚠  ██`);
+      console.log(`  ██  Real money. Real orders. Real fills.                ██`);
+      console.log(`  ████████████████████████████████████████████████████████`);
+    } else {
+      console.log(`  ────────────────────────────────────────────────────────`);
+      console.log(`    WEBULL MCP ENVIRONMENT: ${_env.toUpperCase()} (sandbox / paper trading)`);
+      console.log(`    Endpoint: us-openapi-alb.uat.webullbroker.com`);
+      console.log(`  ────────────────────────────────────────────────────────`);
+    }
+    console.log(`  [webull-mcp] CONNECTED — ${_availableTools.size} tools available, env=${_env}`);
     // Fire paper-mode verification in the background — don't block connect on it
     _verifyPaperMode().then(() => {
       // After paper verify, populate the futures symbol map (TV '1!' → broker front-month code)
