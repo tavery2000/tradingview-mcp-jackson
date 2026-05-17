@@ -79,8 +79,16 @@ function _findUvxPath() {
   return 'uvx';
 }
 const MCP_COMMAND = _findUvxPath();
-const MCP_ARGS    = (process.env.WEBULL_MCP_ARGS || 'webull-openapi-mcp@0.1.1,serve').split(',');
+// 2026-05-17 PATH A fix: pin to Python 3.12. Operator's system Python is
+// 3.14 (cp314); grpcio==1.69.0 (transitive dep of webull-openapi-mcp) has
+// no pre-built wheel for 3.14 and requires MSVC Build Tools to compile
+// from source. uv's --python 3.12 auto-downloads a managed 3.12 interpreter
+// (one-time ~30MB) and uses it for this MCP environment only — operator's
+// system Python 3.14 untouched.
+// Operator override: WEBULL_MCP_ARGS comma-separated list, OR UV_PYTHON env var.
+const MCP_ARGS    = (process.env.WEBULL_MCP_ARGS || '--python,3.12,webull-openapi-mcp@0.1.1,serve').split(',');
 console.log(`  [webull-mcp] command resolved: ${MCP_COMMAND}`);
+console.log(`  [webull-mcp] args:             ${MCP_ARGS.join(' ')}`);
 
 let _client = null;
 let _transport = null;
