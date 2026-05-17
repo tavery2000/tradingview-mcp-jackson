@@ -195,18 +195,25 @@ MQTT path:
 
 Net: roughly two-thirds of `webull.js` deleted. Most of what remains is the streaming path that MCP doesn't cover.
 
-### B.5 — Path 2 futures-direct (`futuresTrading.js`)
+### B.5 — Path 2 futures-direct (`futuresTrading.js`) — RETIRED
 
-**Q3 answered: KEEP AS PAPER HARNESS.** Path 2 stays in place and gains a new role as the parity check against MCP futures execution. Implementation:
+**Final correction:** Path 2 is **retired entirely**, not kept as parity harness. Single source of truth = MCP. Implementation Sunday 5/17:
 
-- Live futures route through new MCP `place_futures_order` tool in a parallel `futuresLive.js` module
-- Path 2 keeps writing to `futures-ledger.json` in parallel as a shadow ledger
-- New `futures-parity-monitor.js` compares Path 2 vs MCP fills tick-for-tick; logs `FUTURES_PARITY_DIVERGENCE` when they diverge
-- Roll Guard + Spread Guard (Thu 5/21 work) route through MCP, validate against Path 2
-- Retire Path 2 only after **30+ consecutive days** of live MCP futures with zero divergence
-- Instant fallback path: if MCP futures has bugs, operator flips `WEBULL_MCP_FUTURES_DISABLED=true` → futures fall back to Path 2 — paper-only, zero P&L impact while issue is fixed
+- Remove `futuresTrading.js` import from `webhook-server.js`
+- Remove futures routing branch (`_FUTURES_DIRECT_INSTRUMENTS` block) from webhook handler
+- Archive `futuresTrading.js` → `_archive/2026-05-17-futures-direct-retirement/futuresTrading.js`
+- Archive `futures-status.js` (the Window 9 read-only tail) — re-wire it later to read MCP-side futures state, or replace with MCP-fed dashboard widget
+- All futures execution flows: Pine alert → `webhook-server.js` → MCP `place_futures_order`
+- No parallel harness, no divergence logging, no fallback to Path 2
+- Single ledger going forward: MCP's account state via `get_account_positions` (no more `futures-ledger.json`)
 
-Cost of maintaining parallel: ~minimal — Path 2 already runs whether or not Webull is wired in.
+Implications for `start-hank.bat`:
+- Window 9 (Futures Status) — re-source from MCP after retirement; one-line change to point at MCP-fed cache instead of `futures-ledger.json`
+- No new window needed (MCP embedded in webhook per Q2)
+
+Implications for `ask.js`:
+- `kill IWM` → `flatten` already work against `futures-ledger.json`; will need rewiring through MCP `cancel_order` + `place_*_order` (close at market)
+- Critical constraint: kill/flatten MUST work through MCP path before Sunday 17:00 ET CME open
 
 ---
 
@@ -243,60 +250,94 @@ MCP server exposes (need to verify on Tue exactly which tool — likely a stream
 
 Replaces a `webhook-polling` pattern that doesn't exist by that exact name but is functionally the same loop in current code paths.
 
-### C.2 — Deferred to post-June 1 (per Q4)
+### C.2 — Permanently out of scope
 
-**Multi-leg options strategies (`place_option_strategy_order`)** — verticals, butterflies, iron condors. Powerful but:
-- New ground for HANK engines (signal logic only knows single-leg directional today)
-- $2K live cap is too small for defined-risk spreads — commission drag eats edge
-- Roadmap target: July review after first $2K live week validates basics
+**Multi-leg options strategies (`place_option_strategy_order`)** — verticals, butterflies, condors, strangles. **DEFER INDEFINITELY.** HANK trades single-direction CALLS and PUTS only. No multi-leg infrastructure built; MCP order routing layer stays simple.
 
-**Algo orders (TWAP / VWAP / POV via `place_algo_order`)** — not needed at current position sizes (1-5 contracts). Revisit when sizing scales past 5 contracts per trade.
+**Algo orders (TWAP / VWAP / POV via `place_algo_order`)** — **OUT OF SCOPE. Do not install.**
 
-### C.3 — Pulled in opportunistically (no Day 1 commitment)
+**webull-agent-skills CLI** — **OUT OF SCOPE. Do not install.**
+
+### C.3 — Pulled in opportunistically (no commitment)
 
 - `get_futures_depth` — DOM data, potential signal-quality boost for futures
-- `get_account_position_details` — could replace parts of paper-ledger position views once live
-- `get_event_*` (event series, market events) — unclear use case yet; surface only
+- `get_account_position_details` — replaces some current paper-ledger position views post-migration
 
 ---
 
-## Section D — Integration Schedule
+## Section D — Final Integration Timeline
+
+### D.1 — Sunday 5/17 master execution window (10:00-17:00 ET)
+
+All install + integration + retirement work compressed into one day. CME futures reopen 17:00 ET; sandbox-MCP-paper-futures must be live by then.
+
+```
+10:00 ET  Python uv install (pip install uv)
+          webull-mcp-server install (uvx webull-openapi-mcp --help)
+11:00 ET  .env additions (existing AK/SK reused, WEBULL_ENVIRONMENT=uat)
+          2FA mobile approval (uvx webull-openapi-mcp auth)
+          Sandbox auth smoke test
+12:00 ET  New webull-mcp-client.js Node wrapper (embedded stdio child)
+          Wire into webhook-server.js startup; heartbeat record added
+13:00 ET  First sandbox order tests:
+            - market / limit / stop  single-leg options
+            - OTOCO combo on a futures contract
+            - cancel_order round-trip
+14:00 ET  futuresTrading.js retirement:
+            - remove import from webhook-server.js
+            - remove futures routing branch
+            - archive to _archive/2026-05-17-futures-direct-retirement/
+          Roll Guard wired (get_instruments + place_*_order on expiry rotation)
+15:00 ET  Smoke test full pipeline (Pine alert → webhook → MCP → MQTT confirm)
+          kill/flatten command rewired through MCP cancel/close path
+          MAX_WEEKLY_LOSS gate stubbed (full implementation Tue 5/19)
+16:00 ET  GO/NO-GO checkpoint — see D.4 below
+16:30 ET  Calibration auto-rebuild fires (existing 16:30 ET scheduler)
+16:45 ET  Operator manual validation:
+            ask> calibration
+            ask> reload calibration
+            ask> kill IWM   (no-op; verifies MCP cancel path)
+17:00 ET  CME opens — Webull paper futures live via MCP
+```
+
+### D.2 — Week of 5/18
 
 | Date | Work |
 |---|---|
-| **Sun 5/17 (today)** | Investigation doc complete ✓ (this file, commit 8b7c253 + this update) |
-| **Mon 5/18** | `pip install uv` on operator machine · `uvx webull-openapi-mcp --help` · `uvx webull-openapi-mcp auth` (one-time 2FA via mobile app) · `.env` additions per A.3 · sandbox connectivity smoke test |
-| **Tue 5/19** | New `webull-mcp-client.js` Node wrapper using `@modelcontextprotocol/sdk` · embedded child process spawned from `webhook-server.js` startup · first sandbox order placed via MCP from a webhook flow · verify order shape + error codes |
-| **Wed 5/20** | Re-route all current Webull paths through MCP wrapper (sandbox) · Vision Phase 5 deploy in PARALLEL — see ⚠ below |
-| **Thu 5/21** | Roll Guard (auto-rolls expiring contracts via `get_instruments` + `place_*_order`) + Spread Guard (rejects entries when bid/ask spread > threshold via `get_*_snapshot`) — both ship via MCP |
-| **Fri 5/22** | Full sandbox validation · paper trading paths retired EXCEPT Path 2 (kept as parity harness per Q3) · `webull.js` legacy code archived to `_archive/2026-05-22-webull-legacy/` (one-line config flip can revert) |
-| **Sat-Sun 5/23-24** | Stress testing · edge cases · weekend stability check (CME futures Sun open 17:00 ET) · error-handling drills |
-| **Mon-Fri 5/26-30** | Full sandbox week with all architecture · real broker fills · no real money · all guards active |
-| **Sun 5/31 PM** | Operator review of sandbox week data — go/no-go for 6/1 flip |
-| **Mon 6/1 09:30 ET** | Production flip: `.env` WEBULL_ENVIRONMENT=prod + MCP restart → first live trade |
+| **Mon 5/18** | Day 3 of streak — MCP-routed paper fills (RTH equity + 23/5 futures). Pure observation day; CALIBRATION_LOOKUP telemetry continues; no code changes. |
+| **Tue 5/19** | **Calibration goes LIVE:** flip `CALIBRATION_APPLY_MULTIPLIER=true` + `CALIBRATION_BLOCK_ENABLED=true`. Also implement `MAX_WEEKLY_LOSS` tiered gate (see E.8). NVDA earnings day — meaningful real test of layered defenses. |
+| **Wed 5/20** | MCP + Calibration full integration validation. No new layers; only verify both interact cleanly in journal + ledger reconciliation. |
+| **Thu 5/21** | Spread Guard via MCP market data (`get_stock_snapshot` / `get_futures_snapshot` bid-ask spread check; reject when > threshold). |
+| **Fri 5/22** | Full pipeline stress test. No new layers. Exercise three-tier rollback drills. |
+| **Sat 5/23** | Vision Phase 5 deploy in DRY-RUN. Cache + `vision-monitor.js` + structured-numeric prompts wired; multiplier not applied yet. (Aligns with operator's saved spec target of weekend 5/23-24.) |
+| **Sun 5/24 – Fri 5/29** | Vision telemetry accumulates + sandbox week of real broker fills, no real money, all guards active. |
+| **Sun 5/31 PM** | Operator pre-live review — go/no-go for production flip. |
+| **Mon 6/1 09:30 ET** | Production flip: `.env` `WEBULL_ENVIRONMENT=prod` + MCP restart → first live trade. Vision stays in dry-run through first live week. |
 
-### D.1 — ⚠ Vision Phase 5 timing conflict (Wed 5/20)
-
-Operator's saved Phase 5 spec (`project_vision_phase5_spec.md`) says vision builds "after calibration validates ≥1 week" with target weekend 5/23-24. The 5/20 directive line pulls Vision deploy in 3 days earlier, parallel to MCP re-routing.
-
-Implications:
-- Calibration will have only ~3 sessions (Mon-Wed) validated by 5/20 vs 5+ originally planned
-- Vision + MCP both deploy same day = two big surfaces changing at once
-- Risk: a Wed regression is harder to attribute (Vision? MCP? Both?)
-
-**Recommend:** push Vision deploy to Fri 5/22 OR Sat 5/23 to keep one big surface per day. Operator decides.
-
-### D.2 — Production cap structure (per Q5)
+### D.3 — Production cap structure (per Q5)
 
 | Limit | Value | Mechanism |
 |---|---|---|
 | Total live capital allocated | $2,000 | Account-level segregation |
-| Daily loss cap | $500 | `MAX_DAILY_LOSS=500` already in .env; auto-veto entries past this |
-| Per-trade loss cap | $200 | Combined cal/sizing/stop logic — operator may need new `MAX_LOSS_PER_TRADE=200` env enforcement |
-| Auto-kill threshold | -$500 daily | Existing daily-loss-cap gate in `paperTrading.sendOrder` (line ~702) |
-| Auto-halt threshold | -$1,000 weekly | NEW gate needed — `MAX_WEEKLY_LOSS=1000` with rolling-7d window |
+| Daily loss cap | $500 | Existing `MAX_DAILY_LOSS` in `.env` |
+| Per-trade loss cap | $200 | NEW `MAX_LOSS_PER_TRADE=200` env gate needed (combined with stop/calibration sizing) |
+| Auto-kill threshold | -$500 daily | Existing daily-loss-cap in `paperTrading.sendOrder` |
+| Auto-halt threshold | -$1,000 weekly | NEW `MAX_WEEKLY_LOSS` tiered gate (Tue 5/19) — see E.8 |
 
-Weekly-loss enforcement is a new code path not currently present. Add it during Tue-Wed 5/19-20 work.
+### D.4 — Sunday 16:00 ET GO/NO-GO criteria
+
+Before 17:00 ET CME open, operator decides go/no-go based on:
+
+| Check | Pass condition |
+|---|---|
+| MCP auth | `uvx webull-openapi-mcp auth` completed; token written to `./webull-mcp-conf/` |
+| MCP child spawn | `webhook-server.js` startup log shows `[webull-mcp] ARMED` + heartbeat |
+| Order placement | At least one OTOCO combo successfully submitted + filled + closed in sandbox |
+| kill/flatten | `ask> flatten` returns clean (no exception) against MCP `cancel_order` |
+| MAX_WEEKLY_LOSS stub | Reading correct value from .env, even if enforcement is Tue |
+| Roll Guard | Single test rotation against an expiring sandbox contract succeeds |
+
+**If ANY check fails by 16:00 ET:** skip Sunday session, resume Monday morning with extended install window. Operator's call — fallback documented but not assumed.
 
 ---
 
@@ -365,49 +406,74 @@ Weekly-loss enforcement is a new code path not currently present. Add it during 
 
 ### E.7 — Operator override mechanisms (tiered rollback per Q6)
 
+`WEBULL_MCP_DISABLED` name **confirmed** by operator.
+
 Three tiers of rollback, in order of severity:
 
 **Tier 1 — MCP bug, non-critical:**
 - Operator flips `WEBULL_MCP_DISABLED=true` in `.env` + restart webhook-server
-- HANK routes futures through Path 2 (paper) + equity options through legacy consumer-token paths in `webull.js`
-- Trading continues as paper; live capital safe
-- Effect: zero real-money trading until issue resolved
-
-*Note: operator's Q6 answer wrote `CALIBRATION_MCP_DISABLED` — using `WEBULL_MCP_DISABLED` here for clarity. Flag if you intended a calibration-specific flag.*
+- Webhook-server rejects all NEW entries with `WEBULL_MCP_DISABLED` gate reason
+- Existing open positions continue to be managed via stops (broker-side OCO legs already submitted at entry)
+- Trading paused; live capital safe
+- Effect: zero new trades until operator clears the flag
 
 **Tier 2 — MCP auth failure:**
-- Webhook-server rejects all NEW entries with `WEBULL_MCP_AUTH_FAILED` gate reason
-- Existing open positions continue to be managed via Path 2 stops (futures) and HANK-side time/price-based exits (options)
+- MCP heartbeat detects 401 / token-expired
+- Existing positions exit via broker-side stops (already in OCO; broker fills them autonomously)
 - Operator alerted via dashboard banner + TTS critical alert
-- Operator runs `webull-openapi-mcp auth` to recover
+- Operator runs `uvx webull-openapi-mcp auth` to recover
 
 **Tier 3 — Catastrophic (data corruption, wrong-account routing, etc.):**
-- Operator runs `kill flatten` from the HANK Ask REPL (Window 10) → all positions closed
+- Operator runs `kill flatten` from the HANK Ask REPL (Window 10) → all positions closed via MCP `cancel_order` + market-close
 - Set `WEBULL_INTEGRATION_HALT=true` global flag → every MCP call short-circuits to reject
 - Full investigation required before any further trades — operator manual approval to clear the halt flag
 - Add `HALT` red banner across every dashboard tab + persistent TTS until cleared
 
-All three tiers should be independently testable Sat-Sun 5/23-24 stress-testing window.
+All three tiers tested Fri 5/22 stress-test window.
+
+### E.8 — MAX_WEEKLY_LOSS tiered enforcement (new gate, Tue 5/19)
+
+Rolling 7-day window of realized P&L. Three tiers:
+
+| Threshold | Action |
+|---|---|
+| -$500 | Warning + TTS announcement to operator. No trading change. |
+| -$750 | New entries blocked (`MAX_WEEKLY_LOSS_BLOCK` gate reason). Existing positions exit via stops only. Operator informed. |
+| -$1,000 | Hard halt. Run `kill flatten` automatically. Set `WEBULL_INTEGRATION_HALT=true`. Operator override required to resume. |
+
+Implementation: new module `weeklyLoss.js` mirroring `profitProtection.js` pattern. State file `weekly-loss-state.json` (gitignored). Reads paper-ledger + MCP `get_account_balance` to compute realized 7d P&L. Hooked into `sendOrder` after `PROFIT_PROTECTION` gate.
+
+### E.9 — kill/flatten must work via MCP before 5/17 17:00 ET
+
+Critical Sunday-window constraint. Operator's tier-3 rollback depends on it. Implementation:
+
+- `ask.js answerKill()` currently routes through `closePosition` (paper-ledger) + `closeFuturesPosition` (futures-ledger Path 2)
+- Path 2 retiring Sunday means `closeFuturesPosition` must be replaced with MCP-mediated close BEFORE Sunday 17:00 ET
+- New pattern: `kill` enumerates open positions via MCP `get_account_positions` → for each open position, submits `cancel_order` (if working) or `place_*_order` (market-close direction) → confirms via MQTT order-status push
+- Smoke-tested in Sunday 15:00 ET checkpoint (D.1)
 
 ---
 
-## Locked decisions (Q1-Q6 answered)
+## Locked decisions (final)
 
 | # | Decision | Implementation note |
 |---|---|---|
-| Q1 | Python 3.14 already installed; install `uv` via `pip install uv` | Mon 5/18 task |
-| Q2 | Embedded child process under `webhook-server.js` (no separate window) | Heartbeat record needed |
-| Q3 | Keep Path 2 futures-direct as parity harness; retire after 30+ days zero-divergence | New `futures-parity-monitor.js` Wed 5/20 |
-| Q4 | Day 1: OTO/OCO/OTOCO + audit log + MQTT order status. Defer: multi-leg, algo orders | Section C |
-| Q5 | Cutover Mon 6/1 09:30 ET. $2K total, $500 daily cap, $200/trade, $1K weekly | New `MAX_WEEKLY_LOSS` env gate needed |
-| Q6 | Three-tier rollback: `WEBULL_MCP_DISABLED` → reject new entries → `WEBULL_INTEGRATION_HALT` + kill flatten | Tested Sat-Sun 5/23-24 |
+| Q1 | Python 3.14 already installed; install `uv` via `pip install uv` | Sun 5/17 10:00 ET task |
+| Q2 | Embedded child process under `webhook-server.js` (no separate window) | Heartbeat record + `--debug-mcp` flag |
+| Q3 | **Path 2 RETIRED entirely** — single source of truth via MCP. No parallel harness | Sun 5/17 14:00 ET: archive `futuresTrading.js` to `_archive/2026-05-17-futures-direct-retirement/` |
+| Q4 | Day 1: OTOCO combo + audit log + MQTT order status. **Multi-leg, algo orders, agent-skills CLI: out of scope (do not install).** Options = single-direction CALLS/PUTS only | Section C |
+| Q5 | Cutover Mon 6/1 09:30 ET. $2K total, $500 daily cap, $200/trade, $1K weekly (tiered: -$500 warn / -$750 block / -$1000 halt) | New `MAX_WEEKLY_LOSS` gate Tue 5/19 — see E.8 |
+| Q6 | Three-tier rollback: `WEBULL_MCP_DISABLED` (confirmed name) → reject new entries → `WEBULL_INTEGRATION_HALT` + auto-kill-flatten | All three tiers tested Fri 5/22 |
 
 ## Memory hygiene
 
-After Wed 5/20 (Webull paths re-routed):
-- `feedback_webull_consumer_api.md` becomes obsolete — recommend KEEP as historical with appended note "obsoleted by MCP migration 2026-05-22; consumer-token paths archived to `_archive/2026-05-22-webull-legacy/`". Future-Claude reading old commit messages benefits from the breadcrumb.
-- `project_webull_api.md` (trading-permissions blocker as of 2026-05-05) — recommend KEEP with similar appended note.
+After Sun 5/17 (Webull paths re-routed + Path 2 archived):
+- `feedback_webull_consumer_api.md` — KEEP as historical with appended note "obsoleted by MCP migration 2026-05-17; consumer-token paths archived to `_archive/2026-05-17-futures-direct-retirement/`"
+- `project_webull_api.md` (trading-permissions blocker as of 2026-05-05) — KEEP with similar appended note
+
+After Sat 5/23 (Vision Phase 5 dry-run deployed):
+- `project_vision_phase5_spec.md` — KEEP and update with implementation pointers (`vision-monitor.js`, `visionCache.js`)
 
 ---
 
-*Phase 1 complete. Sections A-E locked. Code changes start Mon 5/18.*
+*Phase 1 final. Sections A-E locked. Sunday 5/17 execution starts 10:00 ET; Production flip Mon 6/1 09:30 ET.*
