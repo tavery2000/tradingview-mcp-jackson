@@ -362,11 +362,75 @@ function helpText() {
     '  calibrate / calibration   show calibration cache stats',
     '  reload calibration        ⚠ force-reload calibration-lookup.json from disk',
     '  rebuild calibration       ⚠ run analyze-calibration.js NOW (out of schedule)',
+    '  mcp status                Webull MCP connection state + available tools',
+    '  mcp accounts              list Webull accounts (read-only)',
+    '  mcp positions             list current positions via MCP',
+    '  mcp test order            ⚠ submit a TINY sandbox test order (1c MES1! market)',
+    '  roll guard tick           run rollGuard once and show state',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
     '  combine: "why spy"  "spy flow"  "spy"  "flow qqq"  "kill iwm"',
   ].join('\n');
+}
+
+// ─── MCP handlers (Sunday 2026-05-17) ──────────────────────
+async function answerMcpStatus() {
+  try {
+    const { getWebullMCP, isMCPDisabled, isIntegrationHalted } = await import('./webull-mcp-client.js');
+    const mcp = getWebullMCP();
+    const out = [
+      'WEBULL MCP STATUS',
+      `  connected           ${mcp.isConnected() ? 'yes' : 'NO'}`,
+      `  WEBULL_MCP_DISABLED ${isMCPDisabled() ? 'true (rollback active)' : 'false'}`,
+      `  WEBULL_INTEGRATION_HALT ${isIntegrationHalted() ? 'TRUE (catastrophic halt)' : 'false'}`,
+      `  WEBULL_ENVIRONMENT  ${process.env.WEBULL_ENVIRONMENT || 'uat (default)'}`,
+      `  available tools     ${mcp.availableTools().length}`,
+    ];
+    if (mcp.availableTools().length) {
+      out.push(`  tool list (first 12): ${mcp.availableTools().slice(0, 12).join(', ')}`);
+    }
+    return out.join('\n');
+  } catch (e) { return `mcp status failed: ${e.message}`; }
+}
+async function answerMcpAccounts() {
+  try {
+    const { getWebullMCP } = await import('./webull-mcp-client.js');
+    const mcp = getWebullMCP();
+    if (!mcp.isConnected()) return 'MCP not connected';
+    const r = await mcp.getAccountList();
+    return 'WEBULL ACCOUNTS\n' + JSON.stringify(r, null, 2).slice(0, 2000);
+  } catch (e) { return `mcp accounts failed: ${e.message}`; }
+}
+async function answerMcpPositions() {
+  try {
+    const { getWebullMCP } = await import('./webull-mcp-client.js');
+    const mcp = getWebullMCP();
+    if (!mcp.isConnected()) return 'MCP not connected';
+    const r = await mcp.getAccountPositions({});
+    return 'WEBULL POSITIONS\n' + JSON.stringify(r, null, 2).slice(0, 2000);
+  } catch (e) { return `mcp positions failed: ${e.message}`; }
+}
+async function answerMcpTestOrder() {
+  try {
+    const { getWebullMCP } = await import('./webull-mcp-client.js');
+    const mcp = getWebullMCP();
+    if (!mcp.isConnected()) return 'MCP not connected — cannot send test order';
+    const env = (process.env.WEBULL_ENVIRONMENT || 'uat').toLowerCase();
+    if (env !== 'uat') return `⚠ REFUSED — WEBULL_ENVIRONMENT=${env}; this command is sandbox-only by design`;
+    const r = await mcp.placeFuturesOrder({
+      instrument: 'MES1!', direction: 'CALLS', engine: 'TEST_ORDER',
+      confidence: 'LOW', price: 0, macro4H: 'UNKNOWN',
+    });
+    return 'MCP TEST ORDER (sandbox)\n' + JSON.stringify(r, null, 2);
+  } catch (e) { return `mcp test order failed: ${e.message}`; }
+}
+async function answerRollGuardTick() {
+  try {
+    const { tickNow } = await import('./rollGuard.js');
+    const state = await tickNow();
+    return 'ROLL GUARD STATE\n' + JSON.stringify(state, null, 2).slice(0, 2000);
+  } catch (e) { return `roll guard tick failed: ${e.message}`; }
 }
 
 // ─── Calibration handlers ──────────────────────────────────
@@ -554,6 +618,12 @@ export async function answerQuestion(text) {
   if (/^rebuild\s+calibration\b/.test(lo))    return answerRebuildCalibration();
   if (/^reload\s+calibration\b/.test(lo))     return answerReloadCalibration();
   if (/^(calibrate|calibration)\b/.test(lo))  return answerCalibration();
+  // MCP commands (also before symbol routing)
+  if (/^mcp\s+test\s+order\b/.test(lo))       return answerMcpTestOrder();
+  if (/^mcp\s+accounts?\b/.test(lo))          return answerMcpAccounts();
+  if (/^mcp\s+positions?\b/.test(lo))         return answerMcpPositions();
+  if (/^mcp\s+status\b/.test(lo))             return answerMcpStatus();
+  if (/^roll\s+guard\s+tick\b/.test(lo))      return answerRollGuardTick();
 
   // Symbol-bound topic combinations come first
   if (sym && /\b(why|block|gate)\b/.test(lo))      return answerWhy(sym);

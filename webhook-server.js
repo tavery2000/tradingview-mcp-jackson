@@ -546,6 +546,8 @@ server.listen(PORT, () => {
       if (!ok) console.log(`  [WEBHOOK] Webull MCP not connected at startup — retrying in background`);
     });
   }).catch(e => console.error(`  [WEBHOOK] Webull MCP init failed: ${e.message}`));
+  // 2026-05-17 Roll Guard scaffolding (detection only; auto-roll Thu 5/21).
+  import('./rollGuard.js').then(m => m.startRollGuard()).catch(e => console.error(`  [WEBHOOK] Roll Guard init failed: ${e.message}`));
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║

@@ -23,6 +23,7 @@ pre-switch-kill-state.json
 calibration-scheduler-state.json
 weekly-loss-state.json
 webull-mcp-conf/
+roll-guard-state.json
 logs/webull-mcp-audit.log
 logs/heartbeat-webull-mcp.json
 portfolio-theta.json
