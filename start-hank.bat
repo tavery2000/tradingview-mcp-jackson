@@ -12,7 +12,7 @@ echo  Window 5:  News Terminal      (RSS + SEC + TTS + MOC data writer)
 echo  Window 6:  Morning Briefing   (08:30 ET daily brief)
 echo  Window 7:  Dashboard Server   (http://localhost:3000)
 echo  Window 8:  Theta Monitor      (per-position greeks + burn zone → /api/theta)
-echo  Window 9:  Ask HANK REPL      (natural-language Q&A + kill/flatten WRITE commands)
+echo  Window 9:  Ask HANK REPL      (natural-language Q^&A + kill/flatten WRITE commands)
 echo  (IWM retired 2026-05-15)
 echo  (MOO/MOC + MOC engines retired 2026-05-15 — NYSE feed too delayed without subscription)
 echo  (Path 2 futures-direct retired 2026-05-17 — all futures via Webull MCP, embedded in Window 1)
@@ -153,7 +153,7 @@ echo    5.  News      (RSS + MOC data writer — kept for future re-enable)
 echo    6.  Briefing  (ready for 08:30 ET)
 echo    7.  Dashboard (http://localhost:3000)
 echo    8.  Theta     (per-position greeks, depends on wsServer + CDP)
-echo    9.  Ask       (interactive Q&A REPL — type 'help')
+echo    9.  Ask       (interactive Q^&A REPL — type 'help')
 echo  ============================================================
 echo.
 pause

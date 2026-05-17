@@ -86,7 +86,9 @@ In chronological order. Pull any of these to understand context:
 | `991e0e0` | `ask> webull auth` — interactive 2FA from inside HANK Ask REPL. Avoids the SmartScreen path that blocks operator from running `uvx ... auth` directly from a fresh cmd shell |
 | `25fe9a3` | `hank-preflight.js` bootstrap validator + start-hank.bat preflight wiring. Codifies operator's 9-step manual debugging sequence: uvx health check + auto-reinstall on 0-byte, Defender exclusion advisory, stale token (>14d OR <100 bytes) detection + delete, dotenv sanity, operator checklist banner |
 | `8cf8dec` | Fix start-hank.bat — replaced parenthesized preflight blocks (cmd `errorlevel`-in-parens unreliable) with goto labels, removed Y/N choice gate (was blocking launch when operator hit anything but Y), added `[stage N/4]` trace prints |
-| `6cb8a45` | **Last commit** — Webull `get_account_list` returns plain TEXT (not JSON), parser updated with regex. `get_account_positions` and `get_futures_instruments` need required params (`account_id` and `symbols`) — wrappers auto-pin from `_paperAccountId` or env. `.env` pins `WEBULL_PAPER_ACCOUNT_ID=FNJQ0I41DNA99G4PHQAKTJ8CBA` |
+| `6cb8a45` | Webull `get_account_list` returns plain TEXT (not JSON), parser updated with regex. `get_account_positions` and `get_futures_instruments` need required params (`account_id` and `symbols`) — wrappers auto-pin from `_paperAccountId` or env. `.env` pins `WEBULL_PAPER_ACCOUNT_ID=FNJQ0I41DNA99G4PHQAKTJ8CBA` |
+| `61e69da` | Handoff doc (this file) |
+| **HEAD** | Cosmetic: escape `&` in `Q&A` start-hank.bat echos (was emitting `'A' is not recognized` errors) + handoff doc updated with cross-process state issue discovered post-restart |
 
 ---
 
@@ -160,6 +162,14 @@ Operator's `.env` currently has:
 - **`placeFuturesOrder` argument shape** is a best-effort stub. Refine after first real Tuesday round-trip. Currently passes `{ account_id, instrument_symbol, side, order_type, quantity, bracket }` — likely needs adjustment to match actual `place_futures_order` MCP tool schema.
 - **`placeOptionSingleOrder` argument shape** similarly stubbed. Refine when MCP equity-options routing wires Tue 5/19.
 - **Webull OpenAPI doesn't label paper-vs-live accounts.** Operator's mobile-app toggle determines whether the API hits paper. Our paper-mode verification relies on operator pinning `WEBULL_PAPER_ACCOUNT_ID` to the right account.
+
+### Cross-process state — REPL diagnostic commands are stale
+- **Discovered Sunday 5/17 ~16:42 ET after restart.** The ASK REPL (Window 9, `ask-cli.js`) is a separate Node process from `webhook-server.js`. When ASK imports `webull-mcp-client.js`, it gets a FRESH module instance with `_paperVerified=null`, `_paperAccountId=null`, etc. The webhook process meanwhile DOES connect + verify and has the real state.
+- **Symptom:** `ask> mcp paper` shows "verified: not yet checked, account_id: (none), raw response: (no response captured yet)" while Window 1 webhook log clearly shows verified paper + pinned account.
+- **Affected commands:** `mcp status`, `mcp paper`, `mcp positions`, `mcp accounts`, `mcp test order`, `webull` (combined), `webull reconnect`, `flatten` MCP-side, all variants.
+- **Current source of truth:** Window 1 webhook log. `[webull-mcp] ✓ paper account PINNED ...` line is authoritative.
+- **Fix for Monday:** Either (A) file-based shared state — webhook writes `webull-mcp-state.json` on connect/verify/disconnect, REPL reads from file. Or (B) HTTP endpoint on webhook-server — `GET /api/webull-status` returns the connection + paper state JSON; REPL queries via fetch. (A) is simpler and matches existing patterns (`calibration-scheduler-state.json`, `pre-switch-kill-state.json`, etc.).
+- **Workaround for tonight:** trust Window 1 webhook log. Don't rely on `ask> mcp paper` output.
 
 ### Cosmetic
 - **`◇ injected env (0) from .env`** Python-side message in webhook log is a Python dotenv cosmetic message (means "0 NEW vars added beyond what spawn passed via process.env"). NOT a bug. Don't waste time debugging it.
