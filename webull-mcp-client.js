@@ -218,7 +218,10 @@ async function _connect() {
     try { jAlert('info', 'WEBULL_MCP_CONNECTED', { toolCount: _availableTools.size, env: process.env.WEBULL_ENVIRONMENT || 'uat' }); } catch {}
     console.log(`  [webull-mcp] CONNECTED — ${_availableTools.size} tools available, env=${process.env.WEBULL_ENVIRONMENT || 'uat'}`);
     // Fire paper-mode verification in the background — don't block connect on it
-    _verifyPaperMode().catch(e => console.error(`  [webull-mcp] paper-mode verify threw: ${e.message}`));
+    _verifyPaperMode().then(() => {
+      // After paper verify, populate the futures symbol map (TV '1!' → broker front-month code)
+      _resolveFuturesSymbols().catch(e => console.error(`  [webull-mcp] futures-resolver threw: ${e.message}`));
+    }).catch(e => console.error(`  [webull-mcp] paper-mode verify threw: ${e.message}`));
     _transport.onclose = () => { _onDisconnect('transport-closed'); };
     _transport.onerror = (err) => { _onDisconnect('transport-error', err); };
   } catch (e) {
@@ -365,6 +368,102 @@ export function isPaperVerified() { return _paperVerified; }
 export function getPaperAccountId() { return _paperAccountId; }
 export function getLastVerifyResponse() { return _verifyLastResponse; }
 
+// 2026-05-17 18:30 ET futures symbol resolver.
+// Webull broker API rejects TradingView's '1!' continuous-contract suffix
+// (live error 18:23 ET: "Parameter error, invalid market,symbol,instrument_type,
+// value: US,MNQ1!,FUTURES"). Need to resolve NQ1!/MNQ1!/ES1!/MES1! → actual
+// front-month contract codes (e.g. NQM6, MNQM6, ESM6, MESM6).
+//
+// Cache populated on MCP connect via _resolveFuturesSymbols(). Refresh
+// candidate for Mon/Tue work — quarterly contract roll will invalidate.
+let _futuresSymbolMap = new Map();
+let _futuresResolverLastResponse = null;
+
+async function _resolveFuturesSymbols() {
+  try {
+    const resp = await _callTool('get_futures_instruments', { symbols: 'ES,NQ,MES,MNQ' });
+    _futuresResolverLastResponse = resp;
+    // Response shape unknown — try JSON first, fall through to regex on
+    // text content. Always dump first call for diagnostics.
+    const text = resp?.structuredContent?.result || resp?.content?.[0]?.text || '';
+    console.log(`  [webull-mcp] get_futures_instruments raw response (first 1500 chars):\n${text.slice(0, 1500)}`);
+
+    const newMap = new Map();
+    // Try JSON
+    try {
+      const parsed = JSON.parse(text);
+      const list = parsed.instruments || parsed.data || (Array.isArray(parsed) ? parsed : []);
+      for (const item of list) {
+        const front = item.symbol || item.contract_symbol || item.front_month;
+        const base  = item.root || item.underlying || item.base_symbol;
+        if (front && base) {
+          newMap.set(base.toUpperCase(), front);
+          newMap.set((base + '1!').toUpperCase(), front);
+        }
+      }
+    } catch {}
+
+    // Regex fallback for text format. Common patterns Webull might emit:
+    //   "1. Symbol: MNQM6  Root: MNQ  ..."
+    //   "MNQ → MNQM6 (June 2026)"
+    //   Lines containing both root + front-month codes
+    if (newMap.size === 0 && text) {
+      // Pattern A: "Symbol: <FRONT>  ... Root: <BASE>" / "Underlying: <BASE>"
+      const patternA = /Symbol:\s*([A-Z0-9]+)[^\n]*?(?:Root|Underlying|Base):\s*([A-Z]+)/gi;
+      let m;
+      while ((m = patternA.exec(text)) !== null) {
+        const front = m[1].toUpperCase();
+        const base  = m[2].toUpperCase();
+        newMap.set(base, front);
+        newMap.set(base + '1!', front);
+      }
+      // Pattern B: "<BASE> → <FRONT>" or "<BASE>: <FRONT>"
+      if (newMap.size === 0) {
+        const patternB = /\b(ES|NQ|MES|MNQ)\b\s*(?:→|->|:|=>?)\s*\b([A-Z]+[A-Z]\d)\b/gi;
+        while ((m = patternB.exec(text)) !== null) {
+          const base = m[1].toUpperCase();
+          newMap.set(base, m[2].toUpperCase());
+          newMap.set(base + '1!', m[2].toUpperCase());
+        }
+      }
+      // Pattern C: numbered list with front-month code (e.g. "1. MNQM6 (Micro Nasdaq June 2026)")
+      if (newMap.size === 0) {
+        const patternC = /\b(MNQ|MES|NQ|ES)([HMUZ]\d)\b/gi;   // CME month codes H/M/U/Z + digit year
+        while ((m = patternC.exec(text)) !== null) {
+          const base = m[1].toUpperCase();
+          const front = (m[1] + m[2]).toUpperCase();
+          if (!newMap.has(base)) {
+            newMap.set(base, front);
+            newMap.set(base + '1!', front);
+          }
+        }
+      }
+    }
+
+    if (newMap.size > 0) {
+      _futuresSymbolMap = newMap;
+      console.log(`  [webull-mcp] futures symbol map (${newMap.size} entries):`);
+      for (const [k, v] of newMap) console.log(`     ${k} → ${v}`);
+      try { jAlert('info', 'WEBULL_FUTURES_SYMBOLS_RESOLVED', { entries: Object.fromEntries(newMap) }); } catch {}
+      return true;
+    }
+    console.warn(`  [webull-mcp] ⚠ futures resolver returned 0 entries — orders will fail until raw response shape is identified`);
+    try { jError('WEBULL_MCP', 'futures-resolver-empty', { rawTextSample: text.slice(0, 1000) }); } catch {}
+    return false;
+  } catch (e) {
+    console.error(`  [webull-mcp] futures symbol resolver threw: ${e.message}`);
+    try { jError('WEBULL_MCP', 'futures-resolver-failed', { error: e.message }); } catch {}
+    return false;
+  }
+}
+
+export function resolveFuturesSymbol(input) {
+  if (!input) return null;
+  return _futuresSymbolMap.get(input.toUpperCase()) || null;
+}
+export function getFuturesSymbolMap() { return Object.fromEntries(_futuresSymbolMap); }
+export function getLastFuturesResolverResponse() { return _futuresResolverLastResponse; }
+
 function _scheduleReconnect() {
   const delay = RECONNECT_BACKOFF_MS[Math.min(_reconnectAttempts, RECONNECT_BACKOFF_MS.length - 1)];
   _reconnectAttempts++;
@@ -431,25 +530,28 @@ async function placeFuturesOrder(payload) {
   if (_paperVerified === false) {
     return { vetoed: true, reason: 'WEBULL_PAPER_MODE_NOT_DETECTED', requestId: null };
   }
-  // payload from webhook-server.js: { instrument, direction, engine, confidence, price, macro4H, invalidationLevel, structureType }
   const requestId = `WMCP_FUT_${payload.direction}_${payload.engine}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  // 2026-05-17 18:20 ET schema fix per pydantic validation error:
-  //   - `instrument_symbol` was wrong → renamed to `symbol`
-  //   - `time_in_force` is REQUIRED → default 'DAY' (override via env or payload)
-  //   - `bracket` arg accepted-status unclear → OMITTED for now; re-add
-  //     after first clean fill confirms order placement works end-to-end
+  // 2026-05-17 18:30 ET resolve TradingView '1!' suffix to broker front-month
+  // contract code via _futuresSymbolMap populated on MCP connect.
+  const resolvedSymbol = resolveFuturesSymbol(payload.instrument);
+  if (!resolvedSymbol) {
+    console.error(`  [FUTURES] ✗ symbol unresolved: ${payload.instrument} — no entry in futures symbol map`);
+    try { jError('WEBULL_MCP', 'futures-symbol-unresolved', { input: payload.instrument, mapSize: _futuresSymbolMap.size, mapKeys: [..._futuresSymbolMap.keys()] }); } catch {}
+    return { vetoed: true, reason: 'FUTURES_SYMBOL_UNRESOLVED', error: `No front-month code for ${payload.instrument}`, requestId };
+  }
+  console.log(`  [FUTURES] symbol resolved ${payload.instrument} → ${resolvedSymbol}`);
   try {
     const args = {
       account_id: _paperAccountId || process.env.WEBULL_PAPER_ACCOUNT_ID,
-      symbol: payload.instrument,
+      symbol: resolvedSymbol,
       side: payload.direction === 'CALLS' ? 'BUY' : 'SELL',
       order_type: 'MARKET',
       quantity: 1,
       time_in_force: payload.time_in_force || process.env.WEBULL_DEFAULT_TIF || 'DAY',
     };
     const result = await _callTool('place_futures_order', args);
-    try { jAlert('info', 'WEBULL_MCP_FUT_PLACED', { requestId, instrument: payload.instrument, direction: payload.direction, engine: payload.engine, mcp_result: result }); } catch {}
-    return { requestId, orderId: result?.order_id ?? null, contracts: 1, raw: result };
+    try { jAlert('info', 'WEBULL_MCP_FUT_PLACED', { requestId, instrument: payload.instrument, resolvedSymbol, direction: payload.direction, engine: payload.engine, mcp_result: result }); } catch {}
+    return { requestId, orderId: result?.order_id ?? null, contracts: 1, resolvedSymbol, raw: result };
   } catch (e) {
     return { vetoed: true, reason: 'MCP_FUTURES_REJECTED', error: e.message, requestId };
   }
