@@ -121,6 +121,34 @@ function _heartbeat(status, extra = {}) {
   } catch {}
 }
 
+// 2026-05-17: Webull provides 3 shared public UAT test accounts (per
+// https://developer.webull.com/apis/docs/sdk#test-accounts). These work
+// without app approval — necessary because operator's production AK/SK
+// returns 401 against the UAT endpoint. On WEBULL_ENVIRONMENT=uat we
+// SUBSTITUTE the UAT shared creds at spawn time; on =prod we use the
+// operator's real production AK/SK from .env unchanged.
+//
+// Override via WEBULL_UAT_APP_KEY / WEBULL_UAT_APP_SECRET if operator
+// later obtains a dedicated test account from Webull support.
+const _UAT_DEFAULT_APP_KEY    = process.env.WEBULL_UAT_APP_KEY    || 'J6HA4EBQRQFJD2J6NQH0F7M649';
+const _UAT_DEFAULT_APP_SECRET = process.env.WEBULL_UAT_APP_SECRET || 'a88f2efed4dca02b9bc1a3cecbc35dba';
+
+function _spawnEnv() {
+  const env = { ...process.env };
+  const wblEnv = (env.WEBULL_ENVIRONMENT || 'uat').toLowerCase();
+  if (wblEnv === 'uat') {
+    env.WEBULL_APP_KEY    = _UAT_DEFAULT_APP_KEY;
+    env.WEBULL_APP_SECRET = _UAT_DEFAULT_APP_SECRET;
+    // Hide operator's real prod creds from the child to prevent accidents
+    // (also leaks them less if MCP server logs env on startup)
+    delete env.WEBULL_APP_ID;
+    console.log(`  [webull-mcp] UAT mode: using shared public test account (key ending ${_UAT_DEFAULT_APP_KEY.slice(-6)})`);
+  } else {
+    console.log(`  [webull-mcp] PROD mode: using operator's WEBULL_APP_KEY`);
+  }
+  return env;
+}
+
 async function _connect() {
   if (_connecting || _connected) return;
   _connecting = true;
@@ -128,7 +156,7 @@ async function _connect() {
     _transport = new StdioClientTransport({
       command: MCP_COMMAND,
       args: MCP_ARGS,
-      env: { ...process.env },
+      env: _spawnEnv(),
     });
     _client = new Client({ name: 'hank-webhook', version: '1.0.0' }, { capabilities: {} });
     await _client.connect(_transport);
