@@ -421,23 +421,40 @@ async function handlePineAlert(req, res) {
   }
 
   if (_FUTURES_INSTRUMENTS.has(instrument.toUpperCase())) {
+    // 2026-05-17 18:15 ET hot-fix: micro-fallback.
+    // Full-contract NQ1!/ES1! margin exceeds CAPITAL_CAP_PER_TRADE (NQ
+    // day-margin ~$22K vs $3K cap; ES ~$14K vs $1K cap). Auto-downgrade
+    // to MNQ1!/MES1! which fit within caps. Operator can disable via
+    // MICRO_FALLBACK_ENABLED=false in .env if testing full-contract sizing.
+    const _MICRO_FALLBACK = (process.env.MICRO_FALLBACK_ENABLED || 'true').toLowerCase() === 'true';
+    let routedInstrument = instrument.toUpperCase();
+    let microDowngrade = null;
+    if (_MICRO_FALLBACK) {
+      if (routedInstrument === 'NQ1!')      { microDowngrade = { from: 'NQ1!', to: 'MNQ1!' }; routedInstrument = 'MNQ1!'; }
+      else if (routedInstrument === 'ES1!') { microDowngrade = { from: 'ES1!', to: 'MES1!' }; routedInstrument = 'MES1!'; }
+    }
+    if (microDowngrade) {
+      console.log(`  [FUTURES] micro-fallback ${microDowngrade.from} → ${microDowngrade.to}`);
+      try { jAlert('info', 'FUTURES_MICRO_FALLBACK', { ...microDowngrade, direction, engine, price }); } catch {}
+    }
     const mcp = getWebullMCP();
     if (!mcp || !mcp.isConnected()) {
-      jError('WEBHOOK', 'MCP_NOT_CONNECTED', { instrument, direction, engine });
+      jError('WEBHOOK', 'MCP_NOT_CONNECTED', { instrument: routedInstrument, direction, engine });
       return send(res, 503, { ok: false, reason: 'MCP_NOT_CONNECTED' });
     }
+    console.log(`  [FUTURES] route → place_futures_order ${routedInstrument}${microDowngrade ? ` (micro from ${microDowngrade.from})` : ''}`);
     try {
       const result = await mcp.placeFuturesOrder({
-        instrument, direction, engine, confidence, price,
+        instrument: routedInstrument, direction, engine, confidence, price,
         macro4H: _macro4H, invalidationLevel: invalidation_level,
         structureType: structure_type,
       });
       if (result.vetoed) {
         return send(res, 200, { ok: false, reason: result.reason || 'MCP_VETOED', detail: result });
       }
-      return send(res, 200, { ok: true, dispatch: 'webull-mcp-futures', requestId: result.requestId, orderId: result.orderId, contracts: result.contracts });
+      return send(res, 200, { ok: true, dispatch: 'webull-mcp-futures', requestId: result.requestId, orderId: result.orderId, contracts: result.contracts, micro_downgrade: microDowngrade });
     } catch (e) {
-      jError('WEBHOOK', 'MCP_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument, direction, engine });
+      jError('WEBHOOK', 'MCP_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument: routedInstrument, direction, engine });
       return send(res, 500, { ok: false, reason: 'MCP_FUTURES_ORDER_THREW', error: e.message });
     }
   }
