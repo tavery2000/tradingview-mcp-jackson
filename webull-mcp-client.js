@@ -128,10 +128,15 @@ function _heartbeat(status, extra = {}) {
 // SUBSTITUTE the UAT shared creds at spawn time; on =prod we use the
 // operator's real production AK/SK from .env unchanged.
 //
+// Three accounts available — failover in order if one is rate-limited:
+//   1. a88f2efed4dca02b9bc1a3cecbc35dba / c2895b3526cc7c7588758351ddf425d6  (default)
+//   2. 6d9f1a0aa919a127697b567bb704369e / adb8931f708ea3d57ec1486f10abf58c
+//   3. eecbf4489f460ad2f7aecef37b267618 / 8abf920a9cc3cb7af3ea5e9e03850692
+//
 // Override via WEBULL_UAT_APP_KEY / WEBULL_UAT_APP_SECRET if operator
 // later obtains a dedicated test account from Webull support.
-const _UAT_DEFAULT_APP_KEY    = process.env.WEBULL_UAT_APP_KEY    || 'J6HA4EBQRQFJD2J6NQH0F7M649';
-const _UAT_DEFAULT_APP_SECRET = process.env.WEBULL_UAT_APP_SECRET || 'a88f2efed4dca02b9bc1a3cecbc35dba';
+const _UAT_DEFAULT_APP_KEY    = process.env.WEBULL_UAT_APP_KEY    || 'a88f2efed4dca02b9bc1a3cecbc35dba';
+const _UAT_DEFAULT_APP_SECRET = process.env.WEBULL_UAT_APP_SECRET || 'c2895b3526cc7c7588758351ddf425d6';
 
 function _spawnEnv() {
   const env = { ...process.env };
