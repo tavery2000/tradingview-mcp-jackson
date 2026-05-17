@@ -121,35 +121,38 @@ function _heartbeat(status, extra = {}) {
   } catch {}
 }
 
-// 2026-05-17: Webull provides 3 shared public UAT test accounts (per
-// https://developer.webull.com/apis/docs/sdk#test-accounts). These work
-// without app approval — necessary because operator's production AK/SK
-// returns 401 against the UAT endpoint. On WEBULL_ENVIRONMENT=uat we
-// SUBSTITUTE the UAT shared creds at spawn time; on =prod we use the
-// operator's real production AK/SK from .env unchanged.
+// 2026-05-17: .env is the SINGLE SOURCE OF TRUTH for WEBULL_APP_KEY /
+// WEBULL_APP_SECRET. The earlier "magic substitution" approach (swap
+// in UAT shared creds at spawn time when env=uat) caused split-brain
+// between webhook-server.js's MCP child and standalone subprocess
+// invocations (operator's `uvx ... auth` was getting prod creds while
+// the MCP child got UAT). Now both read .env directly.
 //
-// Three accounts available — failover in order if one is rate-limited:
-//   1. a88f2efed4dca02b9bc1a3cecbc35dba / c2895b3526cc7c7588758351ddf425d6  (default)
+// During sandbox week (5/17 - 5/31):  .env has UAT shared creds active,
+//                                     prod values preserved as *_PROD
+// On 2026-06-01 09:30 ET cutover:     swap names back in .env
+//
+// Shared UAT accounts (per developer.webull.com/apis/docs/sdk#test-accounts):
+//   1. a88f2efed4dca02b9bc1a3cecbc35dba / c2895b3526cc7c7588758351ddf425d6
 //   2. 6d9f1a0aa919a127697b567bb704369e / adb8931f708ea3d57ec1486f10abf58c
 //   3. eecbf4489f460ad2f7aecef37b267618 / 8abf920a9cc3cb7af3ea5e9e03850692
-//
-// Override via WEBULL_UAT_APP_KEY / WEBULL_UAT_APP_SECRET if operator
-// later obtains a dedicated test account from Webull support.
-const _UAT_DEFAULT_APP_KEY    = process.env.WEBULL_UAT_APP_KEY    || 'a88f2efed4dca02b9bc1a3cecbc35dba';
-const _UAT_DEFAULT_APP_SECRET = process.env.WEBULL_UAT_APP_SECRET || 'c2895b3526cc7c7588758351ddf425d6';
 
 function _spawnEnv() {
   const env = { ...process.env };
-  const wblEnv = (env.WEBULL_ENVIRONMENT || 'uat').toLowerCase();
+  const wblEnv  = (env.WEBULL_ENVIRONMENT || 'uat').toLowerCase();
+  const akTail  = (env.WEBULL_APP_KEY || '').slice(-6) || '(unset)';
+  console.log(`  [webull-mcp] ${wblEnv.toUpperCase()} mode: WEBULL_APP_KEY ending ...${akTail}`);
+  // Sanity-warn if prod-looking AK is in use while env=uat (catches the
+  // case where operator forgot to swap .env for sandbox week)
   if (wblEnv === 'uat') {
-    env.WEBULL_APP_KEY    = _UAT_DEFAULT_APP_KEY;
-    env.WEBULL_APP_SECRET = _UAT_DEFAULT_APP_SECRET;
-    // Hide operator's real prod creds from the child to prevent accidents
-    // (also leaks them less if MCP server logs env on startup)
-    delete env.WEBULL_APP_ID;
-    console.log(`  [webull-mcp] UAT mode: using shared public test account (key ending ${_UAT_DEFAULT_APP_KEY.slice(-6)})`);
-  } else {
-    console.log(`  [webull-mcp] PROD mode: using operator's WEBULL_APP_KEY`);
+    const knownUat = new Set([
+      'a88f2efed4dca02b9bc1a3cecbc35dba',
+      '6d9f1a0aa919a127697b567bb704369e',
+      'eecbf4489f460ad2f7aecef37b267618',
+    ]);
+    if (env.WEBULL_APP_KEY && !knownUat.has(env.WEBULL_APP_KEY)) {
+      console.warn(`  [webull-mcp] ⚠ WEBULL_ENVIRONMENT=uat but WEBULL_APP_KEY is not one of the 3 shared UAT accounts — UAT endpoint will likely 401`);
+    }
   }
   return env;
 }
