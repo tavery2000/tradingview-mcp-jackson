@@ -20,9 +20,11 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
+import { homedir } from 'os';
 import { jAlert, jError } from './journal.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,10 +32,55 @@ const HEARTBEAT_FILE = join(__dirname, 'logs', 'heartbeat-webull-mcp.json');
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000, 30000];
 
-// MCP command — uvx resolves the published package. Override via .env for
-// local-dev installs.
-const MCP_COMMAND = process.env.WEBULL_MCP_COMMAND || 'uvx';
+// MCP command — uvx resolves the published package. Auto-detect uvx.exe
+// since `pip install uv` lands it in a Scripts/ dir that isn't always on
+// Windows PATH (and asking the operator to chase PATH is a non-starter).
+// Override via WEBULL_MCP_COMMAND in .env if auto-detection misses.
+function _findUvxPath() {
+  if (process.env.WEBULL_MCP_COMMAND) return process.env.WEBULL_MCP_COMMAND;
+  // Try `where uvx` (Windows) / `which uvx` (Unix). Most reliable when PATH is right.
+  try {
+    const cmd = process.platform === 'win32' ? 'where uvx' : 'which uvx';
+    const out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const first = out.split(/\r?\n/)[0].trim();
+    if (first && existsSync(first)) return first;
+  } catch {}
+  // Fallback: walk known Windows install locations for the operator's machine
+  // and any other plausible pythoncore-X.Y-64 install.
+  if (process.platform === 'win32') {
+    const home = homedir();
+    const candidates = [
+      join(home, '.local', 'bin', 'uvx.exe'),                      // uv's standard install
+      join(home, 'AppData', 'Roaming', 'uv', 'bin', 'uvx.exe'),    // alt uv install
+    ];
+    // Probe AppData\Local\Python\pythoncore-*-64\Scripts\uvx.exe (operator's case)
+    const localPython = join(home, 'AppData', 'Local', 'Python');
+    if (existsSync(localPython)) {
+      try {
+        for (const dir of readdirSync(localPython)) {
+          if (/^pythoncore-/.test(dir)) candidates.push(join(localPython, dir, 'Scripts', 'uvx.exe'));
+        }
+      } catch {}
+    }
+    // Probe AppData\Local\Programs\Python\Python*\Scripts\uvx.exe (python.org installer)
+    const localPrograms = join(home, 'AppData', 'Local', 'Programs', 'Python');
+    if (existsSync(localPrograms)) {
+      try {
+        for (const dir of readdirSync(localPrograms)) {
+          if (/^Python\d+/.test(dir)) candidates.push(join(localPrograms, dir, 'Scripts', 'uvx.exe'));
+        }
+      } catch {}
+    }
+    for (const path of candidates) {
+      if (existsSync(path)) return path;
+    }
+  }
+  // Last resort — return the bare command and hope PATH is set
+  return 'uvx';
+}
+const MCP_COMMAND = _findUvxPath();
 const MCP_ARGS    = (process.env.WEBULL_MCP_ARGS || 'webull-openapi-mcp@0.1.1,serve').split(',');
+console.log(`  [webull-mcp] command resolved: ${MCP_COMMAND}`);
 
 let _client = null;
 let _transport = null;
