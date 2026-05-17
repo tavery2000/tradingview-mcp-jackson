@@ -12,10 +12,10 @@ echo  Window 5:  News Terminal      (RSS + SEC + TTS + MOC data writer)
 echo  Window 6:  Morning Briefing   (08:30 ET daily brief)
 echo  Window 7:  Dashboard Server   (http://localhost:3000)
 echo  Window 8:  Theta Monitor      (per-position greeks + burn zone → /api/theta)
-echo  Window 9:  Futures Status     (read-only tail of futures-ledger + prices, 2s refresh)
-echo  Window 10: Ask HANK REPL      (natural-language Q&A + kill/flatten WRITE commands)
+echo  Window 9:  Ask HANK REPL      (natural-language Q&A + kill/flatten WRITE commands)
 echo  (IWM retired 2026-05-15)
 echo  (MOO/MOC + MOC engines retired 2026-05-15 — NYSE feed too delayed without subscription)
+echo  (Path 2 futures-direct retired 2026-05-17 — all futures via Webull MCP, embedded in Window 1)
 echo  ============================================================
 echo.
 echo  Prerequisites:
@@ -88,16 +88,13 @@ start "HANK Theta" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. &&
 
 timeout /t 2 /nobreak > nul
 
-:: ── Window 9: Futures Status ─────────────────────────────────────────────────
-:: 2026-05-15: thin read-only futures tail. Reads futures-ledger.json + latest-
-:: prices.json every 2s; does NOT import futuresTrading.js (that module's
-:: eval loop lives inside webhook-server.js — double-importing would spin a
-:: duplicate timer). Pure visibility surface, no logic.
-start "HANK Futures" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && echo  HANK FUTURES STATUS && echo  Read-only tail of futures-ledger.json + latest-prices.json && echo. && node supervise.js futures-status.js"
+:: ── Window 9 RETIRED 2026-05-17: Futures Status removed alongside Path 2.
+::    futuresTrading.js + futures-status.js archived under
+::    _archive/2026-05-17-futures-direct-retirement/. All futures execution
+::    now via Webull MCP (embedded in webhook-server.js). MCP-side position
+::    visibility lands in a future dashboard widget.
 
-timeout /t 2 /nobreak > nul
-
-:: ── Window 10: Ask HANK REPL ─────────────────────────────────────────────────
+:: ── Window 9: Ask HANK REPL ─────────────────────────────────────────────────
 :: 2026-05-15: interactive Q&A REPL. Mostly read-only (snapshot SPY/QQQ price,
 :: signals, positions, pnl, tier, flow, theta) plus two WRITE commands:
 ::   kill [SYM]   — close all open positions (optional symbol filter)
@@ -109,7 +106,7 @@ start "HANK Ask" cmd /k "cd C:\Users\tomav\tradingview-mcp-jackson && echo. && e
 
 echo.
 echo  ============================================================
-echo  All 10 HANK engines launched. (IWM + MOO/MOC retired 2026-05-15)
+echo  All 9 HANK engines launched. (IWM + MOO/MOC retired 5/15; Path 2 retired 5/17)
 echo.
 echo  Startup order:
 echo    1.  Webhook   (supervisor wraps webhook-server.js on :9001)
@@ -120,8 +117,7 @@ echo    5.  News      (RSS + MOC data writer — kept for future re-enable)
 echo    6.  Briefing  (ready for 08:30 ET)
 echo    7.  Dashboard (http://localhost:3000)
 echo    8.  Theta     (per-position greeks, depends on wsServer + CDP)
-echo    9.  Futures   (read-only status tail, refreshes every 2s)
-echo    10. Ask       (interactive Q&A REPL — type 'help')
+echo    9.  Ask       (interactive Q&A REPL — type 'help')
 echo  ============================================================
 echo.
 pause

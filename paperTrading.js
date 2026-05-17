@@ -43,6 +43,7 @@ import {
 import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
 import { isTradingPaused } from './preSwitchKill.js';
 import { lookupCalibration } from './calibrationCache.js';
+import { evaluate as weeklyLossEvaluate } from './weeklyLoss.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -776,6 +777,17 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'PRE_SWITCH_PAUSE', { reason: _psk.reason });
     console.log(`  ${C.yellow}⏸ ${_psk.reason}${C.reset}`);
     return { vetoed: true, reason: _psk.reason };
+  }
+
+  // 2026-05-17: MAX_WEEKLY_LOSS gate (STUB — full impl Tue 5/19).
+  // Hooked into the chain now so the rollback path is in place; today
+  // it just logs once-per-day that it's reached.
+  const _wl = weeklyLossEvaluate({ today });
+  if (_wl.blocked) {
+    orderGate.markVetoed(requestId, _wl.reason || 'MAX_WEEKLY_LOSS');
+    jGateBlock(consensus.engine, consensus.instrument, consensus.signal, 'MAX_WEEKLY_LOSS', _wl);
+    console.log(`  ${C.red}🛑 MAX_WEEKLY_LOSS (${_wl.tier}) — ${_wl.reason}${C.reset}`);
+    return { vetoed: true, reason: _wl.reason || 'MAX_WEEKLY_LOSS' };
   }
 
   // 2026-05-16 Phase 1 Additional: confidence calibration lookup. Reads

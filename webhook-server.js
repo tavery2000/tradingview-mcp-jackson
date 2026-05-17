@@ -45,23 +45,14 @@ import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { evaluateCounterTrend }               from './signalConfidence.js';
 import { startPreSwitchScheduler }            from './preSwitchKill.js';
 import { startCalibrationScheduler }          from './calibrationScheduler.js';
-// Path 2 (2026-05-15 EOD): in-HANK futures-direct paper dispatch.
-// Loaded conditionally so legacy options-only deploys don't pay the cost.
-let futuresTrading = null;
-const _FUTURES_DIRECT_ENABLED = (process.env.FUTURES_DIRECT_ENABLED || 'false').toLowerCase() === 'true';
-const _FUTURES_DIRECT_INSTRUMENTS = new Set(
-  (process.env.FUT_INSTRUMENTS || 'MES1!')
+// 2026-05-17 Path 2 (futuresTrading.js) RETIRED. Archived to
+// _archive/2026-05-17-futures-direct-retirement/. All futures execution
+// now flows through Webull MCP. webull-mcp-client.js is the new wrapper.
+import { getWebullMCP, isMCPDisabled, isIntegrationHalted } from './webull-mcp-client.js';
+const _FUTURES_INSTRUMENTS = new Set(
+  (process.env.FUT_INSTRUMENTS || 'ES1!,NQ1!,MES1!,MNQ1!')
     .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
 );
-if (_FUTURES_DIRECT_ENABLED) {
-  try {
-    futuresTrading = await import('./futuresTrading.js');
-    console.log(`  [WEBHOOK] futures-direct dispatch ENABLED for ${[..._FUTURES_DIRECT_INSTRUMENTS].join(',')}`);
-  } catch (e) {
-    console.error(`  [WEBHOOK] FAILED to load futuresTrading.js: ${e.message}`);
-    futuresTrading = null;
-  }
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -414,24 +405,41 @@ async function handlePineAlert(req, res) {
     structureType:          structure_type,
   };
 
-  // Path 2 (2026-05-15): futures-direct dispatch routing. When enabled
-  // AND the instrument is in the allowlist, route to futuresTrading
-  // (separate ledger, point-based stops, scale-out + trail per locked
-  // decisions). Equity (SPY/QQQ/IWM) and other non-futures instruments
-  // continue through paperTrading.sendOrder unchanged.
-  if (futuresTrading && _FUTURES_DIRECT_INSTRUMENTS.has(instrument.toUpperCase())) {
-    let futReqId, futTrade;
+  // 2026-05-17: futures + equity-options dispatch via Webull MCP.
+  // Path 2 (futuresTrading.js) retired. Equity options used to flow
+  // through paperTrading.sendOrder → webull.js; now flow through MCP.
+  // Global rollback flags:
+  //   WEBULL_INTEGRATION_HALT=true  → reject ALL (tier 3 catastrophic)
+  //   WEBULL_MCP_DISABLED=true      → reject all new entries (tier 1)
+  if (isIntegrationHalted()) {
+    jGateBlock(engine, instrument, direction, 'WEBULL_INTEGRATION_HALT', { etTime: etTimeString() });
+    return send(res, 200, { ok: false, reason: 'WEBULL_INTEGRATION_HALT' });
+  }
+  if (isMCPDisabled()) {
+    jGateBlock(engine, instrument, direction, 'WEBULL_MCP_DISABLED', { etTime: etTimeString() });
+    return send(res, 200, { ok: false, reason: 'WEBULL_MCP_DISABLED' });
+  }
+
+  if (_FUTURES_INSTRUMENTS.has(instrument.toUpperCase())) {
+    const mcp = getWebullMCP();
+    if (!mcp || !mcp.isConnected()) {
+      jError('WEBHOOK', 'MCP_NOT_CONNECTED', { instrument, direction, engine });
+      return send(res, 503, { ok: false, reason: 'MCP_NOT_CONNECTED' });
+    }
     try {
-      futReqId = futuresTrading.futuresOrderGate.createRequest({ signal: direction, engine });
-      futTrade = futuresTrading.placeFuturesOrder(consensus, futReqId);
+      const result = await mcp.placeFuturesOrder({
+        instrument, direction, engine, confidence, price,
+        macro4H: _macro4H, invalidationLevel: invalidation_level,
+        structureType: structure_type,
+      });
+      if (result.vetoed) {
+        return send(res, 200, { ok: false, reason: result.reason || 'MCP_VETOED', detail: result });
+      }
+      return send(res, 200, { ok: true, dispatch: 'webull-mcp-futures', requestId: result.requestId, orderId: result.orderId, contracts: result.contracts });
     } catch (e) {
-      jError('WEBHOOK', 'PLACE_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument, direction, engine, price, futReqId });
-      return send(res, 500, { ok: false, reason: 'PLACE_FUTURES_ORDER_THREW', error: e.message });
+      jError('WEBHOOK', 'MCP_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument, direction, engine });
+      return send(res, 500, { ok: false, reason: 'MCP_FUTURES_ORDER_THREW', error: e.message });
     }
-    if (futTrade && futTrade.vetoed) {
-      return send(res, 200, { ok: false, reason: 'FUT_VETOED', detail: futTrade.reason });
-    }
-    return send(res, 200, { ok: true, dispatch: 'futures-direct', requestId: futReqId, tier: futTrade?.tier, contracts: futTrade?.contracts });
   }
 
   // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
@@ -529,6 +537,15 @@ server.listen(PORT, () => {
   startPreSwitchScheduler();
   // 2026-05-16 Phase 1 Additional: arm the daily calibration rebuild.
   startCalibrationScheduler();
+  // 2026-05-17: spawn embedded Webull MCP child process + connect.
+  // Failure to connect does NOT kill the webhook — MCP client auto-retries
+  // with exponential backoff; webhook will reject new entries with
+  // MCP_NOT_CONNECTED until the child comes up.
+  import('./webull-mcp-client.js').then(m => {
+    m.initWebullMCP().then(ok => {
+      if (!ok) console.log(`  [WEBHOOK] Webull MCP not connected at startup — retrying in background`);
+    });
+  }).catch(e => console.error(`  [WEBHOOK] Webull MCP init failed: ${e.message}`));
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║

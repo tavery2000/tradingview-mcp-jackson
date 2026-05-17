@@ -417,9 +417,9 @@ async function answerKill(symFilter) {
   const out = [];
   out.push(matchSym ? `KILL — closing all open ${matchSym} positions` : 'FLATTEN — closing ALL open positions');
   // Late-imported to keep ask.js's cold start cheap when not killing
-  let closePosition, closeFuturesPosition, blackScholes;
+  let closePosition, blackScholes;
   try { ({ closePosition } = await import('./paperTrading.js')); } catch (e) { out.push(`  ✗ failed to import paperTrading: ${e.message}`); }
-  try { ({ closeFuturesPosition } = await import('./futuresTrading.js')); } catch (e) { out.push(`  ✗ failed to import futuresTrading: ${e.message}`); }
+  // futuresTrading.js retired 2026-05-17 — futures now via MCP (handled below)
   try { ({ blackScholes } = await import('./theta.js')); } catch {}
 
   const prices  = readJsonSafe('latest-prices.json') || {};
@@ -459,32 +459,72 @@ async function answerKill(symFilter) {
     }
   }
 
-  // ── Futures leg (futures-ledger.json) ───────────────────
-  const fut = readJsonSafe('futures-ledger.json');
-  const openFut = fut?.trades?.filter(t => t.status === 'OPEN' && (!matchSym || t.instrument === matchSym)) ?? [];
-  let killedFut = 0, futPnL = 0;
-  for (const t of openFut) {
-    const live = prices[t.instrument]?.last;
-    const exitPrice = Number.isFinite(live) ? live : t.entryPrice;
-    if (!closeFuturesPosition) { out.push(`  ✗ ${t.instrument} ${t.signal} — closeFuturesPosition unavailable`); continue; }
-    try {
-      const closed = closeFuturesPosition(t.requestId, exitPrice, 'MANUAL_KILL');
-      if (closed) {
-        killedFut++;
-        futPnL += closed.pnl ?? 0;
-        out.push(`  ✓ ${pad(t.instrument, 5)} ${pad(t.signal, 5)} ${pad(t.engine, 9)} exit ${fmtPrice(exitPrice)}  pnl ${fmtMoney(closed.pnl ?? 0)}`);
-      } else {
-        out.push(`  · ${t.instrument} ${t.signal} — already closed (race)`);
+  // ── Futures + MCP-side positions (post Path 2 retirement 2026-05-17) ──
+  // Path 2 futures-ledger.json removed; futures (and any MCP-tracked
+  // positions) now flow through Webull MCP. Enumerate via
+  // get_account_positions + close via cancel_order / opposing market order.
+  let killedMCP = 0, mcpPnL = 0;
+  try {
+    const { getWebullMCP } = await import('./webull-mcp-client.js');
+    const mcp = getWebullMCP();
+    if (!mcp || !mcp.isConnected()) {
+      out.push('  ⚠ MCP not connected — skipping MCP-side kill');
+    } else {
+      // Cancel any working orders first
+      try {
+        const openOrders = await mcp.getOpenOrders({});
+        const orders = openOrders?.orders || openOrders?.data || [];
+        for (const ord of orders) {
+          if (matchSym && ord.symbol && ord.symbol.toUpperCase() !== matchSym) continue;
+          try {
+            await mcp.cancelOrder(ord.order_id);
+            out.push(`  ✓ MCP cancel order ${ord.order_id}  ${ord.symbol || '?'}`);
+          } catch (e) {
+            out.push(`  ✗ MCP cancel ${ord.order_id} — ${e.message}`);
+          }
+        }
+      } catch (e) {
+        out.push(`  ✗ getOpenOrders — ${e.message}`);
       }
-    } catch (e) {
-      out.push(`  ✗ ${t.instrument} ${t.signal} — ${e.message}`);
+      // Close open positions via opposing market order
+      try {
+        const posResp = await mcp.getAccountPositions({});
+        const positions = posResp?.positions || posResp?.data || [];
+        for (const p of positions) {
+          const psym = (p.symbol || p.instrument || '').toUpperCase();
+          if (matchSym && psym !== matchSym) continue;
+          const qty = Math.abs(p.quantity || p.qty || 0);
+          if (qty === 0) continue;
+          const oppositeSide = (p.quantity || p.qty) > 0 ? 'SELL' : 'BUY';
+          try {
+            // For now use the futures/option order path; refined Tue 5/19
+            const closeResult = await mcp._callTool('place_stock_order', {
+              symbol: psym, side: oppositeSide, order_type: 'MARKET', quantity: qty,
+            }).catch(() => null);
+            if (closeResult) {
+              killedMCP++;
+              const realized = closeResult?.realized_pnl ?? 0;
+              mcpPnL += realized;
+              out.push(`  ✓ MCP close ${pad(psym, 6)} ${qty}c (${oppositeSide})  realized ${fmtMoney(realized)}`);
+            } else {
+              out.push(`  ⚠ MCP close ${psym} returned null — may need manual review`);
+            }
+          } catch (e) {
+            out.push(`  ✗ MCP close ${psym} — ${e.message}`);
+          }
+        }
+      } catch (e) {
+        out.push(`  ✗ getAccountPositions — ${e.message}`);
+      }
     }
+  } catch (e) {
+    out.push(`  ✗ webull-mcp-client import failed — ${e.message}`);
   }
 
-  if (killedPaper === 0 && killedFut === 0) {
+  if (killedPaper === 0 && killedMCP === 0) {
     out.push('  No matching open positions.');
   } else {
-    out.push('', `KILLED  ${killedPaper} options + ${killedFut} futures   realized ${fmtMoney(paperPnL + futPnL)}`);
+    out.push('', `KILLED  ${killedPaper} paper-options + ${killedMCP} MCP-positions   realized ${fmtMoney(paperPnL + mcpPnL)}`);
   }
   return out.join('\n');
 }
