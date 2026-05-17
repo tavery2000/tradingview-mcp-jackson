@@ -63,10 +63,11 @@ async function _tick() {
   const state = _loadState();
   state.lastTick = new Date().toISOString();
 
-  // Pull current futures instruments for the allowlist
+  // Pull current futures instruments for the allowlist. Webull MCP requires
+  // `symbols` param — pass the allowlist (ES, NQ, MES, MNQ).
   let instruments = [];
   try {
-    const resp = await mcp.getFuturesInstruments({});
+    const resp = await mcp.getFuturesInstruments({ symbols: ALLOWLIST.join(',') });
     instruments = resp?.instruments || resp?.data || [];
   } catch (e) {
     try { jError('ROLL_GUARD', 'get_futures_instruments-failed', { error: e.message }); } catch {}

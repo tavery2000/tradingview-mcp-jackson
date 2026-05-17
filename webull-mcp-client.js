@@ -284,15 +284,30 @@ async function _verifyPaperMode() {
   if (Array.isArray(resp)) accounts = resp;
   else if (resp?.accounts) accounts = resp.accounts;
   else if (resp?.data) accounts = Array.isArray(resp.data) ? resp.data : (resp.data.accounts || []);
-  else if (resp?.content) {
-    // MCP tool responses often wrap result in content[].text JSON
+  else if (resp?.content || resp?.structuredContent) {
+    // MCP tool responses wrap result in content[].text OR structuredContent.result.
+    // Webull's MCP returns a HUMAN-READABLE text block, not JSON. Parse it:
+    //   === Account List ===
+    //   1. ID: FNJQ...  Number: CUZ54272  Type: MARGIN  Class: FUTURES  Label: Futures
+    //   2. ID: HHIC...  ...
+    const text = resp.structuredContent?.result || resp.content?.[0]?.text || '';
+    // Try JSON first (some tools might switch)
     try {
-      const text = resp.content?.[0]?.text;
-      if (text) {
-        const parsed = JSON.parse(text);
-        accounts = parsed.accounts || parsed.data?.accounts || (Array.isArray(parsed) ? parsed : []);
-      }
+      const parsed = JSON.parse(text);
+      accounts = parsed.accounts || parsed.data?.accounts || (Array.isArray(parsed) ? parsed : []);
     } catch {}
+    // Fall back to regex on the line format
+    if (accounts.length === 0 && text) {
+      const lineRe = /\d+\.\s*ID:\s*(\S+)\s+Number:\s*(\S+)\s+Type:\s*(\S+)\s+Class:\s*(\S+)\s+Label:\s*([^\r\n]+)/g;
+      let m;
+      while ((m = lineRe.exec(text)) !== null) {
+        accounts.push({
+          account_id: m[1], account_number: m[2],
+          account_type: m[3], account_class: m[4],
+          account_name: m[5].trim(),
+        });
+      }
+    }
   }
   console.log(`  [webull-mcp] paper-mode check: found ${accounts.length} account(s)`);
   if (process.env.WEBULL_DEBUG_ACCOUNT_DUMP === 'true') {
@@ -386,16 +401,26 @@ function _sanitize(args) {
   return out;
 }
 
-// Account
+// Account — getAccountBalance + getAccountPositions auto-pin the pinned/
+// detected account_id when caller doesn't supply one (Webull MCP requires it).
 export async function getAccountList()        { return _callTool('get_account_list'); }
-export async function getAccountBalance(opts) { return _callTool('get_account_balance', opts); }
-export async function getAccountPositions(opts){ return _callTool('get_account_positions', opts); }
+export async function getAccountBalance(opts = {}) {
+  if (!opts.account_id) opts.account_id = _paperAccountId || process.env.WEBULL_PAPER_ACCOUNT_ID;
+  return _callTool('get_account_balance', opts);
+}
+export async function getAccountPositions(opts = {}) {
+  if (!opts.account_id) opts.account_id = _paperAccountId || process.env.WEBULL_PAPER_ACCOUNT_ID;
+  return _callTool('get_account_positions', opts);
+}
 
 // Market data
 export async function getStockSnapshot(opts)   { return _callTool('get_stock_snapshot',   opts); }
 export async function getFuturesSnapshot(opts) { return _callTool('get_futures_snapshot', opts); }
 export async function getInstruments(opts)     { return _callTool('get_instruments', opts); }
-export async function getFuturesInstruments(opts){ return _callTool('get_futures_instruments', opts); }
+export async function getFuturesInstruments(opts = {}) {
+  // Webull requires `symbols` — caller must pass; we don't have a sensible default
+  return _callTool('get_futures_instruments', opts);
+}
 
 // Order placement — Tuesday 5/19 sandbox-round-trip will firm up the
 // exact argument shapes. For Sunday smoke test we just need the call to
@@ -412,6 +437,7 @@ async function placeFuturesOrder(payload) {
   // webhook can log/journal even before the full Webull schema is wired.
   try {
     const args = {
+      account_id: _paperAccountId || process.env.WEBULL_PAPER_ACCOUNT_ID,
       instrument_symbol: payload.instrument,
       side: payload.direction === 'CALLS' ? 'BUY' : 'SELL',
       order_type: 'MARKET',
