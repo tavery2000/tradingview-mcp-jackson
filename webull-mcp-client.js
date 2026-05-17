@@ -433,18 +433,19 @@ async function placeFuturesOrder(payload) {
   }
   // payload from webhook-server.js: { instrument, direction, engine, confidence, price, macro4H, invalidationLevel, structureType }
   const requestId = `WMCP_FUT_${payload.direction}_${payload.engine}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  // Stub shape — refined Tue 5/19. We return a structured result so the
-  // webhook can log/journal even before the full Webull schema is wired.
+  // 2026-05-17 18:20 ET schema fix per pydantic validation error:
+  //   - `instrument_symbol` was wrong → renamed to `symbol`
+  //   - `time_in_force` is REQUIRED → default 'DAY' (override via env or payload)
+  //   - `bracket` arg accepted-status unclear → OMITTED for now; re-add
+  //     after first clean fill confirms order placement works end-to-end
   try {
     const args = {
       account_id: _paperAccountId || process.env.WEBULL_PAPER_ACCOUNT_ID,
-      instrument_symbol: payload.instrument,
+      symbol: payload.instrument,
       side: payload.direction === 'CALLS' ? 'BUY' : 'SELL',
       order_type: 'MARKET',
       quantity: 1,
-      // OTOCO bracket (Q4 Day 1 capability) — stop + target legs
-      // attached server-side. Schema to be finalized post round-trip.
-      bracket: payload.invalidationLevel ? { stop_price: payload.invalidationLevel } : undefined,
+      time_in_force: payload.time_in_force || process.env.WEBULL_DEFAULT_TIF || 'DAY',
     };
     const result = await _callTool('place_futures_order', args);
     try { jAlert('info', 'WEBULL_MCP_FUT_PLACED', { requestId, instrument: payload.instrument, direction: payload.direction, engine: payload.engine, mcp_result: result }); } catch {}
