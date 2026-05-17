@@ -11,7 +11,7 @@
 
 - **MCP integration shipped** — Webull OpenAPI MCP server embedded in `webhook-server.js`, all futures execution routed through it
 - **MCP CONNECTED** — 47 tools available, env=prod, operator's real AK/SK
-- **Paper mode strategy** — operator's Webull mobile app toggled to PAPER; the API hits whichever account the app is currently set to. Operator confirmed Futures account (`FNJQ0I41DNA99G4PHQAKTJ8CBA`) shows virtual balance → paper-via-toggle works
+- **Paper mode strategy** *(CORRECTED 5/17 17:15 ET — see §6 "Paper-mode mental model correction")* — operator runs **Webull Futures Desktop** (dedicated futures client) toggled to PAPER. **Webull mobile app does NOT have a futures paper toggle** — futures paper is desktop-client-only. The OpenAPI hits whichever environment the desktop client is set to. Account `FNJQ0I41DNA99G4PHQAKTJ8CBA` showing virtual balance confirms the API is hitting paper futures regardless of mobile state. **Mobile-app state is irrelevant for futures routing.**
 - **Path 2 retired** — `futuresTrading.js` + `futures-status.js` archived to `_archive/2026-05-17-futures-direct-retirement/`
 - **Last commit:** `6cb8a45` — fix(webull-mcp): parse text account list + pin account_id in tool calls
 - **Operator pending action:** pull + restart, then verify in Window 1: `[webull-mcp] ✓ paper account PINNED by WEBULL_PAPER_ACCOUNT_ID=FNJQ0...`
@@ -128,6 +128,24 @@ In chronological order. Pull any of these to understand context:
 - `_archive/2026-05-15-moo-moc-retirement/` — MOO/MOC engines (NYSE feed too delayed)
 - `_archive/2026-05-17-futures-direct-retirement/` — Path 2 futures-direct + status tail
 
+### Paper-mode mental model (corrected 5/17 17:15 ET)
+
+The Sunday session was conducted with an INCORRECT assumption: that the Webull mobile app's paper/live toggle controlled what the OpenAPI hit. **That's wrong for futures.** Operator clarification:
+
+- **Webull mobile app:** does NOT have a futures paper toggle
+- **Webull Futures Desktop:** dedicated desktop client with its own paper/live toggle. This is what operator runs. THIS toggle controls API routing for futures.
+- **API behavior:** OpenAPI hits whichever environment the futures desktop client is set to. Account `FNJQ0I41DNA99G4PHQAKTJ8CBA` showing virtual balance is the ground truth confirming paper mode is active.
+- **Functional impact:** none. `WEBULL_PAPER_ACCOUNT_ID=FNJQ0I41DNA99G4PHQAKTJ8CBA` is pinned via env, which is what's actually routing orders. The whole "mobile app toggle" narrative was the wrong mental model wrapped around the right behavior.
+
+**Monday work-items spawned by this correction** *(operator said "don't touch tonight, cosmetic + doc-level, stack for Monday alongside REPL cross-process fix")*:
+
+1. **`webull-mcp-client.js` `_verifyPaperMode`** — comments and log messages reference "mobile app toggle" semantics. Update wording to reflect desktop-client reality. Verification logic itself is correct (it checks the API response, which is the ground truth regardless of which client did the toggling).
+2. **`hank-preflight.js` operator-prereq banner** — currently prints "Webull mobile app must be OPEN and toggled to PAPER mode." Should read "Webull Futures Desktop must be OPEN and toggled to PAPER mode."
+3. **`start-hank.bat` operator pre-launch notes** — same wording fix.
+4. **`docs/webull-mcp-integration-plan-2026-05-16.md` §B.5 and §D.1** — likely have the same incorrect "mobile app toggle" framing. Audit and correct.
+5. **June 1 production flip wording** (§7 below + integration plan) — step listed as "toggle Webull mobile app to Live" should read "toggle Webull Futures Desktop to Live."
+6. **Memory write candidate** (operator approval needed Monday): add `feedback_webull_paper_futures_desktop_only.md` capturing that futures paper is desktop-client-only, not mobile-toggleable. Prevents the next session from repeating the incorrect mental model.
+
 ### `.env` highlights *(gitignored — values won't be in your git pull)*
 
 Operator's `.env` currently has:
@@ -190,7 +208,7 @@ Operator's `.env` currently has:
 | **Sat 5/23** | Vision Phase 5 deploy DRY-RUN. `vision-monitor.js` + `visionCache.js` per `project_vision_phase5_spec.md` (structured numeric, Sonnet 4.6, calibration-matching tiers) |
 | **Sun 5/24 - Fri 5/29** | Vision telemetry + full sandbox week — real broker fills (paper), no real money, all guards active |
 | **Sun 5/31 PM** | Operator pre-live review |
-| **Mon 6/1 09:30 ET** | **Production flip** — toggle Webull mobile app to Live, set `WEBULL_PAPER_MODE_EXPECTED=false`, `WEBULL_ENVIRONMENT=prod` (unchanged), first live trade. $2K total cap, $500 daily, $200/trade, $1K weekly halt. Vision stays dry-run through first live week |
+| **Mon 6/1 09:30 ET** | **Production flip** — toggle **Webull Futures Desktop** to Live (NOT mobile app — see §5 "Paper-mode mental model correction"), set `WEBULL_PAPER_MODE_EXPECTED=false`, `WEBULL_ENVIRONMENT=prod` (unchanged), first live trade. $2K total cap, $500 daily, $200/trade, $1K weekly halt. Vision stays dry-run through first live week |
 
 ---
 
