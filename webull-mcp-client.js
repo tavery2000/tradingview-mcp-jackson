@@ -1,9 +1,41 @@
 /**
  * webull-mcp-client.js — Node wrapper around webull-openapi-mcp (Python)
  *
- * 2026-05-17: spawn the official Webull MCP server (Python, stdio transport)
- * as a child of webhook-server.js. Exposes a thin async API for HANK code
- * paths (futures, equity options, account, kill/flatten).
+ * 2026-05-17 EOD STATUS: PARKED FOR 6/1 PRODUCTION FLIP.
+ *
+ * MCP child spawns and connects on webhook-server.js startup (47 tools
+ * available) but is NOT on the futures execution path tonight. Path 2
+ * (futuresTrading.js → futures-ledger.json) is the active paper simulation
+ * after a Sunday evening session where MCP routing surfaced four schema
+ * bugs in sequence:
+ *   1. Wrong .env FUT_INSTRUMENTS=MES1! (only) — fixed in c8256a8
+ *   2. Wrong placeFuturesOrder arg shape (instrument_symbol vs symbol,
+ *      missing time_in_force) — fixed in 6395da8
+ *   3. TradingView '1!' suffix vs Webull contract codes (NQ1! vs NQM6) —
+ *      hardcoded resolver added in 326510e
+ *   4. WEBULL_ENVIRONMENT=prod hit live (empty) account instead of paper
+ *      — fixed in bb8a812 but UAT introduces its own credential dance
+ *
+ * What's verified and ready for 6/1:
+ *   - Spawn + connect lifecycle (uvx --python 3.12, embedded stdio child)
+ *   - Paper-mode verification gate
+ *   - Symbol resolver pattern (hardcode + future dynamic)
+ *   - Micro-fallback NQ→MNQ / ES→MES routing logic (in webhook-server.js)
+ *   - place_futures_order wrapper schema (symbol, side, order_type,
+ *     quantity, time_in_force, account_id) — needs bracket re-add
+ *
+ * What stays warm here for use during sandbox week (Mon-Fri 5/18-5/22):
+ *   - get_stock_snapshot / get_futures_snapshot — wired into Webull data
+ *     Phase 1 deploy (Fri 5/22 15:00 ET per HANK_WEEKLY_PLAN_2026-05-18.md)
+ *   - get_account_list / get_account_positions — read-only diagnostics
+ *   - get_futures_instruments — for proper symbol resolver Mon work
+ *
+ * Original module description follows:
+ *
+ * Spawn the official Webull MCP server (Python, stdio transport) as a
+ * child of webhook-server.js. Exposes a thin async API for HANK code
+ * paths (futures-via-Path-2 doesn't use it; equity options + market data
+ * + account queries do).
  *
  * Lifecycle:
  *   - webhook-server.js startup → init(): spawn child + connect MCP client

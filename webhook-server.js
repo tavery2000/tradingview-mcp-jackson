@@ -45,10 +45,13 @@ import { jSignal, jGateBlock, jAlert, jError } from './journal.js';
 import { evaluateCounterTrend }               from './signalConfidence.js';
 import { startPreSwitchScheduler }            from './preSwitchKill.js';
 import { startCalibrationScheduler }          from './calibrationScheduler.js';
-// 2026-05-17 Path 2 (futuresTrading.js) RETIRED. Archived to
-// _archive/2026-05-17-futures-direct-retirement/. All futures execution
-// now flows through Webull MCP. webull-mcp-client.js is the new wrapper.
-import { getWebullMCP, isMCPDisabled, isIntegrationHalted } from './webull-mcp-client.js';
+// 2026-05-17 EOD: Path 2 RESTORED for paper futures simulation.
+// MCP wrapper stays loaded + connected (47 tools available for snapshots,
+// account queries, June 1 production flip) but futures execution flows
+// through futuresTrading.js → futures-ledger.json instead of MCP.
+// See webull-mcp-client.js header for MCP "parked" notes.
+import { placeFuturesOrder as placeFuturesPath2, futuresOrderGate } from './futuresTrading.js';
+import { getWebullMCP, isMCPDisabled, isIntegrationHalted }        from './webull-mcp-client.js';
 const _FUTURES_INSTRUMENTS = new Set(
   (process.env.FUT_INSTRUMENTS || 'ES1!,NQ1!,MES1!,MNQ1!')
     .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
@@ -405,58 +408,32 @@ async function handlePineAlert(req, res) {
     structureType:          structure_type,
   };
 
-  // 2026-05-17: futures + equity-options dispatch via Webull MCP.
-  // Path 2 (futuresTrading.js) retired. Equity options used to flow
-  // through paperTrading.sendOrder → webull.js; now flow through MCP.
-  // Global rollback flags:
-  //   WEBULL_INTEGRATION_HALT=true  → reject ALL (tier 3 catastrophic)
-  //   WEBULL_MCP_DISABLED=true      → reject all new entries (tier 1)
+  // 2026-05-17 EOD: WEBULL_INTEGRATION_HALT remains a global circuit-breaker
+  // for ALL trading (Path 2 included). Operator's tier-3 rollback flag.
   if (isIntegrationHalted()) {
     jGateBlock(engine, instrument, direction, 'WEBULL_INTEGRATION_HALT', { etTime: etTimeString() });
     return send(res, 200, { ok: false, reason: 'WEBULL_INTEGRATION_HALT' });
   }
-  if (isMCPDisabled()) {
-    jGateBlock(engine, instrument, direction, 'WEBULL_MCP_DISABLED', { etTime: etTimeString() });
-    return send(res, 200, { ok: false, reason: 'WEBULL_MCP_DISABLED' });
-  }
+  // WEBULL_MCP_DISABLED check intentionally removed from the dispatch chain
+  // — MCP is parked, Path 2 doesn't depend on it. Re-add when MCP becomes
+  // primary again at the 6/1 production flip.
 
   if (_FUTURES_INSTRUMENTS.has(instrument.toUpperCase())) {
-    // 2026-05-17 18:15 ET hot-fix: micro-fallback.
-    // Full-contract NQ1!/ES1! margin exceeds CAPITAL_CAP_PER_TRADE (NQ
-    // day-margin ~$22K vs $3K cap; ES ~$14K vs $1K cap). Auto-downgrade
-    // to MNQ1!/MES1! which fit within caps. Operator can disable via
-    // MICRO_FALLBACK_ENABLED=false in .env if testing full-contract sizing.
-    const _MICRO_FALLBACK = (process.env.MICRO_FALLBACK_ENABLED || 'true').toLowerCase() === 'true';
-    let routedInstrument = instrument.toUpperCase();
-    let microDowngrade = null;
-    if (_MICRO_FALLBACK) {
-      if (routedInstrument === 'NQ1!')      { microDowngrade = { from: 'NQ1!', to: 'MNQ1!' }; routedInstrument = 'MNQ1!'; }
-      else if (routedInstrument === 'ES1!') { microDowngrade = { from: 'ES1!', to: 'MES1!' }; routedInstrument = 'MES1!'; }
-    }
-    if (microDowngrade) {
-      console.log(`  [FUTURES] micro-fallback ${microDowngrade.from} → ${microDowngrade.to}`);
-      try { jAlert('info', 'FUTURES_MICRO_FALLBACK', { ...microDowngrade, direction, engine, price }); } catch {}
-    }
-    const mcp = getWebullMCP();
-    if (!mcp || !mcp.isConnected()) {
-      jError('WEBHOOK', 'MCP_NOT_CONNECTED', { instrument: routedInstrument, direction, engine });
-      return send(res, 503, { ok: false, reason: 'MCP_NOT_CONNECTED' });
-    }
-    console.log(`  [FUTURES] route → place_futures_order ${routedInstrument}${microDowngrade ? ` (micro from ${microDowngrade.from})` : ''}`);
+    // 2026-05-17 EOD: futures route to Path 2 (futuresTrading.js).
+    // MCP wrapper stays warm but isn't on the execution path.
+    let futReqId, futTrade;
     try {
-      const result = await mcp.placeFuturesOrder({
-        instrument: routedInstrument, direction, engine, confidence, price,
-        macro4H: _macro4H, invalidationLevel: invalidation_level,
-        structureType: structure_type,
-      });
-      if (result.vetoed) {
-        return send(res, 200, { ok: false, reason: result.reason || 'MCP_VETOED', detail: result });
-      }
-      return send(res, 200, { ok: true, dispatch: 'webull-mcp-futures', requestId: result.requestId, orderId: result.orderId, contracts: result.contracts, micro_downgrade: microDowngrade });
+      futReqId = futuresOrderGate.createRequest({ signal: direction, engine });
+      futTrade = placeFuturesPath2(consensus, futReqId);
     } catch (e) {
-      jError('WEBHOOK', 'MCP_FUTURES_ORDER_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument: routedInstrument, direction, engine });
-      return send(res, 500, { ok: false, reason: 'MCP_FUTURES_ORDER_THREW', error: e.message });
+      jError('WEBHOOK', 'PATH2_FUTURES_THREW', { message: e.message, stack: e.stack?.slice(0,600), instrument, direction, engine, futReqId });
+      return send(res, 500, { ok: false, reason: 'PATH2_FUTURES_THREW', error: e.message });
     }
+    if (futTrade && futTrade.vetoed) {
+      return send(res, 200, { ok: false, reason: 'FUT_VETOED', detail: futTrade.reason });
+    }
+    console.log(`  [PATH2] futures entry ${instrument} ${direction} ${engine}  tier=${futTrade?.tier}  ${futTrade?.contracts}c`);
+    return send(res, 200, { ok: true, dispatch: 'futures-path2', requestId: futReqId, tier: futTrade?.tier, contracts: futTrade?.contracts });
   }
 
   // Wrap orderGate + sendOrder + jSignal in try/catch. Previously an
