@@ -377,14 +377,18 @@ function helpText() {
 // ─── MCP handlers (Sunday 2026-05-17) ──────────────────────
 async function answerMcpStatus() {
   try {
-    const { getWebullMCP, isMCPDisabled, isIntegrationHalted } = await import('./webull-mcp-client.js');
+    const { getWebullMCP, isMCPDisabled, isIntegrationHalted, isPaperVerified, getPaperAccountId } = await import('./webull-mcp-client.js');
     const mcp = getWebullMCP();
+    const pv = isPaperVerified();
+    const pvStr = pv === true ? 'YES' : pv === false ? 'NO (orders blocked!)' : 'not yet checked';
     const out = [
       'WEBULL MCP STATUS',
       `  connected           ${mcp.isConnected() ? 'yes' : 'NO'}`,
       `  WEBULL_MCP_DISABLED ${isMCPDisabled() ? 'true (rollback active)' : 'false'}`,
       `  WEBULL_INTEGRATION_HALT ${isIntegrationHalted() ? 'TRUE (catastrophic halt)' : 'false'}`,
       `  WEBULL_ENVIRONMENT  ${process.env.WEBULL_ENVIRONMENT || 'uat (default)'}`,
+      `  paper verified      ${pvStr}`,
+      `  paper account_id    ${getPaperAccountId() || '(none)'}`,
       `  available tools     ${mcp.availableTools().length}`,
     ];
     if (mcp.availableTools().length) {
@@ -392,6 +396,21 @@ async function answerMcpStatus() {
     }
     return out.join('\n');
   } catch (e) { return `mcp status failed: ${e.message}`; }
+}
+async function answerMcpPaperCheck() {
+  try {
+    const { getLastVerifyResponse, isPaperVerified, getPaperAccountId } = await import('./webull-mcp-client.js');
+    const resp = getLastVerifyResponse();
+    const pv = isPaperVerified();
+    const out = [
+      'WEBULL PAPER-MODE CHECK',
+      `  verified      ${pv === true ? 'YES' : pv === false ? 'NO' : 'not yet checked'}`,
+      `  account_id    ${getPaperAccountId() || '(none)'}`,
+      `  raw response  (last get_account_list):`,
+      resp ? JSON.stringify(resp, null, 2).slice(0, 3000) : '  (no response captured yet)',
+    ];
+    return out.join('\n');
+  } catch (e) { return `mcp paper-check failed: ${e.message}`; }
 }
 async function answerMcpAccounts() {
   try {
@@ -622,6 +641,7 @@ export async function answerQuestion(text) {
   if (/^mcp\s+test\s+order\b/.test(lo))       return answerMcpTestOrder();
   if (/^mcp\s+accounts?\b/.test(lo))          return answerMcpAccounts();
   if (/^mcp\s+positions?\b/.test(lo))         return answerMcpPositions();
+  if (/^mcp\s+paper(-check)?\b/.test(lo))     return answerMcpPaperCheck();
   if (/^mcp\s+status\b/.test(lo))             return answerMcpStatus();
   if (/^roll\s+guard\s+tick\b/.test(lo))      return answerRollGuardTick();
 

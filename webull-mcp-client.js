@@ -97,6 +97,14 @@ let _connecting = false;
 let _reconnectAttempts = 0;
 let _heartbeatTimer = null;
 let _availableTools = new Set();
+// 2026-05-17 paper-mode verification state.
+// Set after first successful connect via _verifyPaperMode().
+//   _paperVerified === null  → not yet checked (allow operations)
+//   _paperVerified === true  → confirmed paper (allow operations)
+//   _paperVerified === false → confirmed LIVE while EXPECTED=paper (block orders)
+let _paperVerified = null;
+let _paperAccountId = null;        // Webull account_id of the paper account, if found
+let _verifyLastResponse = null;    // raw response from getAccountList for diagnostics
 
 export function isMCPDisabled() {
   return (process.env.WEBULL_MCP_DISABLED || 'false').toLowerCase() === 'true';
@@ -209,6 +217,8 @@ async function _connect() {
     _heartbeat('connected', { tools: [..._availableTools].slice(0, 20) });
     try { jAlert('info', 'WEBULL_MCP_CONNECTED', { toolCount: _availableTools.size, env: process.env.WEBULL_ENVIRONMENT || 'uat' }); } catch {}
     console.log(`  [webull-mcp] CONNECTED — ${_availableTools.size} tools available, env=${process.env.WEBULL_ENVIRONMENT || 'uat'}`);
+    // Fire paper-mode verification in the background — don't block connect on it
+    _verifyPaperMode().catch(e => console.error(`  [webull-mcp] paper-mode verify threw: ${e.message}`));
     _transport.onclose = () => { _onDisconnect('transport-closed'); };
     _transport.onerror = (err) => { _onDisconnect('transport-error', err); };
   } catch (e) {
@@ -226,11 +236,119 @@ function _onDisconnect(reason, err) {
   _connected = false;
   _client = null;
   _transport = null;
+  _paperVerified = null;          // re-verify on next connect
+  _paperAccountId = null;
   _heartbeat('disconnected', { reason, error: err?.message });
   try { jError('WEBULL_MCP', 'disconnected', { reason, error: err?.message }); } catch {}
   console.warn(`  [webull-mcp] DISCONNECTED — ${reason}`);
   _scheduleReconnect();
 }
+
+// 2026-05-17 paper-mode verification.
+// Operator's strategy: prod endpoint + prod AK/SK, with paper mode toggled
+// in the Webull mobile app (account is a real Webull paper account, accessible
+// via the same OpenAPI surface). We call get_account_list immediately after
+// connect and inspect the response for paper indicators.
+//
+// Schema is unknown until first real response — we log the raw response so
+// operator can see the available fields. Defensive heuristics check common
+// field names ("paper", "virtual", "simulation", "practice") and account
+// names containing those keywords.
+//
+// Behavior:
+//   WEBULL_PAPER_MODE_EXPECTED=true  (default) → must find paper account, else BLOCK
+//   WEBULL_PAPER_MODE_EXPECTED=false (6/1 cutover) → skip the check entirely
+//
+// Operator can pin an explicit account_id via WEBULL_PAPER_ACCOUNT_ID once
+// they see the actual response shape.
+async function _verifyPaperMode() {
+  const expectPaper = (process.env.WEBULL_PAPER_MODE_EXPECTED || 'true').toLowerCase() === 'true';
+  if (!expectPaper) {
+    _paperVerified = true;
+    console.log(`  [webull-mcp] paper-mode check SKIPPED (WEBULL_PAPER_MODE_EXPECTED=false; production-live mode)`);
+    return;
+  }
+  let resp;
+  try {
+    resp = await _callTool('get_account_list');
+  } catch (e) {
+    _paperVerified = false;
+    console.error(`  [webull-mcp] ⚠ paper-mode check FAILED — get_account_list threw: ${e.message}`);
+    try { jError('WEBULL_MCP', 'paper-verify-failed', { error: e.message }); } catch {}
+    return;
+  }
+  _verifyLastResponse = resp;
+  // Walk the response looking for accounts. Webull returns slightly different
+  // shapes depending on tool version; check the common ones.
+  let accounts = [];
+  if (Array.isArray(resp)) accounts = resp;
+  else if (resp?.accounts) accounts = resp.accounts;
+  else if (resp?.data) accounts = Array.isArray(resp.data) ? resp.data : (resp.data.accounts || []);
+  else if (resp?.content) {
+    // MCP tool responses often wrap result in content[].text JSON
+    try {
+      const text = resp.content?.[0]?.text;
+      if (text) {
+        const parsed = JSON.parse(text);
+        accounts = parsed.accounts || parsed.data?.accounts || (Array.isArray(parsed) ? parsed : []);
+      }
+    } catch {}
+  }
+  console.log(`  [webull-mcp] paper-mode check: found ${accounts.length} account(s)`);
+  if (process.env.WEBULL_DEBUG_ACCOUNT_DUMP === 'true') {
+    console.log(`  [webull-mcp] raw get_account_list response:\n${JSON.stringify(resp, null, 2).slice(0, 2000)}`);
+  }
+
+  // Operator can pin the paper account explicitly once schema is known
+  const pinnedId = process.env.WEBULL_PAPER_ACCOUNT_ID;
+  if (pinnedId) {
+    const pinned = accounts.find(a => String(a.account_id || a.id || a.accountId) === String(pinnedId));
+    if (pinned) {
+      _paperAccountId = pinnedId;
+      _paperVerified = true;
+      console.log(`  [webull-mcp] ✓ paper account PINNED by WEBULL_PAPER_ACCOUNT_ID=${pinnedId}`);
+      try { jAlert('info', 'WEBULL_PAPER_VERIFIED', { accountId: pinnedId, mode: 'pinned' }); } catch {}
+      return;
+    }
+    console.warn(`  [webull-mcp] ⚠ WEBULL_PAPER_ACCOUNT_ID=${pinnedId} but no matching account in response — falling back to heuristic`);
+  }
+
+  // Heuristic detection — check each account for paper indicators
+  const paperHits = [];
+  for (const a of accounts) {
+    const flat = JSON.stringify(a).toLowerCase();
+    const isPaper =
+         a.paper_account === true || a.paperAccount === true
+      || a.is_virtual === true   || a.isVirtual === true
+      || a.simulation === true   || a.is_simulation === true
+      || a.practice_account === true
+      || (typeof a.account_type === 'string' && /paper|virtual|practice|simulation/i.test(a.account_type))
+      || (typeof a.account_name === 'string' && /paper|virtual|practice/i.test(a.account_name))
+      || /"(paper|virtual|simulation|practice)"\s*:\s*true/.test(flat);
+    if (isPaper) {
+      paperHits.push({ account_id: a.account_id || a.id || a.accountId, account_type: a.account_type, account_name: a.account_name });
+    }
+  }
+
+  if (paperHits.length === 0) {
+    _paperVerified = false;
+    const msg = `⚠ PAPER MODE NOT DETECTED — no account in get_account_list response matches paper indicators. Order placement will be BLOCKED. Toggle Webull mobile app to Paper Trading mode, OR set WEBULL_PAPER_ACCOUNT_ID to pin the right account, OR set WEBULL_PAPER_MODE_EXPECTED=false to bypass.`;
+    console.error(`  [webull-mcp] ${msg}`);
+    try { jAlert('critical', 'WEBULL_PAPER_MODE_NOT_DETECTED', { accountCount: accounts.length, expectPaper: true }); } catch {}
+    return;
+  }
+  if (paperHits.length > 1) {
+    console.warn(`  [webull-mcp] ⚠ multiple paper-like accounts (${paperHits.length}) — using first; pin via WEBULL_PAPER_ACCOUNT_ID for explicit selection`);
+  }
+  _paperAccountId = paperHits[0].account_id;
+  _paperVerified = true;
+  console.log(`  [webull-mcp] ✓ paper account detected: ${JSON.stringify(paperHits[0])}`);
+  try { jAlert('info', 'WEBULL_PAPER_VERIFIED', { ...paperHits[0], mode: 'heuristic', alternatives: paperHits.length - 1 }); } catch {}
+}
+
+export function isPaperVerified() { return _paperVerified; }
+export function getPaperAccountId() { return _paperAccountId; }
+export function getLastVerifyResponse() { return _verifyLastResponse; }
 
 function _scheduleReconnect() {
   const delay = RECONNECT_BACKOFF_MS[Math.min(_reconnectAttempts, RECONNECT_BACKOFF_MS.length - 1)];
@@ -283,6 +401,11 @@ export async function getFuturesInstruments(opts){ return _callTool('get_futures
 // exact argument shapes. For Sunday smoke test we just need the call to
 // reach the MCP server and return a structured response (or rejection).
 async function placeFuturesOrder(payload) {
+  // 2026-05-17: hard-block if paper-mode verification failed (operator
+  // intends paper but account-list inspection didn't find a paper account).
+  if (_paperVerified === false) {
+    return { vetoed: true, reason: 'WEBULL_PAPER_MODE_NOT_DETECTED', requestId: null };
+  }
   // payload from webhook-server.js: { instrument, direction, engine, confidence, price, macro4H, invalidationLevel, structureType }
   const requestId = `WMCP_FUT_${payload.direction}_${payload.engine}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   // Stub shape — refined Tue 5/19. We return a structured result so the
@@ -305,6 +428,9 @@ async function placeFuturesOrder(payload) {
   }
 }
 async function placeOptionSingleOrder(payload) {
+  if (_paperVerified === false) {
+    return { vetoed: true, reason: 'WEBULL_PAPER_MODE_NOT_DETECTED', requestId: null };
+  }
   const requestId = `WMCP_OPT_${payload.direction}_${payload.engine}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   try {
     const args = {
