@@ -367,8 +367,10 @@ function helpText() {
     '  mcp positions             list current positions via MCP',
     '  mcp test order            ⚠ submit a TINY sandbox test order (1c MES1! market)',
     '  mcp paper / paper-check   inspect paper-mode verification result',
+    '  webull                    combined status: MCP health + paper-mode check',
     '  webull auth               ⚠ interactive 2FA — approve push in Webull mobile app',
     '  webull reconnect          force MCP child reconnect (after auth succeeds)',
+    '  webull paper              just the paper-mode verification dump',
     '  roll guard tick           run rollGuard once and show state',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
@@ -497,6 +499,12 @@ async function answerWebullAuth() {
       resolve(out.join('\n'));
     });
   });
+}
+// 2026-05-17: `webull` (bare) = combined status snapshot
+async function answerWebullCombined() {
+  const status = await answerMcpStatus();
+  const paper  = await answerMcpPaperCheck();
+  return [status, '', paper].join('\n');
 }
 async function answerWebullReconnect() {
   try {
@@ -715,6 +723,8 @@ export async function answerQuestion(text) {
   if (/^mcp\s+status\b/.test(lo))             return answerMcpStatus();
   if (/^webull\s+auth\b/.test(lo))            return answerWebullAuth();
   if (/^webull\s+reconnect\b/.test(lo))       return answerWebullReconnect();
+  if (/^webull\s+paper\b/.test(lo))           return answerMcpPaperCheck();
+  if (/^webull\b/.test(lo))                   return answerWebullCombined();
   if (/^roll\s+guard\s+tick\b/.test(lo))      return answerRollGuardTick();
 
   // Symbol-bound topic combinations come first
