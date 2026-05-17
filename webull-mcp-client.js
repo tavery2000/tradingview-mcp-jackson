@@ -493,6 +493,29 @@ export async function initWebullMCP() {
   return _connected;
 }
 
+// 2026-05-17: expose spawn config so ask.js can run `webull auth` with
+// the same uvx + python-3.12 args as the embedded serve invocation.
+export function getMcpSpawnConfig() {
+  return { command: MCP_COMMAND, args: MCP_ARGS };
+}
+
+// Force-reconnect from ask.js after operator finishes 2FA. Closes the
+// current transport (if any) and re-runs the connect path.
+export async function forceReconnect() {
+  if (_transport) {
+    try { _transport.onclose = null; } catch {}
+    try { await _client?.close(); } catch {}
+  }
+  _connected = false;
+  _client = null;
+  _transport = null;
+  _paperVerified = null;
+  _paperAccountId = null;
+  _reconnectAttempts = 0;
+  await _connect();
+  return _connected;
+}
+
 export async function shutdownWebullMCP() {
   if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
   if (_client) {

@@ -366,6 +366,9 @@ function helpText() {
     '  mcp accounts              list Webull accounts (read-only)',
     '  mcp positions             list current positions via MCP',
     '  mcp test order            ⚠ submit a TINY sandbox test order (1c MES1! market)',
+    '  mcp paper / paper-check   inspect paper-mode verification result',
+    '  webull auth               ⚠ interactive 2FA — approve push in Webull mobile app',
+    '  webull reconnect          force MCP child reconnect (after auth succeeds)',
     '  roll guard tick           run rollGuard once and show state',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
@@ -444,6 +447,73 @@ async function answerMcpTestOrder() {
     return 'MCP TEST ORDER (sandbox)\n' + JSON.stringify(r, null, 2);
   } catch (e) { return `mcp test order failed: ${e.message}`; }
 }
+// 2026-05-17: interactive Webull 2FA. Spawns `uvx --python 3.12
+// webull-openapi-mcp auth` from inside HANK — avoids the SmartScreen
+// path operator hits with bare cmd launches. The auth subprocess sends
+// a 2FA push to operator's Webull mobile app, blocks waiting for
+// approval, writes token to ./webull-mcp-conf/ on success, exits.
+// REPL stays blocked during the wait (typically 10-60 sec for operator
+// to grab phone + tap approve).
+async function answerWebullAuth() {
+  const out = ['WEBULL AUTH (interactive 2FA)'];
+  out.push('  → Spawning uvx ... auth');
+  out.push('  → Webull mobile app will receive a 2FA push within ~5 sec');
+  out.push('  → APPROVE on phone; this REPL will wait for completion');
+  out.push('');
+  let cfg;
+  try {
+    const m = await import('./webull-mcp-client.js');
+    cfg = m.getMcpSpawnConfig();
+  } catch (e) { return out.join('\n') + `\n  ✗ failed to import webull-mcp-client: ${e.message}`; }
+
+  const { spawn } = await import('child_process');
+  // Swap `serve` arg for `auth` (everything else: --python 3.12, package@version, identical)
+  const authArgs = cfg.args.map(a => a === 'serve' ? 'auth' : a);
+  out.push(`  command: ${cfg.command} ${authArgs.join(' ')}`);
+  out.push('');
+
+  return new Promise((resolve) => {
+    const child = spawn(cfg.command, authArgs, { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdoutBuf = '', stderrBuf = '';
+    child.stdout.on('data', d => { stdoutBuf += d.toString(); });
+    child.stderr.on('data', d => { stderrBuf += d.toString(); });
+    child.on('error', err => {
+      resolve(out.join('\n') + `\n  ✗ spawn error: ${err.message}\n  (Possible causes: uvx.exe missing/quarantined, SmartScreen block, or Defender)`);
+    });
+    child.on('close', code => {
+      out.push('--- stdout ---');
+      out.push(stdoutBuf.trim() || '(empty)');
+      if (stderrBuf.trim()) {
+        out.push('--- stderr ---');
+        out.push(stderrBuf.trim());
+      }
+      out.push('');
+      if (code === 0) {
+        out.push(`  ✓ auth subprocess exited 0 — token should be written to ${process.env.WEBULL_TOKEN_DIR || './webull-mcp-conf/'}`);
+        out.push(`  Next: run \`webull reconnect\` to refresh MCP connection without restarting HANK`);
+      } else {
+        out.push(`  ✗ auth subprocess exited ${code} — token NOT written. Read stdout/stderr above for cause.`);
+      }
+      resolve(out.join('\n'));
+    });
+  });
+}
+async function answerWebullReconnect() {
+  try {
+    const { forceReconnect, isPaperVerified, getWebullMCP } = await import('./webull-mcp-client.js');
+    const out = ['WEBULL RECONNECT — forcing MCP child restart'];
+    const ok = await forceReconnect();
+    const mcp = getWebullMCP();
+    out.push(`  connected: ${ok ? 'yes' : 'NO (check Window 1 for spawn errors)'}`);
+    out.push(`  tools:     ${mcp.availableTools().length}`);
+    // Give paper-mode check ~3s to complete before reporting
+    await new Promise(r => setTimeout(r, 3000));
+    const pv = isPaperVerified();
+    out.push(`  paper-mode verified: ${pv === true ? 'YES' : pv === false ? 'NO' : 'still checking…'}`);
+    return out.join('\n');
+  } catch (e) { return `webull reconnect failed: ${e.message}`; }
+}
+
 async function answerRollGuardTick() {
   try {
     const { tickNow } = await import('./rollGuard.js');
@@ -643,6 +713,8 @@ export async function answerQuestion(text) {
   if (/^mcp\s+positions?\b/.test(lo))         return answerMcpPositions();
   if (/^mcp\s+paper(-check)?\b/.test(lo))     return answerMcpPaperCheck();
   if (/^mcp\s+status\b/.test(lo))             return answerMcpStatus();
+  if (/^webull\s+auth\b/.test(lo))            return answerWebullAuth();
+  if (/^webull\s+reconnect\b/.test(lo))       return answerWebullReconnect();
   if (/^roll\s+guard\s+tick\b/.test(lo))      return answerRollGuardTick();
 
   // Symbol-bound topic combinations come first
