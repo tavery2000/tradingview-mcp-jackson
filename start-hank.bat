@@ -31,42 +31,39 @@ echo.
 :: Validates bootstrap state before spawning HANK windows. Codifies the manual
 :: Sunday 5/17 workarounds (uvx quarantine guard, Defender exclusion check,
 :: stale Webull token cleanup, .env / dotenv sanity).
-::   Exit 0 = launch proceeds
-::   Exit 1 = hard blocker — operator must fix before continuing
 :: To skip (debug): set HANK_SKIP_PREFLIGHT=1 then re-run
+::
+:: Uses goto labels (not parenthesized blocks) because cmd errorlevel inside
+:: parens is unreliable without setlocal enabledelayedexpansion.
+echo  [stage 1/4] cd to project root
 cd /d C:\Users\tomav\tradingview-mcp-jackson
-if not defined HANK_SKIP_PREFLIGHT (
-  node hank-preflight.js
-  if errorlevel 1 (
-    echo.
-    echo  ============================================================
-    echo  PREFLIGHT BLOCKED. Resolve the failures above then re-run.
-    echo  (To bypass for debug: set HANK_SKIP_PREFLIGHT=1 first.)
-    echo  ============================================================
-    pause
-    exit /b 1
-  )
-)
+if errorlevel 1 goto :PREFLIGHT_CD_FAIL
 
-echo.
-echo  ============================================================
-echo  OPERATOR PRE-LAUNCH CHECKLIST
-echo  ============================================================
-echo   [ ] Webull mobile app OPEN and toggled to PAPER mode
-echo   [ ] Phone unlocked + Webull app foreground (for 2FA push)
-echo   [ ] If preflight deleted a stale token: be ready to approve 2FA
-echo       on phone within ~5 sec of running `ask^> webull auth`
-echo  ============================================================
-echo.
-echo  Press Y to continue, any other key to abort.
-choice /c YN /n /m "Continue? [Y/N] "
-if errorlevel 2 (
-  echo Aborted by operator.
-  exit /b 1
-)
-echo.
+echo  [stage 2/4] running preflight checks (set HANK_SKIP_PREFLIGHT=1 to bypass)
+if defined HANK_SKIP_PREFLIGHT goto :PREFLIGHT_SKIPPED
+node hank-preflight.js
+if errorlevel 1 goto :PREFLIGHT_BLOCKED
+goto :PREFLIGHT_OK
 
-timeout /t 2 /nobreak > nul
+:PREFLIGHT_SKIPPED
+echo  [stage 2/4] preflight SKIPPED via HANK_SKIP_PREFLIGHT
+
+:PREFLIGHT_OK
+echo.
+echo  ============================================================
+echo  OPERATOR PRE-LAUNCH NOTES
+echo  ============================================================
+echo   - Webull mobile app should be OPEN and toggled to PAPER mode
+echo   - Phone unlocked + Webull app foreground (for 2FA push)
+echo   - If preflight deleted a stale token: be ready to approve 2FA
+echo     on phone within ~5 sec of running `ask^> webull auth`
+echo  ============================================================
+echo.
+echo  [stage 3/4] launching in 5 seconds (Ctrl+C to abort)...
+timeout /t 5 /nobreak > nul
+
+echo  [stage 4/4] spawning HANK windows
+timeout /t 1 /nobreak > nul
 
 :: ── Window 1: Webhook Supervisor ─────────────────────────────────────────────
 :: Pine alert receiver wrapper (port 9001). Auto-restart on crash, logs cause
@@ -160,3 +157,23 @@ echo    9.  Ask       (interactive Q&A REPL — type 'help')
 echo  ============================================================
 echo.
 pause
+goto :EOF
+
+:: ── Preflight failure labels (kept at end so normal flow skips past them) ───
+:PREFLIGHT_CD_FAIL
+echo.
+echo  ============================================================
+echo  FAILED to cd into project root C:\Users\tomav\tradingview-mcp-jackson
+echo  Check path exists. Halting.
+echo  ============================================================
+pause
+exit /b 1
+
+:PREFLIGHT_BLOCKED
+echo.
+echo  ============================================================
+echo  PREFLIGHT BLOCKED. Resolve failures above then re-run.
+echo  (To bypass for debug: set HANK_SKIP_PREFLIGHT=1 first.)
+echo  ============================================================
+pause
+exit /b 1
