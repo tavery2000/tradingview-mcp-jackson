@@ -1,31 +1,23 @@
 /**
- * futuresPricer.js — TradingView CDP futures price poller
+ * futuresPricer.js — TradingView CDP futures price poller (stateless)
  *
- * 2026-05-18 morning: was Webull MCP get_futures_snapshot. Webull paper
- * account returned 401 Unauthorized on every call (missing US_FUTURES
- * quote entitlement), so we switched data source to the TV Desktop
- * watchlist via CDP (port 9222). Webull MCP stays parked for the June 1
- * order-placement flip; this module no longer talks to it.
+ * 2026-05-18 morning: switched data source Webull MCP → TV CDP watchlist
+ * after Webull paper account lacked US_FUTURES quote entitlement.
  *
- * Data flow:
- *   1. tvPriceClient.getFuturesWatchlistPrices() — one CDP evaluate, all
- *      four contracts at once, no chart change
- *   2. read latest-prices.json (preserve other instruments' entries)
- *   3. for each ES1!/NQ1!/MES1!/MNQ1!: write fresh entry on hit,
- *      increment fail counter on miss
- *   4. flush
+ * 2026-05-18 mid-RTH: stripped the fail-counter / stale-flag layer that
+ * caused a persistent "STALE" display state operator couldn't clear even
+ * with restart. The fail counter lived in-memory, but the `stale: true`
+ * flag it wrote to latest-prices.json persisted on disk — new webhook
+ * boots, futures-status reads the file BEFORE first successful tick,
+ * renders STALE. Now: each tick stands alone. Success → overwrite last+ts
+ * with no stale fields. Failure → log + leave cache untouched (preserves
+ * last-known prices for futures-status to render with age coloring).
  *
- * Failure handling:
- *   - Whole-tick failure (TV closed, CDP down, scraper error like
- *     "panel_closed") → increment fail counter for ALL instruments
- *   - Per-symbol miss (symbol not in watchlist or no numeric cell) →
- *     increment fail counter for that symbol only
- *   - 3 consecutive fails per instrument → write { stale: true,
- *     staleSince, lastFailReason } for futures-status.js to render
+ * Auto-recovery is implicit: every tick re-attempts CDP fetch regardless
+ * of prior outcome. No counters, no persistence, no boot-time stale read.
  *
- * Skip entirely when MCP-disabled or integration-halted — those are
- * Webull-side knobs but they remain a coarse "stop background load"
- * signal for any external feed work.
+ * Skip entirely when MCP-disabled or integration-halted (coarse "stop
+ * background load" knob — these are Webull flags but the spirit applies).
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
@@ -39,18 +31,13 @@ const PRICE_FILE = join(__dirname, 'latest-prices.json');
 const POLL_MS    = parseInt(process.env.FUT_PRICER_POLL_MS || '3000', 10);
 const INSTRUMENTS = (process.env.FUT_PRICER_SYMBOLS || 'ES1!,NQ1!,MES1!,MNQ1!')
   .split(',').map(s => s.trim()).filter(Boolean);
-const STALE_AFTER_FAILS = parseInt(process.env.FUT_PRICER_STALE_FAILS || '3', 10);
-const INITIAL_DELAY_MS  = parseInt(process.env.FUT_PRICER_INITIAL_DELAY_MS || '3000', 10);
+const INITIAL_DELAY_MS = parseInt(process.env.FUT_PRICER_INITIAL_DELAY_MS || '500', 10);
 
-const _failCount = new Map();
 let _started = false;
 let _timer   = null;
-const _loggedStale = new Set();
 
 function _etTimeString() {
-  return new Date().toLocaleTimeString('en-US', {
-    timeZone: 'America/New_York', hour12: false,
-  });
+  return new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
 }
 
 function _readCache() {
@@ -61,89 +48,65 @@ function _readCache() {
 }
 
 function _writeCache(cache) {
-  try {
-    writeFileSync(PRICE_FILE, JSON.stringify(cache, null, 2));
-  } catch (e) {
-    console.error(`  [FUT_PRICER] write fail: ${e.message}`);
+  try { writeFileSync(PRICE_FILE, JSON.stringify(cache, null, 2)); }
+  catch (e) { console.error(`  [FUT_PRICER] write fail: ${e.message}`); }
+}
+
+// Clean the cache entry of any vestigial stale-era fields. Used on every
+// successful tick so latest-prices.json doesn't keep old stale/failCount
+// fields around forever after the schema simplification.
+function _freshEntry(last, now, et) {
+  return { last, price: last, ts: now, et, src: 'tv-watchlist' };
+}
+
+// Single tick. Caller (interval OR /control/repoll-futures) handles
+// scheduling. Returns a summary suitable for HTTP responses.
+export async function tickOnce() {
+  if (isMCPDisabled() || isIntegrationHalted()) {
+    return { skipped: true, reason: 'MCP_DISABLED_OR_INTEGRATION_HALT' };
   }
-}
-
-function _markFresh(cache, sym, last, now, et) {
-  _failCount.set(sym, 0);
-  _loggedStale.delete(sym);
-  cache[sym] = {
-    ...(cache[sym] || {}),
-    last,
-    price: last,
-    ts: now,
-    et,
-    src: 'tv-watchlist',
-    stale: false,
-    staleSince: null,
-    lastFailReason: null,
-  };
-}
-
-function _markFailed(cache, sym, reason, now) {
-  const next = (_failCount.get(sym) || 0) + 1;
-  _failCount.set(sym, next);
-  if (next >= STALE_AFTER_FAILS) {
-    const prev = cache[sym] || {};
-    cache[sym] = {
-      ...prev,
-      stale: true,
-      staleSince: prev.staleSince || now,
-      lastFailReason: reason,
-      failCount: next,
-    };
-    if (!_loggedStale.has(sym)) {
-      console.log(`  [FUT_PRICER] ${sym} → STALE (${next} consecutive fails, reason: ${reason})`);
-      _loggedStale.add(sym);
-    }
-  }
-}
-
-async function _tick() {
-  if (isMCPDisabled() || isIntegrationHalted()) return;
-
+  const t0 = Date.now();
   let prices = null;
-  let tickError = null;
+  let error = null;
   try {
     prices = await getFuturesWatchlistPrices();
   } catch (e) {
-    tickError = (e.message || 'unknown').slice(0, 80);
+    error = (e.message || 'unknown').slice(0, 120);
+  }
+  const dur = Date.now() - t0;
+  const et  = _etTimeString();
+
+  if (error) {
+    console.log(`  [FUT_PRICER] ${et}  ✗ ${error}  (${dur}ms)`);
+    return { ok: false, error, durationMs: dur, et };
   }
 
   const cache = _readCache();
-  const now = Date.now();
-  const et  = _etTimeString();
-
-  if (tickError) {
-    // Whole-tick failure — every target instrument counts as a fail this tick
-    for (const sym of INSTRUMENTS) _markFailed(cache, sym, tickError, now);
-  } else {
-    for (const sym of INSTRUMENTS) {
-      const last = prices?.[sym];
-      if (Number.isFinite(last)) {
-        _markFresh(cache, sym, last, now, et);
-      } else {
-        _markFailed(cache, sym, 'NOT_IN_WATCHLIST_OR_NO_PRICE', now);
-      }
+  const hits = [];
+  const misses = [];
+  for (const sym of INSTRUMENTS) {
+    const last = prices?.[sym];
+    if (Number.isFinite(last)) {
+      cache[sym] = _freshEntry(last, t0, et);
+      hits.push(`${sym}=${last}`);
+    } else {
+      misses.push(sym);
     }
   }
-
   _writeCache(cache);
+  console.log(`  [FUT_PRICER] ${et}  ✓ ${hits.length}/${INSTRUMENTS.length}  ${hits.join(' ')}${misses.length ? '  miss:' + misses.join(',') : ''}  (${dur}ms)`);
+  return { ok: true, hits: hits.length, misses, durationMs: dur, et, prices };
 }
 
 export function startFuturesPricer() {
   if (_started) return;
   _started = true;
-  console.log(`  [FUT_PRICER] starting — ${INSTRUMENTS.join(', ')} every ${POLL_MS}ms via TV CDP watchlist`);
+  console.log(`  [FUT_PRICER] starting — ${INSTRUMENTS.join(', ')} every ${POLL_MS}ms via TV CDP watchlist (stateless per-tick)`);
   setTimeout(() => {
-    _tick().catch(e => console.error(`  [FUT_PRICER] initial tick error: ${e.message}`));
+    tickOnce().catch(e => console.error(`  [FUT_PRICER] initial tick uncaught: ${e.message}`));
   }, INITIAL_DELAY_MS);
   _timer = setInterval(() => {
-    _tick().catch(e => console.error(`  [FUT_PRICER] tick error: ${e.message}`));
+    tickOnce().catch(e => console.error(`  [FUT_PRICER] tick uncaught: ${e.message}`));
   }, POLL_MS);
 }
 

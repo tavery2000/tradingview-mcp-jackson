@@ -382,6 +382,7 @@ function helpText() {
     '  kill entries confirm      ⚠ set WEBULL_INTEGRATION_HALT=true (all entries blocked)',
     '  resume entries            clear WEBULL_INTEGRATION_HALT',
     '  toggle 1h gate            flip COUNTER_TREND_1H_ENABLED',
+    '  repoll futures            force immediate fresh TV CDP fetch (bypass interval)',
     '  flatten all confirm       ⚠ CLOSE all open futures + equity',
     '  flatten futures confirm   ⚠ CLOSE all open futures only',
     '  flatten equity confirm    ⚠ CLOSE all open SPY/QQQ only',
@@ -609,6 +610,7 @@ async function answerKillEntries()     { return _fmtCtrl(await _ctrlPost('/halt-
 async function answerResumeEntries()   { return _fmtCtrl(await _ctrlPost('/resume-entries')); }
 async function answerToggle1HGate()    { return _fmtCtrl(await _ctrlPost('/toggle-1h-gate')); }
 async function answerMcpRestartCtrl()  { return _fmtCtrl(await _ctrlPost('/mcp-restart')); }
+async function answerRepollFutures()   { return _fmtCtrl(await _ctrlPost('/repoll-futures')); }
 
 async function answerFlattenScope(scope) {
   const r = await _ctrlPost('/flatten', { scope });
@@ -859,6 +861,7 @@ export async function answerQuestion(text) {
   if (/^halt\s+path2\b/.test(lo))              return answerHaltPath2();
   if (/^resume\s+path2\b/.test(lo))            return answerResumePath2();
   if (/^toggle\s+1h\s+gate\b/.test(lo))        return answerToggle1HGate();
+  if (/^repoll\s+futures\b/.test(lo))          return answerRepollFutures();
   if (/^mcp\s+restart\b/.test(lo))             return answerMcpRestartCtrl();
   if (/^kill\s+entries\b/.test(lo)) {
     if (_needsConfirm(lo, /^kill\s+entries\b/)) return '⚠ WILL HALT ALL ENTRIES (Pine alerts will be rejected).\n  Re-run as: kill entries confirm';

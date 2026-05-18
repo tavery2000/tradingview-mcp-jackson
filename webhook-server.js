@@ -628,6 +628,18 @@ async function handleControlFlatten(req, res) {
   send(res, 200, out);
 }
 
+async function handleControlRepollFutures(_req, res) {
+  let result;
+  try {
+    const m = await import('./futuresPricer.js');
+    result = await m.tickOnce();
+  } catch (e) {
+    result = { ok: false, error: e.message };
+  }
+  _opAlert('repoll-futures', { ok: result.ok, hits: result.hits, error: result.error });
+  send(res, 200, { action: 'repoll-futures', ...result, ts: new Date().toISOString() });
+}
+
 async function handleControlMcpRestart(_req, res) {
   let result = { ok: false };
   try {
@@ -704,6 +716,7 @@ const server = http.createServer(async (req, res) => {
   if (method === 'POST' && url === '/control/toggle-1h-gate')          return handleControlToggle1H(req, res);
   if (method === 'POST' && url === '/control/clear-circuit-breaker')   return handleControlClearCircuitBreaker(req, res);
   if (method === 'POST' && url === '/control/flatten')                 return handleControlFlatten(req, res);
+  if (method === 'POST' && url === '/control/repoll-futures')          return handleControlRepollFutures(req, res);
   if (method === 'POST' && url === '/control/mcp-restart')             return handleControlMcpRestart(req, res);
 
   send(res, 404, { ok: false, reason: 'NOT_FOUND', method, url });

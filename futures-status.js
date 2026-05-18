@@ -113,20 +113,27 @@ function render() {
   );
 
   // ── Live prices line ──
-  // 2026-05-18: futuresPricer.js writes `stale: true` after 3 consecutive MCP
-  // snapshot failures per operator spec; render LIVE=STALE in red with
-  // last-good ET time so the operator isn't silently flying blind.
+  // 2026-05-18 mid-RTH: STALE rendering removed entirely (stale-flag layer
+  // in futuresPricer caused permanent corruption visible across restarts).
+  // Now: always render last-known price; color by age so the operator can
+  // tell at a glance whether the feed is current. Age buckets:
+  //   <30s   cyan   (fresh)
+  //   30-120s yellow (degrading)
+  //   ≥120s   red    (likely down — but data still shown)
+  const _ageColor = (ageS) => {
+    if (ageS == null)   return C.gray;
+    if (ageS < 30)      return C.cyan;
+    if (ageS < 120)     return C.yellow;
+    return C.red;
+  };
   const priceCells = ['ES1!', 'NQ1!', 'MES1!', 'MNQ1!'].map(sym => {
     const entry = prices[sym];
-    const p = entry?.last;
-    const ageS = entry?.ts ? Math.floor((Date.now() - entry.ts) / 1000) : null;
-    if (entry?.stale === true) {
-      const lastEt = entry?.et || '—';
-      return `${C.dim}${sym}${C.reset} ${C.red}STALE${C.reset} ${C.gray}(last ${lastEt})${C.reset}`;
-    }
+    const p     = entry?.last;
+    const ageS  = entry?.ts ? Math.floor((Date.now() - entry.ts) / 1000) : null;
     if (!Number.isFinite(p)) return `${C.dim}${sym}=—${C.reset}`;
-    const ageMark = ageS == null ? '' : ageS > 60 ? C.red + `(${ageS}s)` + C.reset : C.gray + `(${ageS}s)` + C.reset;
-    return `${C.dim}${sym}${C.reset} ${C.cyan}${p.toLocaleString()}${C.reset} ${ageMark}`;
+    const color = _ageColor(ageS);
+    const ageMark = ageS == null ? '' : `${color}(${ageS}s)${C.reset}`;
+    return `${C.dim}${sym}${C.reset} ${color}${p.toLocaleString()}${C.reset} ${ageMark}`;
   });
   console.log('  ' + priceCells.join('   '));
   console.log(C.gray + '─'.repeat(110) + C.reset);
@@ -144,18 +151,20 @@ function render() {
     for (const t of open) {
       const priceEntry = prices[t.instrument];
       const live = priceEntry?.last;
-      const liveStale = priceEntry?.stale === true;
+      const ageS = priceEntry?.ts ? Math.floor((Date.now() - priceEntry.ts) / 1000) : null;
       const dirMult = t.signal === 'CALLS' ? 1 : -1;
-      const uPnL = (Number.isFinite(live) && !liveStale)
+      const uPnL = Number.isFinite(live)
         ? (live - t.entryPrice) * dirMult * (t.pointValue || 0) * (t.contracts || 0)
         : null;
       const dirColor = t.signal === 'CALLS' ? C.green : C.red;
-      const liveCell = liveStale
-        ? C.red + 'STALE' + C.reset
-        : (Number.isFinite(live) ? live.toLocaleString() : '—');
-      const uPnLCell = liveStale
-        ? C.red + 'STALE' + C.reset
-        : (uPnL == null ? '—' : (uPnL >= 0 ? C.green : C.red) + fmtMoney(uPnL) + C.reset);
+      // Always show data when present; age determines color (not blocking).
+      const liveColor = _ageColor(ageS);
+      const liveCell = Number.isFinite(live)
+        ? `${liveColor}${live.toLocaleString()}${C.reset}`
+        : '—';
+      const uPnLCell = uPnL == null
+        ? '—'
+        : (uPnL >= 0 ? C.green : C.red) + fmtMoney(uPnL) + C.reset;
       console.log(
         `  ${pad(t.fillTimeET || '—', 8)} ${pad(t.instrument, 6)} ${dirColor}${pad(t.signal, 5)}${C.reset} ` +
         `${pad(t.engine || '—', 5)} ${pad(t.tier || '—', 4)} ${pad(t.contracts ?? '—', 3, 'left')} ` +
