@@ -102,26 +102,43 @@ const POINT_VALUE = {
 };
 
 // 2026-05-18 pre-RTH (Mon 5/18 Task #0 partial): per-instrument capital
-// cap port from paperTrading.js commit c26b049. Same env vars as the
-// options-side; mirror values intact so a single .env change moves both.
-// Formula here uses notional = entryUnderlying × pointValue per spec
-// (NOT margin). Operator-tunable interpretation pending audit item (c).
-const _legacyFutCap = process.env.CAPITAL_CAP_PER_TRADE;
-const CAPITAL_CAP_FUTURES_CLASS = parseFloat(process.env.CAPITAL_CAP_FUTURES || _legacyFutCap || '10000');
+// cap. Operator policy: cap = broker minimum overnight margin + $1K buffer.
+// Formula: capital used per contract = MARGIN_PER_CONTRACT (NOT notional).
+// allowed_contracts = floor(cap / margin_per_contract).
+//
+// Defaults below: Webull overnight margin estimates as of mid-2026 + $1K.
+// Operator overrides via .env per-instrument:
+//   CAPITAL_CAP_ES=15000   FUT_OVERNIGHT_MARGIN_ES=14000
+//   CAPITAL_CAP_NQ=23000   FUT_OVERNIGHT_MARGIN_NQ=22000
+//   CAPITAL_CAP_MES=2500   FUT_OVERNIGHT_MARGIN_MES=1500
+//   CAPITAL_CAP_MNQ=3200   FUT_OVERNIGHT_MARGIN_MNQ=2200
+const FUT_OVERNIGHT_MARGIN = {
+  'ES':    parseFloat(process.env.FUT_OVERNIGHT_MARGIN_ES  || '14000'),
+  'NQ':    parseFloat(process.env.FUT_OVERNIGHT_MARGIN_NQ  || '22000'),
+  'MES':   parseFloat(process.env.FUT_OVERNIGHT_MARGIN_MES || '1500'),
+  'MNQ':   parseFloat(process.env.FUT_OVERNIGHT_MARGIN_MNQ || '2200'),
+  'ES1!':  parseFloat(process.env.FUT_OVERNIGHT_MARGIN_ES  || '14000'),
+  'NQ1!':  parseFloat(process.env.FUT_OVERNIGHT_MARGIN_NQ  || '22000'),
+  'MES1!': parseFloat(process.env.FUT_OVERNIGHT_MARGIN_MES || '1500'),
+  'MNQ1!': parseFloat(process.env.FUT_OVERNIGHT_MARGIN_MNQ || '2200'),
+};
 const FUT_CAPITAL_CAP_PER_INSTRUMENT = {
-  'ES':    parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
-  'NQ':    parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
-  'MES':   parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
-  'MNQ':   parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
-  'ES1!':  parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
-  'NQ1!':  parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
-  'MES1!': parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
-  'MNQ1!': parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
+  'ES':    parseFloat(process.env.CAPITAL_CAP_ES  || '15000'),   // 14K margin + 1K
+  'NQ':    parseFloat(process.env.CAPITAL_CAP_NQ  || '23000'),   // 22K margin + 1K
+  'MES':   parseFloat(process.env.CAPITAL_CAP_MES || '2500'),    // 1.5K margin + 1K
+  'MNQ':   parseFloat(process.env.CAPITAL_CAP_MNQ || '3200'),    // 2.2K margin + 1K
+  'ES1!':  parseFloat(process.env.CAPITAL_CAP_ES  || '15000'),
+  'NQ1!':  parseFloat(process.env.CAPITAL_CAP_NQ  || '23000'),
+  'MES1!': parseFloat(process.env.CAPITAL_CAP_MES || '2500'),
+  'MNQ1!': parseFloat(process.env.CAPITAL_CAP_MNQ || '3200'),
 };
 function _futCapForInstrument(inst) {
   const k = (inst || '').toUpperCase();
-  if (FUT_CAPITAL_CAP_PER_INSTRUMENT[k] != null) return FUT_CAPITAL_CAP_PER_INSTRUMENT[k];
-  return CAPITAL_CAP_FUTURES_CLASS;
+  return FUT_CAPITAL_CAP_PER_INSTRUMENT[k] ?? null;
+}
+function _futMarginForInstrument(inst) {
+  const k = (inst || '').toUpperCase();
+  return FUT_OVERNIGHT_MARGIN[k] ?? null;
 }
 
 // 2026-05-18 pre-RTH: MAX_LOSS_PER_TRADE gate. Risk-based per-contract
@@ -477,30 +494,27 @@ export function placeFuturesOrder(consensus, requestId) {
   const stopPoints = tierCfg.stopPoints;
 
   // 2026-05-18 pre-RTH (Mon 5/18 Task #0 partial): per-instrument capital cap.
-  // Formula: notional = entryUnderlying × pointValue per contract.
-  // If 1 contract exceeds cap → reject. If multi-contract exceeds → reduce.
-  // NOTE: operator audit item (c) deferred — notional vs margin TBD.
-  // Current literal-spec impl uses notional. NQ futures at $29K underlying
-  // × $20/pt = $584K notional vs $3K cap → will reject ALL NQ entries
-  // until operator decides margin-based formula or bumps NQ cap.
-  const _futEntryUnderlying = consensus.underlyingPrice ?? consensus.entryPrice ?? 0;
-  const _futPointValue      = getPointValue(inst);
-  const _futCapPerTrade     = _futCapForInstrument(inst);
-  if (_futCapPerTrade > 0 && _futEntryUnderlying > 0 && _futPointValue > 0) {
-    const _perContractNotional = _futEntryUnderlying * _futPointValue;
-    const _capImpliedContracts = Math.floor(_futCapPerTrade / _perContractNotional);
+  // Formula: per-contract MARGIN (broker overnight initial margin, NOT notional).
+  // cap = margin + $1K buffer per operator policy.
+  // allowed_contracts = floor(cap / margin_per_contract).
+  // Default 1-contract sizing for typical accounts: each cap allows exactly 1c
+  // because cap ≈ margin + $1K and 2c × margin > cap.
+  const _futPointValue   = getPointValue(inst);
+  const _futCapPerTrade  = _futCapForInstrument(inst);
+  const _futMarginPerC   = _futMarginForInstrument(inst);
+  if (_futCapPerTrade > 0 && _futMarginPerC > 0) {
+    const _capImpliedContracts = Math.floor(_futCapPerTrade / _futMarginPerC);
     if (_capImpliedContracts < 1) {
-      const reason = `FUT_CAPITAL_CAP_PER_TRADE — 1 contract notional $${_perContractNotional.toFixed(0)} > cap $${_futCapPerTrade} (${inst} @ ${_futEntryUnderlying} × $${_futPointValue}/pt)`;
+      const reason = `FUT_CAPITAL_CAP_PER_TRADE — 1 contract margin $${_futMarginPerC.toFixed(0)} > cap $${_futCapPerTrade} (${inst})`;
       futuresOrderGate.markVetoed(requestId, reason);
       jGateBlock(consensus.engine, inst, direction, 'FUT_CAPITAL_CAP_PER_TRADE', {
-        instrument: inst, entryUnderlying: _futEntryUnderlying, pointValue: _futPointValue,
-        oneContractNotional: _perContractNotional, capPerTrade: _futCapPerTrade,
+        instrument: inst, marginPerContract: _futMarginPerC, capPerTrade: _futCapPerTrade,
       });
       console.log(`  🛑 ${reason}`);
       return { vetoed: true, reason };
     }
     if (_capImpliedContracts < contracts) {
-      console.log(`  ⚠ FUT_CAPITAL_CAP_PER_TRADE — reducing contracts ${contracts}→${_capImpliedContracts} (notional $${(_perContractNotional * _capImpliedContracts).toFixed(0)} ≤ cap $${_futCapPerTrade})`);
+      console.log(`  ⚠ FUT_CAPITAL_CAP_PER_TRADE — reducing contracts ${contracts}→${_capImpliedContracts} (${_capImpliedContracts}c × $${_futMarginPerC} margin = $${(_futMarginPerC * _capImpliedContracts).toFixed(0)} ≤ cap $${_futCapPerTrade})`);
       contracts = _capImpliedContracts;
     }
   }
@@ -919,7 +933,8 @@ export function getFuturesLedger() {
 // ─── Startup banner + eval timer ───────────────────────────────────────
 
 console.log(`  [futuresTrading] mode=${FUTURES_TRADING_MODE} balance=$${ledger.balance.toFixed(0)} instruments=${[...ALLOWED_INSTRUMENTS].join(',')}`);
-console.log(`  [futuresTrading] Per-instrument caps: ES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['ES']} NQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['NQ']} MES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MES']} MNQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MNQ']} (notional formula = price × pointValue × contracts)`);
+console.log(`  [futuresTrading] Per-instrument caps (margin + $1K): ES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['ES']} NQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['NQ']} MES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MES']} MNQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MNQ']}`);
+console.log(`  [futuresTrading] Overnight margins:  ES=$${FUT_OVERNIGHT_MARGIN['ES']} NQ=$${FUT_OVERNIGHT_MARGIN['NQ']} MES=$${FUT_OVERNIGHT_MARGIN['MES']} MNQ=$${FUT_OVERNIGHT_MARGIN['MNQ']} (allowed contracts = floor(cap / margin))`);
 console.log(`  [futuresTrading] Max loss per trade: $${FUT_MAX_LOSS_PER_TRADE} (stop × pointValue × contracts)`);
 console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000').toFixed(0)} → 1 contract regardless of tier`);
 console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → auto-halt`);
