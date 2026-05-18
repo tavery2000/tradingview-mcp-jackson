@@ -162,6 +162,67 @@ slip to Wednesday if audit takes the full day.
 
 ---
 
+## June 1 production-flip spec (operator clarification, Sun 5/17 EOD)
+
+**MES intraday-only**, market hours 09:00-16:00 ET, **$1,000 budget**.
+Avoids overnight margin entirely.
+
+| Item | Value |
+|---|---|
+| Instrument | MES (only) |
+| Trading window | 09:00-16:00 ET (broader than equity RTH on the AM end) |
+| Account budget | $1,000 |
+| Webull MES **day** margin | $267 |
+| Webull MES **overnight** margin | $1,500 (avoided by hard 16:00 close) |
+| Cap (margin + $1K buffer) | ~$1,267 |
+| Allowed contracts under cap | floor($1267/$267) = 4 |
+| Allowed contracts under sizing floor (<$10K → 1c) | 1 |
+| **Effective sizing** | **1 contract per signal** |
+
+**Code changes needed before 6/1:**
+
+1. **Day-margin config** — current code uses overnight values
+   (`FUT_OVERNIGHT_MARGIN_MES=$1500`). For 6/1 either rename to
+   neutral `FUT_MARGIN_MES` or add a parallel `FUT_DAY_MARGIN_MES=$267`
+   with a `FUT_MARGIN_MODE=day|overnight` selector. Recommend the
+   neutral rename + operator sets per session intent.
+
+2. **Hard intraday close gate** — currently no enforcement of "close
+   all futures by 16:00 ET." Need a new module (mirror `preSwitchKill.js`
+   pattern): scheduler that auto-runs `closeFuturesPosition` against
+   every open MES at 15:55 ET. Plus an entry-side gate that rejects
+   new entries past `FUT_INTRADAY_NO_ENTRY_AFTER_ET=15:30` to give
+   stops + targets time to fire before forced close.
+
+3. **Trading window narrowed** — current 23/5 gates allow Globex
+   sessions. For 6/1 MES-only intraday, add `FUT_SESSION_START_ET=09:00`
+   + `FUT_SESSION_END_ET=16:00` env vars. Operator may want to keep
+   23/5 active for paper sandbox week and narrow only on 6/1 flip.
+
+4. **Account balance reflects budget** — currently `futures-ledger.json`
+   has $10,000 starting balance (Sunday reset). For 6/1, reset to $1,000
+   to match real live-account budget. Backup the paper-sandbox-week
+   ledger to `futures-ledger.2026-05-31-PRE-LIVE.backup.json` before
+   the reset.
+
+5. **Live-mode flag** — currently `FUTURES_TRADING_MODE=PAPER`. For
+   6/1 flip to `LIVE`. The paper/live distinction in code currently
+   just affects ledger labeling; need to verify it actually routes to
+   real broker execution path (likely via MCP or Path 2 + Webull
+   live endpoint depending on what survives the week).
+
+**Why this matters for the audit:** items 1-2 are PREREQUISITE for
+6/1 trading even being possible at $1K budget. Without day-margin
+config + hard intraday close, broker rejects at $1K (under $1.5K
+overnight) AND positions could carry overnight by accident. Get
+these into the Tue-Thu deploy queue alongside the gate fixes.
+
+**Operator-confirmed test premise:** *"I'm going to test your (Hank)
+abilities. June 1st you will trade MES during market hours 09:00 to
+16:00 (avoid margin) with a $1k budget."*
+
+---
+
 *Drafted 2026-05-17 EOD after catastrophic failure observation. Halt
 flags wired immediately to prevent further damage. Full audit + fixes
 land Monday morning.*
