@@ -101,6 +101,34 @@ const POINT_VALUE = {
   'NQ1!': 20, 'NQ': 20,
 };
 
+// 2026-05-18 pre-RTH (Mon 5/18 Task #0 partial): per-instrument capital
+// cap port from paperTrading.js commit c26b049. Same env vars as the
+// options-side; mirror values intact so a single .env change moves both.
+// Formula here uses notional = entryUnderlying × pointValue per spec
+// (NOT margin). Operator-tunable interpretation pending audit item (c).
+const _legacyFutCap = process.env.CAPITAL_CAP_PER_TRADE;
+const CAPITAL_CAP_FUTURES_CLASS = parseFloat(process.env.CAPITAL_CAP_FUTURES || _legacyFutCap || '10000');
+const FUT_CAPITAL_CAP_PER_INSTRUMENT = {
+  'ES':    parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
+  'NQ':    parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
+  'MES':   parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
+  'MNQ':   parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
+  'ES1!':  parseFloat(process.env.CAPITAL_CAP_ES  || '1000'),
+  'NQ1!':  parseFloat(process.env.CAPITAL_CAP_NQ  || '3000'),
+  'MES1!': parseFloat(process.env.CAPITAL_CAP_MES || '2000'),
+  'MNQ1!': parseFloat(process.env.CAPITAL_CAP_MNQ || '1500'),
+};
+function _futCapForInstrument(inst) {
+  const k = (inst || '').toUpperCase();
+  if (FUT_CAPITAL_CAP_PER_INSTRUMENT[k] != null) return FUT_CAPITAL_CAP_PER_INSTRUMENT[k];
+  return CAPITAL_CAP_FUTURES_CLASS;
+}
+
+// 2026-05-18 pre-RTH: MAX_LOSS_PER_TRADE gate. Risk-based per-contract
+// loss = stopPoints × pointValue. Orthogonal to capital cap (notional).
+// Default $200 per env. Set 0 to disable.
+const FUT_MAX_LOSS_PER_TRADE = parseFloat(process.env.MAX_LOSS_PER_TRADE || '200');
+
 // Whipsaw inheritance from P1-5-A
 const WHIPSAW_PROTECTION = (process.env.WHIPSAW_PROTECTION || 'true').toLowerCase() === 'true';
 const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'bar_close').toLowerCase();
@@ -447,6 +475,57 @@ export function placeFuturesOrder(consensus, requestId) {
     contracts = 1;
   }
   const stopPoints = tierCfg.stopPoints;
+
+  // 2026-05-18 pre-RTH (Mon 5/18 Task #0 partial): per-instrument capital cap.
+  // Formula: notional = entryUnderlying × pointValue per contract.
+  // If 1 contract exceeds cap → reject. If multi-contract exceeds → reduce.
+  // NOTE: operator audit item (c) deferred — notional vs margin TBD.
+  // Current literal-spec impl uses notional. NQ futures at $29K underlying
+  // × $20/pt = $584K notional vs $3K cap → will reject ALL NQ entries
+  // until operator decides margin-based formula or bumps NQ cap.
+  const _futEntryUnderlying = consensus.underlyingPrice ?? consensus.entryPrice ?? 0;
+  const _futPointValue      = getPointValue(inst);
+  const _futCapPerTrade     = _futCapForInstrument(inst);
+  if (_futCapPerTrade > 0 && _futEntryUnderlying > 0 && _futPointValue > 0) {
+    const _perContractNotional = _futEntryUnderlying * _futPointValue;
+    const _capImpliedContracts = Math.floor(_futCapPerTrade / _perContractNotional);
+    if (_capImpliedContracts < 1) {
+      const reason = `FUT_CAPITAL_CAP_PER_TRADE — 1 contract notional $${_perContractNotional.toFixed(0)} > cap $${_futCapPerTrade} (${inst} @ ${_futEntryUnderlying} × $${_futPointValue}/pt)`;
+      futuresOrderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, inst, direction, 'FUT_CAPITAL_CAP_PER_TRADE', {
+        instrument: inst, entryUnderlying: _futEntryUnderlying, pointValue: _futPointValue,
+        oneContractNotional: _perContractNotional, capPerTrade: _futCapPerTrade,
+      });
+      console.log(`  🛑 ${reason}`);
+      return { vetoed: true, reason };
+    }
+    if (_capImpliedContracts < contracts) {
+      console.log(`  ⚠ FUT_CAPITAL_CAP_PER_TRADE — reducing contracts ${contracts}→${_capImpliedContracts} (notional $${(_perContractNotional * _capImpliedContracts).toFixed(0)} ≤ cap $${_futCapPerTrade})`);
+      contracts = _capImpliedContracts;
+    }
+  }
+
+  // 2026-05-18 pre-RTH: MAX_LOSS_PER_TRADE gate. Per-contract stop loss =
+  // stopPoints × pointValue. If contracts × per-contract-loss > cap, reduce
+  // contracts until it fits. If even 1c exceeds, reject. Default $200.
+  if (FUT_MAX_LOSS_PER_TRADE > 0 && _futPointValue > 0 && stopPoints > 0) {
+    const _perContractMaxLoss = stopPoints * _futPointValue;
+    const _maxLossImpliedContracts = Math.floor(FUT_MAX_LOSS_PER_TRADE / _perContractMaxLoss);
+    if (_maxLossImpliedContracts < 1) {
+      const reason = `FUT_MAX_LOSS_PER_TRADE — 1 contract risk $${_perContractMaxLoss.toFixed(0)} > cap $${FUT_MAX_LOSS_PER_TRADE} (${inst} ${stopPoints}pt × $${_futPointValue}/pt)`;
+      futuresOrderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, inst, direction, 'FUT_MAX_LOSS_PER_TRADE', {
+        instrument: inst, stopPoints, pointValue: _futPointValue,
+        oneContractMaxLoss: _perContractMaxLoss, cap: FUT_MAX_LOSS_PER_TRADE,
+      });
+      console.log(`  🛑 ${reason}`);
+      return { vetoed: true, reason };
+    }
+    if (_maxLossImpliedContracts < contracts) {
+      console.log(`  ⚠ FUT_MAX_LOSS_PER_TRADE — reducing contracts ${contracts}→${_maxLossImpliedContracts} (risk $${(_perContractMaxLoss * _maxLossImpliedContracts).toFixed(0)} ≤ cap $${FUT_MAX_LOSS_PER_TRADE})`);
+      contracts = _maxLossImpliedContracts;
+    }
+  }
   const targetPoints = tierCfg.targetPoints;
 
   // Underlying entry price — Pine alert provides it via consensus.underlyingPrice
@@ -840,6 +919,10 @@ export function getFuturesLedger() {
 // ─── Startup banner + eval timer ───────────────────────────────────────
 
 console.log(`  [futuresTrading] mode=${FUTURES_TRADING_MODE} balance=$${ledger.balance.toFixed(0)} instruments=${[...ALLOWED_INSTRUMENTS].join(',')}`);
+console.log(`  [futuresTrading] Per-instrument caps: ES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['ES']} NQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['NQ']} MES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MES']} MNQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MNQ']} (notional formula = price × pointValue × contracts)`);
+console.log(`  [futuresTrading] Max loss per trade: $${FUT_MAX_LOSS_PER_TRADE} (stop × pointValue × contracts)`);
+console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000').toFixed(0)} → 1 contract regardless of tier`);
+console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → auto-halt`);
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
 console.log(`  [futuresTrading] stacking ${STACKING_WINDOW_MS/1000}s window (aggressive) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
