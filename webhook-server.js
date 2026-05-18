@@ -575,7 +575,13 @@ server.listen(PORT, () => {
   const _ctMult = parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6');
   const _ctFut  = process.env.COUNTER_TREND_FUTURES_MODE || _ctMode;
   const _ctEq   = process.env.COUNTER_TREND_EQUITY_MODE  || _ctMode;
-  console.log(`  [WEBHOOK] Counter-trend gates: futures=${_ctFut}  equity=${_ctEq}  downweight×${_ctMult}`);
+  const _ct1H   = (process.env.COUNTER_TREND_1H_ENABLED || 'true').toLowerCase() === 'true';
+  // 2026-05-18: format multiplier inline per side; only show `× <mult>` when
+  // mode is down_weight (block / off don't use it).
+  const _ctFmt = (m) => m === 'down_weight' ? `${m} × ${_ctMult}` : m;
+  console.log(`  [WEBHOOK] Counter-trend gates: futures=${_ctFmt(_ctFut)}`);
+  console.log(`  [WEBHOOK]                      equity=${_ctFmt(_ctEq)}`);
+  console.log(`  [WEBHOOK]                      1H-structural=${_ct1H ? 'ENABLED' : 'disabled'}`);
   // 2026-05-15 Task 7: arm the pre-12:00-ET kill scheduler. Idempotent.
   startPreSwitchScheduler();
   // 2026-05-16 Phase 1 Additional: arm the daily calibration rebuild.
