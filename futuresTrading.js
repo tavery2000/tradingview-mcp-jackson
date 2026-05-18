@@ -547,7 +547,7 @@ function _resolveTier(consensus) {
 // ─── Place order (entry path) ──────────────────────────────────────────
 
 export function placeFuturesOrder(consensus, requestId) {
-  const inst = (consensus.instrument || '').toUpperCase();
+  let inst = (consensus.instrument || '').toUpperCase();   // mutable: micro-fallback may re-route
   const direction = consensus.signal;   // CALLS | PUTS
 
   // 2026-05-17 EOD: PATH2_HALT global circuit-breaker (manual env flag).
@@ -672,6 +672,34 @@ export function placeFuturesOrder(consensus, requestId) {
     contracts = 1;
   }
   const stopPoints = tierCfg.stopPoints;
+
+  // 2026-05-18 13:05 ET — micro-fallback (operator-restored).
+  // When a full-contract Pine alert (ES1!/NQ1!) can't fit its overnight
+  // margin within its per-instrument cap, auto-route to the corresponding
+  // micro (MES1!/MNQ1!) at 1c. Catches setups that fire on the full chart
+  // when only the micro fits the cap. Symmetric to the original 2026-05-17
+  // logic that got removed when Path 2 was restored. Mutates `inst` and
+  // `consensus.instrument` so the downstream cap / max-loss / ledger paths
+  // all see the routed symbol.
+  const MICRO_FALLBACK_MAP = { 'ES1!': 'MES1!', 'NQ1!': 'MNQ1!' };
+  if (MICRO_FALLBACK_MAP[inst]) {
+    const _fullCap    = _futCapForInstrument(inst);
+    const _fullMargin = _futMarginForInstrument(inst);
+    if (_fullCap > 0 && _fullMargin > 0 && _fullMargin > _fullCap) {
+      const _micro       = MICRO_FALLBACK_MAP[inst];
+      const _microCap    = _futCapForInstrument(_micro);
+      const _microMargin = _futMarginForInstrument(_micro);
+      if (_microCap > 0 && _microMargin > 0 && _microCap >= _microMargin) {
+        console.log(`  ⚠ MICRO_FALLBACK ${inst}→${_micro}  full margin $${_fullMargin} > cap $${_fullCap}; routing to micro (cap $${_microCap}, margin $${_microMargin})`);
+        try { jAlert('info', 'MICRO_FALLBACK', { from: inst, to: _micro, fullCap: _fullCap, fullMargin: _fullMargin, microCap: _microCap, microMargin: _microMargin, requestId }); } catch {}
+        inst = _micro;
+        consensus.instrument = _micro;
+      } else {
+        console.log(`  ⚠ MICRO_FALLBACK ${inst}→${_micro} UNAVAILABLE — micro margin $${_microMargin} > micro cap $${_microCap}. Raise CAPITAL_CAP_${_micro.replace('1!','')} ≥ $${_microMargin}.`);
+        try { jAlert('warning', 'MICRO_FALLBACK_UNAVAILABLE', { from: inst, to: _micro, microCap: _microCap, microMargin: _microMargin, requestId }); } catch {}
+      }
+    }
+  }
 
   // 2026-05-18 pre-RTH (Mon 5/18 Task #0 partial): per-instrument capital cap.
   // Formula: per-contract MARGIN (broker overnight initial margin, NOT notional).
@@ -1121,6 +1149,7 @@ if (ledger.reset_reason && (ledger.trades?.length ?? 0) === 0 && (ledger.totalTr
 }
 console.log(`  [futuresTrading] mode=${FUTURES_TRADING_MODE} balance=$${ledger.balance.toFixed(0)} instruments=${[...ALLOWED_INSTRUMENTS].join(',')}`);
 console.log(`  [futuresTrading] Per-instrument caps (margin + $1K): ES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['ES']} NQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['NQ']} MES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MES']} MNQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MNQ']}`);
+console.log(`  [futuresTrading] Micro-fallback: ES1!→MES1!, NQ1!→MNQ1! (auto-route when full margin > cap)`);
 console.log(`  [futuresTrading] Overnight margins:  ES=$${FUT_OVERNIGHT_MARGIN['ES']} NQ=$${FUT_OVERNIGHT_MARGIN['NQ']} MES=$${FUT_OVERNIGHT_MARGIN['MES']} MNQ=$${FUT_OVERNIGHT_MARGIN['MNQ']} (allowed contracts = floor(cap / margin))`);
 console.log(`  [futuresTrading] Max loss per trade: $${FUT_MAX_LOSS_PER_TRADE} (stop × pointValue × contracts)`);
 console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000').toFixed(0)} → 1 contract regardless of tier`);
