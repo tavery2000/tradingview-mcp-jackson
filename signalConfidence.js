@@ -288,20 +288,25 @@ export function gateMacro4H(signal, ctx) {
 const _FUTURES_SET = new Set(['ES', 'NQ', 'MES', 'MNQ', 'ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
 
 // P0 (2026-05-15 EOD): structurePattern opposes signal when
-//   CALLS + (LH_LL | HH_LL | LH_HL) — bearish or mixed-bearish 1H
-//   PUTS  + (HH_HL | LH_HL | HH_LL) — bullish or mixed-bullish 1H
-// LH_HL and HH_LL are mixed; counted as opposing because they indicate
-// structural ambiguity, not clean trend support.
+//   CALLS + LH_LL — clean bearish 1H trend
+//   PUTS  + HH_HL — clean bullish 1H trend
+// 2026-05-18 (audit B follow-on): dropped LH_HL and HH_LL from both
+// opposition sets. Those are mixed/range-expanding patterns, not clean
+// counter-trends; treating them as opposing blocked ~every signal today
+// during a volatile pre-RTH range (e.g. HH_LL on SPY blocking BOTH
+// CALLS HL and PUTS HTF at 09:25:59). 4H down_weight + trendBias still
+// catch real counter-trend; this just removes the ambiguous-pattern
+// false positives.
 function _oneHourOpposesSignal(macro1H, direction) {
   if (!macro1H || direction == null) return false;
   const tb = macro1H.trendBias;
   const sp = macro1H.structurePattern;
   if (direction === 'CALLS') {
     if (tb === 'DOWN') return true;
-    if (sp === 'LH_LL' || sp === 'HH_LL' || sp === 'LH_HL') return true;
+    if (sp === 'LH_LL') return true;
   } else if (direction === 'PUTS') {
     if (tb === 'UP') return true;
-    if (sp === 'HH_HL' || sp === 'LH_HL' || sp === 'HH_LL') return true;
+    if (sp === 'HH_HL') return true;
   }
   return false;
 }
