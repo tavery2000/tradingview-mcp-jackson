@@ -163,29 +163,97 @@ let _dailyTargetFiredFor = null;     // ET-date string when target fired
 let _graduationFiredFor  = null;     // ET-date string when graduation alert fired
 let _evalTimer = null;
 
-// 2026-05-18 pre-RTH hot-fix (Mon 5/18 Task #0 partial): circuit breaker.
-// Rolling 5-min window. Trips on >= 3 closes OR cumulative loss <= -$500.
-// On trip: writes circuit-breaker-state.json + sets in-process halt flag.
-// Operator clears via `ask> clear circuit breaker` (deletes state file)
-// then restarts. Until cleared, all entries reject with CIRCUIT_BREAKER_TRIPPED.
-const CB_WINDOW_MS         = 5 * 60_000;
-const CB_MAX_CLOSES        = parseInt(process.env.CIRCUIT_BREAKER_MAX_CLOSES || '3', 10);
-const CB_MAX_CUM_LOSS      = parseFloat(process.env.CIRCUIT_BREAKER_MAX_CUM_LOSS || '500');   // absolute, positive
-let _circuitBreakerTripped = false;
-let _circuitBreakerReason  = null;
+// 2026-05-18: circuit breaker with 30min auto-resume + hard-halt-after-3-trips.
+// Rolling 5-min window detects cascades (>= 3 closes OR cumulative loss <= -$500).
+// On trip:
+//   - Records trippedAt timestamp + pushes to _circuitBreakerTrips history
+//   - Writes circuit-breaker-state.json
+// On every subsequent entry attempt:
+//   - If hard halt (>= TRIPS_BEFORE_HARD_HALT in HARD_HALT_WINDOW_MIN): reject,
+//     requires explicit operator clear via REPL
+//   - Else if cooldown elapsed (now - trippedAt >= COOLDOWN_MIN): auto-clear,
+//     log resume, allow entry
+//   - Else: reject with remaining cooldown minutes in the reason
+// Pattern matches profit-protection LIGHT/MEDIUM breach (30/60min halts).
+const CB_WINDOW_MS                = 5 * 60_000;
+const CB_MAX_CLOSES               = parseInt(process.env.CIRCUIT_BREAKER_MAX_CLOSES || '3', 10);
+const CB_MAX_CUM_LOSS             = parseFloat(process.env.CIRCUIT_BREAKER_MAX_CUM_LOSS || '500');   // absolute, positive
+const CB_COOLDOWN_MIN             = parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MIN || '30', 10);
+const CB_TRIPS_BEFORE_HARD_HALT   = parseInt(process.env.CIRCUIT_BREAKER_TRIPS_BEFORE_HARD_HALT || '3', 10);
+const CB_HARD_HALT_WINDOW_MIN     = parseInt(process.env.CIRCUIT_BREAKER_HARD_HALT_WINDOW_MIN || '120', 10);
+let _circuitBreakerTripped   = false;
+let _circuitBreakerReason    = null;
+let _circuitBreakerTrippedAt = 0;
+let _circuitBreakerHardHalt  = false;
+let _circuitBreakerTrips     = [];   // history of trip timestamps (rolling window for hard-halt detection)
 const _recentCloses = [];   // [{ts, pnl}]
+
+function _persistCircuitBreakerState() {
+  try {
+    writeFileSync(CIRCUIT_BREAKER_FILE, JSON.stringify({
+      tripped:        _circuitBreakerTripped,
+      hardHalt:       _circuitBreakerHardHalt,
+      reason:         _circuitBreakerReason,
+      trippedAt:      _circuitBreakerTrippedAt ? new Date(_circuitBreakerTrippedAt).toISOString() : null,
+      trippedAtET:    _circuitBreakerTrippedAt ? new Date(_circuitBreakerTrippedAt).toLocaleString('en-US', { timeZone: 'America/New_York' }) : null,
+      cooldownMin:    CB_COOLDOWN_MIN,
+      tripsInWindow:  _circuitBreakerTrips.length,
+      hardHaltThreshold: CB_TRIPS_BEFORE_HARD_HALT,
+      hardHaltWindowMin: CB_HARD_HALT_WINDOW_MIN,
+      tripHistoryET:  _circuitBreakerTrips.map(ts => new Date(ts).toLocaleString('en-US', { timeZone: 'America/New_York' })),
+      recentCloses:   _recentCloses.map(c => ({ ts: c.ts, et: new Date(c.ts).toLocaleString('en-US', { timeZone: 'America/New_York' }), pnl: c.pnl })),
+    }, null, 2));
+  } catch {}
+}
 
 // On startup, restore tripped state from disk if present
 try {
   if (existsSync(CIRCUIT_BREAKER_FILE)) {
     const s = JSON.parse(readFileSync(CIRCUIT_BREAKER_FILE, 'utf8'));
-    if (s && s.tripped && !s.cleared) {
-      _circuitBreakerTripped = true;
-      _circuitBreakerReason  = s.reason || 'unknown (restored from state file)';
-      console.log(`  ⛔ CIRCUIT BREAKER restored from disk: ${_circuitBreakerReason}`);
+    if (s && s.tripped) {
+      _circuitBreakerTripped   = true;
+      _circuitBreakerReason    = s.reason || 'unknown (restored from state file)';
+      _circuitBreakerTrippedAt = s.trippedAt ? new Date(s.trippedAt).getTime() : Date.now();
+      _circuitBreakerHardHalt  = !!s.hardHalt;
+      console.log(`  ⛔ CIRCUIT BREAKER restored from disk: ${_circuitBreakerReason}${_circuitBreakerHardHalt ? ' [HARD HALT]' : ''}`);
     }
   }
 } catch {}
+
+/**
+ * Called on every entry attempt. Returns:
+ *   { blocked: false }                       — proceed (or auto-resumed)
+ *   { blocked: true, reason: '...', autoResume: false }  — cooldown active
+ *   { blocked: true, reason: '...', hardHalt: true }     — requires operator clear
+ */
+export function circuitBreakerEntryCheck() {
+  if (!_circuitBreakerTripped) return { blocked: false };
+  if (_circuitBreakerHardHalt) {
+    return {
+      blocked: true, hardHalt: true,
+      reason: `CIRCUIT_BREAKER_HARD_HALT — ${_circuitBreakerTrips.length} trips in ${CB_HARD_HALT_WINDOW_MIN}min, operator REPL clear required`,
+    };
+  }
+  const now = Date.now();
+  const cooldownMs = CB_COOLDOWN_MIN * 60_000;
+  const elapsedMs  = now - _circuitBreakerTrippedAt;
+  if (elapsedMs >= cooldownMs) {
+    // Auto-resume
+    console.log(`  [CIRCUIT_BREAKER] auto-resume after ${(elapsedMs/60000).toFixed(1)}min cooldown (>= ${CB_COOLDOWN_MIN}min)`);
+    try { jAlert('info', 'CIRCUIT_BREAKER_AUTO_RESUME', { elapsedMin: parseFloat((elapsedMs/60000).toFixed(2)), cooldownMin: CB_COOLDOWN_MIN, previousReason: _circuitBreakerReason }); } catch {}
+    _circuitBreakerTripped = false;
+    _circuitBreakerReason  = null;
+    _circuitBreakerTrippedAt = 0;
+    // Keep _circuitBreakerTrips history for hard-halt detection across cycles
+    _persistCircuitBreakerState();
+    return { blocked: false };
+  }
+  const remainingMin = Math.ceil((cooldownMs - elapsedMs) / 60_000);
+  return {
+    blocked: true, autoResume: true, remainingMin,
+    reason: `CIRCUIT_BREAKER (auto-resume in ${remainingMin}min)`,
+  };
+}
 
 function _circuitBreakerCheck(closePnl) {
   if (_circuitBreakerTripped) return;   // already tripped
@@ -201,35 +269,62 @@ function _circuitBreakerCheck(closePnl) {
   if (count >= CB_MAX_CLOSES)          trip = `COUNT (${count} closes in ${CB_WINDOW_MS/60000}min)`;
   else if (cumPnl <= -CB_MAX_CUM_LOSS) trip = `CUMULATIVE_LOSS ($${cumPnl.toFixed(0)} in ${CB_WINDOW_MS/60000}min)`;
   if (trip) {
-    _circuitBreakerTripped = true;
-    _circuitBreakerReason  = trip;
-    try {
-      writeFileSync(CIRCUIT_BREAKER_FILE, JSON.stringify({
-        tripped: true, cleared: false, reason: trip,
-        trippedAt: new Date().toISOString(),
-        trippedAtET: getETString(),
-        windowMs: CB_WINDOW_MS,
-        closeCount: count,
-        cumulativeLoss: parseFloat(cumPnl.toFixed(2)),
-        closes: _recentCloses.map(c => ({ ts: c.ts, et: new Date(c.ts).toLocaleString('en-US', { timeZone: 'America/New_York' }), pnl: c.pnl })),
-      }, null, 2));
-    } catch {}
-    try { jAlert('critical', 'CIRCUIT_BREAKER_TRIPPED', { reason: trip, closeCount: count, cumulativeLoss: cumPnl }); } catch {}
-    console.log(`\n  ⛔⛔⛔ CIRCUIT BREAKER TRIPPED — ${trip}`);
-    console.log(`  ⛔ All futures entries BLOCKED until operator runs \`ask> clear circuit breaker\` + restart`);
-    // Best-effort TTS via global hook if available
+    _circuitBreakerTripped   = true;
+    _circuitBreakerReason    = trip;
+    _circuitBreakerTrippedAt = now;
+    // Track trip in hard-halt rolling window
+    _circuitBreakerTrips.push(now);
+    const hardHaltWindowMs = CB_HARD_HALT_WINDOW_MIN * 60_000;
+    _circuitBreakerTrips = _circuitBreakerTrips.filter(ts => now - ts <= hardHaltWindowMs);
+    if (_circuitBreakerTrips.length >= CB_TRIPS_BEFORE_HARD_HALT) {
+      _circuitBreakerHardHalt = true;
+    }
+    _persistCircuitBreakerState();
+    try { jAlert('critical', 'CIRCUIT_BREAKER_TRIPPED', { reason: trip, closeCount: count, cumulativeLoss: cumPnl, tripsInWindow: _circuitBreakerTrips.length, hardHalt: _circuitBreakerHardHalt }); } catch {}
+    if (_circuitBreakerHardHalt) {
+      console.log(`\n  ⛔⛔⛔ CIRCUIT BREAKER HARD HALT — ${trip}`);
+      console.log(`  ⛔ ${_circuitBreakerTrips.length} trips in ${CB_HARD_HALT_WINDOW_MIN}min — operator REPL clear required (no auto-resume)`);
+    } else {
+      console.log(`\n  ⛔⛔⛔ CIRCUIT BREAKER TRIPPED — ${trip}`);
+      console.log(`  ⛔ Futures entries BLOCKED — auto-resume in ${CB_COOLDOWN_MIN}min OR operator REPL clear`);
+    }
     if (typeof global.pushVoiceAlert === 'function') {
-      try { global.pushVoiceAlert('circuit-breaker', 'critical', `Circuit breaker tripped. ${trip}. Futures trading halted.`, 0); } catch {}
+      try { global.pushVoiceAlert('circuit-breaker', 'critical',
+        _circuitBreakerHardHalt
+          ? `Circuit breaker hard halt. ${_circuitBreakerTrips.length} trips. Operator clear required.`
+          : `Circuit breaker tripped. Auto resume in ${CB_COOLDOWN_MIN} minutes.`,
+        0); } catch {}
     }
   }
 }
 
 export function isCircuitBreakerTripped() { return _circuitBreakerTripped; }
+export function isCircuitBreakerHardHalt() { return _circuitBreakerHardHalt; }
 export function getCircuitBreakerReason() { return _circuitBreakerReason; }
+export function getCircuitBreakerStatus() {
+  if (!_circuitBreakerTripped) return { tripped: false };
+  const now = Date.now();
+  const cooldownMs = CB_COOLDOWN_MIN * 60_000;
+  const elapsedMs  = now - _circuitBreakerTrippedAt;
+  const remainingMin = Math.max(0, Math.ceil((cooldownMs - elapsedMs) / 60_000));
+  return {
+    tripped: true,
+    hardHalt: _circuitBreakerHardHalt,
+    reason: _circuitBreakerReason,
+    trippedAt: _circuitBreakerTrippedAt ? new Date(_circuitBreakerTrippedAt).toISOString() : null,
+    cooldownMin: CB_COOLDOWN_MIN,
+    remainingMin,
+    tripsInWindow: _circuitBreakerTrips.length,
+    hardHaltThreshold: CB_TRIPS_BEFORE_HARD_HALT,
+  };
+}
 export function clearCircuitBreaker() {
-  _circuitBreakerTripped = false;
-  _circuitBreakerReason  = null;
-  _recentCloses.length   = 0;
+  _circuitBreakerTripped   = false;
+  _circuitBreakerReason    = null;
+  _circuitBreakerTrippedAt = 0;
+  _circuitBreakerHardHalt  = false;
+  _circuitBreakerTrips.length = 0;
+  _recentCloses.length     = 0;
   try { if (existsSync(CIRCUIT_BREAKER_FILE)) unlinkSync(CIRCUIT_BREAKER_FILE); } catch {}
   try { jAlert('info', 'CIRCUIT_BREAKER_CLEARED', { clearedAt: new Date().toISOString() }); } catch {}
   return true;
@@ -378,13 +473,13 @@ export function placeFuturesOrder(consensus, requestId) {
     console.log(`  🛑 PATH2_HALT — rejecting ${inst} ${direction} ${consensus.engine}`);
     return { vetoed: true, reason };
   }
-  // 2026-05-18 pre-RTH hot-fix: auto-halt when circuit breaker tripped
-  if (_circuitBreakerTripped) {
-    const reason = `CIRCUIT_BREAKER_TRIPPED — ${_circuitBreakerReason}`;
-    futuresOrderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, inst, direction, 'CIRCUIT_BREAKER_TRIPPED', { reason: _circuitBreakerReason });
-    console.log(`  ⛔ CIRCUIT_BREAKER — rejecting ${inst} ${direction} ${consensus.engine}`);
-    return { vetoed: true, reason };
+  // 2026-05-18: circuit breaker with 30min auto-resume + hard-halt-after-3
+  const _cb = circuitBreakerEntryCheck();
+  if (_cb.blocked) {
+    futuresOrderGate.markVetoed(requestId, _cb.reason);
+    jGateBlock(consensus.engine, inst, direction, _cb.hardHalt ? 'CIRCUIT_BREAKER_HARD_HALT' : 'CIRCUIT_BREAKER', { reason: _cb.reason, hardHalt: !!_cb.hardHalt, remainingMin: _cb.remainingMin });
+    console.log(`  ⛔ CIRCUIT_BREAKER — rejecting ${inst} ${direction} ${consensus.engine} (${_cb.hardHalt ? 'HARD HALT' : `auto-resume in ${_cb.remainingMin}min`})`);
+    return { vetoed: true, reason: _cb.reason };
   }
 
   // Instrument allowlist
@@ -937,7 +1032,7 @@ console.log(`  [futuresTrading] Per-instrument caps (margin + $1K): ES=$${FUT_CA
 console.log(`  [futuresTrading] Overnight margins:  ES=$${FUT_OVERNIGHT_MARGIN['ES']} NQ=$${FUT_OVERNIGHT_MARGIN['NQ']} MES=$${FUT_OVERNIGHT_MARGIN['MES']} MNQ=$${FUT_OVERNIGHT_MARGIN['MNQ']} (allowed contracts = floor(cap / margin))`);
 console.log(`  [futuresTrading] Max loss per trade: $${FUT_MAX_LOSS_PER_TRADE} (stop × pointValue × contracts)`);
 console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000').toFixed(0)} → 1 contract regardless of tier`);
-console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → auto-halt`);
+console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → ${CB_COOLDOWN_MIN}min auto-resume (${CB_TRIPS_BEFORE_HARD_HALT}+ trips in ${CB_HARD_HALT_WINDOW_MIN}min → hard halt)`);
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
 console.log(`  [futuresTrading] stacking ${STACKING_WINDOW_MS/1000}s window (aggressive) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
