@@ -26,7 +26,7 @@ indicator(title="HANK SMC Pro — NQ Family", shorttitle="SMC-NQ", overlay=true,
 
 // --- General ---
 gGeneral        = "General"
-pivotLen        = input.int(5,        "Pivot length",            minval=2, maxval=50, group=gGeneral)
+pivotLen        = input.int(2,        "Pivot length",            minval=2, maxval=50, group=gGeneral)
 adaptivePivot   = input.bool(true,    "Adaptive pivot per TF",    group=gGeneral, tooltip="When ON: 3 on 1M-5M, 5 on 15M-30M, else uses 'Pivot length' above. When OFF: 'Pivot length' applied to all timeframes. (§1-§8 fix for pivot-length × bar-time asymmetry.)")
 sensitivity     = input.string("Balanced", "Signal sensitivity", options=["Conservative", "Balanced", "Aggressive"], group=gGeneral)
 signalCooldown  = input.int(20,       "Signal cooldown (bars)",  minval=0, group=gGeneral)
