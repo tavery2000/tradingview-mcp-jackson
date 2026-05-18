@@ -466,31 +466,61 @@ async function handlePineAlert(req, res) {
   // Conservative fail-closed: block futures-instrument entries when both biases are stale.
   // Proper fix (audit B) is a futures-1H monitor; tracked for post-close 5/18.
   const _FUT_INSTRUMENTS_FOR_GATE = new Set(['ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
-  if (_FUT_INSTRUMENTS_FOR_GATE.has(instrument) && !_macro1HFresh && !_macro4HFresh) {
-    jGateBlock(engine, instrument, direction, 'COUNTER_TREND_STALE_BOTH_FUTURES', {
-      macro4H: _macro4H, macro4HSrc: _macro4HSrc,
-      macro1H: _macro1H, macro1HSrc: _macro1HSrc,
-      instrumentClass: 'futures',
-      note: 'Both 1H and 4H bias files stale; futures fail-closed pending macro1h-futures monitor (audit B, due 2026-05-18 post-close).',
-    });
-    return send(res, 200, {
-      ok: false, reason: 'COUNTER_TREND_STALE_BOTH_FUTURES',
-      macro4HSrc: _macro4HSrc, macro1HSrc: _macro1HSrc,
-    });
-  }
+  const _isFuturesInst = _FUT_INSTRUMENTS_FOR_GATE.has(instrument);
 
-  // P1-7 (2026-05-14) + P0 (2026-05-15): pass instrument AND macro1H so
-  // evaluateCounterTrend can apply instrument-class mode AND block on
-  // opposing 1H trendBias / structurePattern (today's 14:15 MES1! bug).
-  const ctGate = evaluateCounterTrend(_macro4H, direction, engine, instrument, _macro1H);
-  if (ctGate.action === 'block') {
-    jGateBlock(engine, instrument, direction, 'COUNTER_TREND_BLOCK', {
-      macro4H: _macro4H, macro4HSrc: _macro4HSrc,
-      macro1H: _macro1H, macro1HSrc: _macro1HSrc,
-      mode: 'block', source: ctGate.source ?? '4H',
-      instrumentClass: ctGate.instrumentClass ?? null,
-    });
-    return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H, macro1H: _macro1H, source: ctGate.source ?? '4H' });
+  // 2026-05-18 OVERNIGHT FUTURES BYPASS (operator decision):
+  // Futures trade 23/5 but bias is RTH-only. Block during overnight would
+  // zero out signal collection. Trading without bias confirmation is the
+  // accepted trade-off for data flow until Webull MCP US_FUTURES quote
+  // subscription activates 2026-06-01 (broker-grade overnight bias source).
+  // Bypass ONLY for futures (ES1!/NQ1!/MES1!/MNQ1!) outside 09:30-16:00 ET
+  // Mon-Fri. Equity options don't trade overnight; no bypass for them.
+  const _isRTH = (() => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(new Date());
+    const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    if (m.weekday === 'Sat' || m.weekday === 'Sun') return false;
+    const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
+    return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
+  })();
+  const _ctBypassOvernightFutures = _isFuturesInst && !_isRTH;
+
+  // Default pass — overridden by evaluateCounterTrend below when gate runs.
+  // When bypass fires, this default flows downstream (finalConfidence math).
+  let ctGate = { action: 'pass', multiplier: 1.0 };
+
+  if (_ctBypassOvernightFutures) {
+    console.log(`  ✓ COUNTER_TREND_BYPASSED_OVERNIGHT  ${instrument} ${direction} engine=${engine} — RTH bias stale, futures overnight session unblocked for data collection`);
+    try { jAlert('INFO', 'COUNTER_TREND_BYPASSED_OVERNIGHT', { instrument, direction, engine, macro4HSrc: _macro4HSrc, macro1HSrc: _macro1HSrc, etTime: etTimeString() }); } catch {}
+  } else {
+    if (_isFuturesInst && !_macro1HFresh && !_macro4HFresh) {
+      jGateBlock(engine, instrument, direction, 'COUNTER_TREND_STALE_BOTH_FUTURES', {
+        macro4H: _macro4H, macro4HSrc: _macro4HSrc,
+        macro1H: _macro1H, macro1HSrc: _macro1HSrc,
+        instrumentClass: 'futures',
+        note: 'Both 1H and 4H bias files stale; futures fail-closed pending macro1h-futures monitor (audit B, due 2026-05-18 post-close).',
+      });
+      return send(res, 200, {
+        ok: false, reason: 'COUNTER_TREND_STALE_BOTH_FUTURES',
+        macro4HSrc: _macro4HSrc, macro1HSrc: _macro1HSrc,
+      });
+    }
+
+    // P1-7 (2026-05-14) + P0 (2026-05-15): pass instrument AND macro1H so
+    // evaluateCounterTrend can apply instrument-class mode AND block on
+    // opposing 1H trendBias / structurePattern (today's 14:15 MES1! bug).
+    ctGate = evaluateCounterTrend(_macro4H, direction, engine, instrument, _macro1H);
+    if (ctGate.action === 'block') {
+      jGateBlock(engine, instrument, direction, 'COUNTER_TREND_BLOCK', {
+        macro4H: _macro4H, macro4HSrc: _macro4HSrc,
+        macro1H: _macro1H, macro1HSrc: _macro1HSrc,
+        mode: 'block', source: ctGate.source ?? '4H',
+        instrumentClass: ctGate.instrumentClass ?? null,
+      });
+      return send(res, 200, { ok: false, reason: 'COUNTER_TREND_BLOCK', macro4H: _macro4H, macro1H: _macro1H, source: ctGate.source ?? '4H' });
+    }
   }
 
   // Select contract (strike + expiry)
@@ -965,6 +995,7 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
   console.log(`  [WEBHOOK] FADE_ENGINE PHASE 1 ENABLED — vol/range/VWAP triggers; news join 60s HIGH-impact; FOMC/CPI/NFP/GDP/PCE ±15min blackout; per-event dedup 5min`);
   console.log(`  [WEBHOOK] stacked-entry dedup: ENABLED (5m bar window, first-engine wins) — applies to futures + equity`);
+  console.log(`  [WEBHOOK] Counter-trend gate: overnight-futures bypass ENABLED (RTH-stale bias allowed for ES1!/NQ1!/MES1!/MNQ1! outside 09:30-16:00 ET Mon-Fri) — operator data-collection mode through 2026-06-01`);
   {
     const _expCheckOn = (process.env.LATE_DAY_ENTRY_0DTE_EXP_CHECK || 'false').toLowerCase() === 'true';
     console.log(`  [paperTrading] Late-day 0DTE gate: ${_expCheckOn ? 'exp-aware (today-exp only, 1DTE+ pass)' : 'block-all SPY/QQQ/IWM after 15:30 ET (legacy)'}`);
