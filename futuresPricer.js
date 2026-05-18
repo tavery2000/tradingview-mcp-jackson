@@ -112,7 +112,11 @@ async function _pollOne(tvSymbol) {
   const brokerCode = resolveFuturesSymbol(tvSymbol);
   if (!brokerCode) return { tvSymbol, ok: false, reason: 'NO_BROKER_CODE' };
   try {
-    const resp = await getFuturesSnapshot({ symbol: brokerCode });
+    // Webull MCP convention (verified 2026-05-18 from server pydantic error):
+    // get_futures_snapshot wants `symbols` (CSV string), NOT `symbol`. Same
+    // shape as get_futures_instruments from Sunday's resolver work. A single
+    // symbol is passed as a one-element CSV.
+    const resp = await getFuturesSnapshot({ symbols: brokerCode });
     const last = _extractLast(resp);
     if (!Number.isFinite(last)) {
       return { tvSymbol, ok: false, reason: 'NO_PRICE_IN_RESPONSE', brokerCode };
