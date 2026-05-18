@@ -756,6 +756,16 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK]                      1H-structural=${_ct1H ? 'ENABLED' : 'disabled'}`);
   const _acceptedTfsBanner = (process.env.ACCEPTED_TIMEFRAMES || '5').split(',').map(s => s.trim()).filter(Boolean);
   console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
+  // 2026-05-18: surface fresh calibration state at startup. If the lookup
+  // file doesn't exist, calibrationCache returns the fallback {multiplier:1.0}
+  // until analyze-calibration.js builds a new one. Operator-visible signal
+  // that we're flying without calibration for the moment.
+  try {
+    const _calibFile = join(__dirname, 'data', 'calibration-lookup.json');
+    if (!existsSync(_calibFile)) {
+      console.log(`  [calibration] Cache reset — fallback multiplier=1.0 until next analyze-calibration build`);
+    }
+  } catch {}
   // 2026-05-15 Task 7: arm the pre-12:00-ET kill scheduler. Idempotent.
   startPreSwitchScheduler();
   // 2026-05-16 Phase 1 Additional: arm the daily calibration rebuild.

@@ -1112,6 +1112,13 @@ export function getFuturesLedger() {
 
 // ─── Startup banner + eval timer ───────────────────────────────────────
 
+// 2026-05-18: detect freshly-reset ledger and surface a one-shot banner.
+// Condition: reset_reason set AND zero trades — naturally one-shot since
+// the first fill bumps totalTrades and the line stops printing on restart.
+if (ledger.reset_reason && (ledger.trades?.length ?? 0) === 0 && (ledger.totalTrades ?? 0) === 0) {
+  console.log(`  [futuresTrading] LEDGER RESET — fresh start $${ledger.balance.toFixed(0)} balance`);
+  console.log(`  [futuresTrading] reset_reason: ${ledger.reset_reason.slice(0, 140)}${ledger.reset_reason.length > 140 ? '...' : ''}`);
+}
 console.log(`  [futuresTrading] mode=${FUTURES_TRADING_MODE} balance=$${ledger.balance.toFixed(0)} instruments=${[...ALLOWED_INSTRUMENTS].join(',')}`);
 console.log(`  [futuresTrading] Per-instrument caps (margin + $1K): ES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['ES']} NQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['NQ']} MES=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MES']} MNQ=$${FUT_CAPITAL_CAP_PER_INSTRUMENT['MNQ']}`);
 console.log(`  [futuresTrading] Overnight margins:  ES=$${FUT_OVERNIGHT_MARGIN['ES']} NQ=$${FUT_OVERNIGHT_MARGIN['NQ']} MES=$${FUT_OVERNIGHT_MARGIN['MES']} MNQ=$${FUT_OVERNIGHT_MARGIN['MNQ']} (allowed contracts = floor(cap / margin))`);

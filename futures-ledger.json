@@ -1,12 +1,11 @@
 {
   "version": "1.0",
-  "created": "2026-05-15T17:59:27.475Z",
+  "created": "2026-05-18T18:37:00.000Z",
+  "reset_reason": "5M deployment fresh start — signal source switched 1M → 5M. 1M ledger preserved as futures-ledger-2026-05-18-1m.json for retrospective analysis. 1M signal population not representative of 5M behavior; building fresh stats from 5M-only fires.",
   "mode": "PAPER",
-  "instruments": [
-    "MES1!"
-  ],
-  "balance": 1000,
-  "startBalance": 1000,
+  "instruments": ["ES1!", "NQ1!", "MES1!", "MNQ1!"],
+  "balance": 10000,
+  "startBalance": 10000,
   "totalPnL": 0,
   "totalTrades": 0,
   "wins": 0,
@@ -14,23 +13,8 @@
   "trades": [],
   "dailyPnL": {},
   "tierStats": {
-    "A": {
-      "trades": 0,
-      "wins": 0,
-      "losses": 0,
-      "pnl": 0
-    },
-    "B": {
-      "trades": 0,
-      "wins": 0,
-      "losses": 0,
-      "pnl": 0
-    },
-    "C": {
-      "trades": 0,
-      "wins": 0,
-      "losses": 0,
-      "pnl": 0
-    }
+    "A": { "trades": 0, "wins": 0, "losses": 0, "pnl": 0 },
+    "B": { "trades": 0, "wins": 0, "losses": 0, "pnl": 0 },
+    "C": { "trades": 0, "wins": 0, "losses": 0, "pnl": 0 }
   }
 }
