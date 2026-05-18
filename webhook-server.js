@@ -681,8 +681,13 @@ async function handleControlMcpRestart(_req, res) {
   send(res, result.ok ? 200 : 500, { action: 'mcp-restart', ...result, ts: new Date().toISOString() });
 }
 
-function handleControlStatus(_req, res) {
+async function handleControlStatus(_req, res) {
   let mcpStatus = null;
+  let pricerHealth = null;
+  try {
+    const fp = await import('./futuresPricer.js');
+    if (typeof fp.getFuturesPricerHealth === 'function') pricerHealth = fp.getFuturesPricerHealth();
+  } catch {}
   // Read state files (cross-process truth) so /status doesn't depend on
   // in-memory caches that may differ between processes.
   let cbFile = null;
@@ -713,6 +718,7 @@ function handleControlStatus(_req, res) {
     futures: getFuturesGateStatus(),
     circuitBreakerFile: cbFile,
     openPositions: { futures: openFut, equity: openEq },
+    pricer: pricerHealth,
     ts: new Date().toISOString(),
   };
   send(res, 200, status);

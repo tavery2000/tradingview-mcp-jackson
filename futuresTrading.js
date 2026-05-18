@@ -41,6 +41,13 @@ import { fileURLToPath } from 'url';
 import { jFutEntry, jFutExit, jError, jAlert, jGateBlock } from './journal.js';
 import { evaluate as profitProtectionEvaluate } from './profitProtection.js';
 import { isTradingPaused } from './preSwitchKill.js';
+// 2026-05-18 13:40 ET: futuresPricer DEGRADED state gates new entries.
+// Lazy-loaded so a circular import surface doesn't bite during startup
+// (futuresPricer is otherwise dynamically imported by webhook-server).
+let _isFuturesPricerDegraded = () => false;
+import('./futuresPricer.js').then(m => {
+  if (typeof m.isFuturesPricerDegraded === 'function') _isFuturesPricerDegraded = m.isFuturesPricerDegraded;
+}).catch(() => { /* pricer not present in test contexts — leave shim */ });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE  = join(__dirname, 'futures-ledger.json');
@@ -549,6 +556,18 @@ function _resolveTier(consensus) {
 export function placeFuturesOrder(consensus, requestId) {
   let inst = (consensus.instrument || '').toUpperCase();   // mutable: micro-fallback may re-route
   const direction = consensus.signal;   // CALLS | PUTS
+
+  // 2026-05-18 13:40 ET: pricer DEGRADED gate. When futuresPricer detects
+  // N consecutive stale cycles (TV CDP feed frozen / data stream paused
+  // silently), block new entries — managing existing positions on
+  // last-known prices is still safe via the eval loop, but opening a new
+  // position on a frozen quote is not.
+  if (_isFuturesPricerDegraded()) {
+    const reason = 'FUT_PRICER_DEGRADED — price feed stale; new entries blocked until recovery';
+    futuresOrderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, inst, direction, 'FUT_PRICER_DEGRADED', { instrument: inst, direction });
+    return { vetoed: true, reason };
+  }
 
   // 2026-05-17 EOD: PATH2_HALT global circuit-breaker (manual env flag).
   if ((process.env.PATH2_HALT || 'false').toLowerCase() === 'true') {
