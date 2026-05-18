@@ -52,6 +52,7 @@ const _failCount = new Map();
 let _started = false;
 let _timer   = null;
 let _loggedStale = new Set();
+let _entitlementBlocked = false;  // set once we see Webull 401/Insufficient permission
 
 function _etTimeString() {
   return new Date().toLocaleTimeString('en-US', {
@@ -127,12 +128,48 @@ async function _pollOne(tvSymbol) {
   }
 }
 
+// Recognise the Webull-account-doesn't-have-US-futures-quotes case so we can
+// stop hammering MCP (80 req/min of guaranteed 401s) and surface a useful
+// message instead of a generic STALE. Matches the substrings the upstream
+// Webull SDK includes verbatim: "Unauthorized", "Insufficient permission",
+// "US_FUTURES". Per-process flag — restart will re-probe once.
+function _isEntitlementError(reason) {
+  if (!reason) return false;
+  return /unauthorized|insufficient permission|us_futures/i.test(reason);
+}
+
 async function _tick() {
   if (isMCPDisabled() || isIntegrationHalted()) return;
+  if (_entitlementBlocked) return;
   const results = await Promise.allSettled(INSTRUMENTS.map(s => _pollOne(s)));
   const cache = _readCache();
   const now = Date.now();
   const et  = _etTimeString();
+
+  // If any tick comes back with an entitlement error, it's an account-level
+  // problem (not per-symbol) — disable the poller and mark all instruments
+  // STALE with the actionable reason.
+  const entitlementHit = results.find(r =>
+    r.status === 'fulfilled' && _isEntitlementError(r.value?.reason)
+  );
+  if (entitlementHit) {
+    _entitlementBlocked = true;
+    if (_timer) { clearInterval(_timer); _timer = null; }
+    console.log(`  [FUT_PRICER] DISABLED — Webull account lacks US_FUTURES quote entitlement`);
+    console.log(`  [FUT_PRICER] reason: ${entitlementHit.value.reason}`);
+    console.log(`  [FUT_PRICER] options: (a) subscribe to US_FUTURES quotes via Webull, (b) switch price source to TradingView CDP, (c) accept Pine-alert-only price updates`);
+    for (const sym of INSTRUMENTS) {
+      const prev = cache[sym] || {};
+      cache[sym] = {
+        ...prev,
+        stale: true,
+        staleSince: prev.staleSince || now,
+        lastFailReason: 'WEBULL_US_FUTURES_NOT_SUBSCRIBED',
+      };
+    }
+    _writeCache(cache);
+    return;
+  }
 
   for (const r of results) {
     if (r.status !== 'fulfilled') continue;
