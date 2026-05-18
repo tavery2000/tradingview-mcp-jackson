@@ -221,6 +221,56 @@ these into the Tue-Thu deploy queue alongside the gate fixes.
 abilities. June 1st you will trade MES during market hours 09:00 to
 16:00 (avoid margin) with a $1k budget."*
 
+### June 1 day-to-overnight graduation criterion
+
+**Operator addendum Sun 5/17 EOD:** *"If Hank gets over $1.5k June 1st
+before close, Hank will continue trading MES overnight hours."*
+
+Logic to wire:
+
+- During RTH (09:00-16:00 ET): MES intraday-only with day margin $267,
+  hard close at 15:55 ET
+- Balance check at any close: if `ledger.balance >= 1500` → flip mode
+  to overnight-eligible
+- Overnight-eligible mode: cap recomputes to overnight margin ($1500)
+  + $1K buffer = $2500; intraday-close gate disables; 23/5 trading
+  enabled (subject to existing CME 16:59-18:00 maintenance gate)
+- Once flipped, mode persists for the rest of the trading day; resets
+  to intraday-only at next 09:00 ET if balance fell back below $1500
+  overnight (e.g., overnight stop-out)
+
+Implementation pattern: new module `intradayGraduation.js` (mirror
+`profitProtection.js`); writes `intraday-graduation-state.json`;
+exposes `isOvernightEligible()` for futuresTrading.js cap + close-gate
+checks. Operator-clearable + restart-resilient.
+
+### Head-to-head comparison context
+
+**Operator:** *"I will be taking the same trade 'manually' alongside
+Hank."* — On 6/1, operator mirrors HANK's signals manually in their
+own Webull session. Goal is per-signal comparable performance:
+operator's discretionary execution vs HANK's automated execution on
+identical Pine alerts. Implication for instrumentation:
+
+- Every HANK fill needs timestamp + entry price + exit price + reason
+  captured cleanly for post-session reconciliation
+- Operator's manual fills tracked in a separate sheet/log; reconciled
+  EOD against HANK's journal
+- Variance attribution: latency, slippage, calibration multiplier
+  adjustments, vision overrides (when promoted), discretionary skip
+  decisions (operator side)
+
+Build a `docs/head-to-head-2026-06-01.md` template Friday 5/29 with
+columns ready for operator to fill alongside HANK's auto-populated
+side.
+
+### Operator's framing
+
+*"Hank has all the tools to accomplish this... Time to prove everyone
+wrong."* — This is not a feature ship. It's a proof point. Calibrate
+all decisions this week (audit fixes, deploys, sandbox validation)
+against: does this make HANK more likely to win the 6/1 head-to-head?
+
 ---
 
 *Drafted 2026-05-17 EOD after catastrophic failure observation. Halt
