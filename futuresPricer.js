@@ -30,10 +30,38 @@ const INSTRUMENTS = (process.env.FUT_PRICER_SYMBOLS || 'ES1!,NQ1!,MES1!,MNQ1!')
 const INITIAL_DELAY_MS = parseInt(process.env.FUT_PRICER_INITIAL_DELAY_MS || '500', 10);
 const KEEPALIVE_INTERVAL_S = parseInt(process.env.TV_KEEPALIVE_INTERVAL_S || '30', 10);
 
-// Stale detection parameters (env-tunable for operator runtime experimentation)
-const STALE_TICK_COUNT      = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT      || '5',  10);
-const STALE_HISTORY_SIZE    = parseInt(process.env.FUT_PRICER_STALE_HISTORY_SIZE    || '10', 10);
-const DEGRADED_AFTER_CYCLES = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES || '3',  10);
+// Stale detection parameters — TF-adaptive (RTH vs overnight).
+// 2026-05-18 evening: overnight CME has legitimate 10-20s tick gaps during
+// thin-volume hours (esp. 19:00-22:00 ET Asia warm-up). RTH thresholds
+// (5 ticks / ~12s) trip on normal thin tape; loosen to (10 ticks / ~30s
+// at 3s poll) overnight + raise DEGRADED-cycle threshold so real feed
+// failures still surface but normal tape doesn't trigger.
+const STALE_TICK_COUNT_RTH         = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT           || '5',  10);
+const STALE_TICK_COUNT_OVERNIGHT   = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT_OVERNIGHT || '10', 10);
+const DEGRADED_AFTER_CYCLES_RTH    = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES           || '3', 10);
+const DEGRADED_AFTER_CYCLES_OVERNT = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES_OVERNIGHT || '5', 10);
+const STALE_HISTORY_SIZE = Math.max(
+  parseInt(process.env.FUT_PRICER_STALE_HISTORY_SIZE || '10', 10),
+  STALE_TICK_COUNT_RTH,
+  STALE_TICK_COUNT_OVERNIGHT,
+);
+
+function _isRTH() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  if (m.weekday === 'Sat' || m.weekday === 'Sun') return false;
+  const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
+  return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
+}
+function _currentStaleTickCount() {
+  return _isRTH() ? STALE_TICK_COUNT_RTH : STALE_TICK_COUNT_OVERNIGHT;
+}
+function _currentDegradedAfterCycles() {
+  return _isRTH() ? DEGRADED_AFTER_CYCLES_RTH : DEGRADED_AFTER_CYCLES_OVERNT;
+}
 
 let _started = false;
 let _timer   = null;
@@ -97,19 +125,20 @@ function _freshEntry(last, now, et) {
 }
 
 // Push the tick into per-instrument history and return whether the last
-// STALE_TICK_COUNT entries are all identical.
+// N entries are all identical. N is TF-adaptive (RTH 5, overnight 10).
 function _pushAndCheckStale(sym, last, now) {
   const h = _tickHistory.get(sym) || [];
   h.push({ last, ts: now });
   if (h.length > STALE_HISTORY_SIZE) h.shift();
   _tickHistory.set(sym, h);
-  if (h.length < STALE_TICK_COUNT) return null;
-  const lastN = h.slice(-STALE_TICK_COUNT);
+  const tickCount = _currentStaleTickCount();
+  if (h.length < tickCount) return null;
+  const lastN = h.slice(-tickCount);
   const v = lastN[0].last;
   const allSame = lastN.every(t => t.last === v);
   if (!allSame) return null;
   const durationS = Math.round((lastN[lastN.length - 1].ts - lastN[0].ts) / 1000);
-  return { value: v, ticks: STALE_TICK_COUNT, durationS };
+  return { value: v, ticks: tickCount, durationS };
 }
 
 export function isFuturesPricerDegraded() { return _degraded; }
@@ -209,7 +238,7 @@ export async function tickOnce() {
     try { await disconnectTvPriceClient(); }
     catch (e) { console.error(`  [FUT_PRICER] disconnectTvPriceClient error: ${e.message}`); }
 
-    if (_staleCyclesCount >= DEGRADED_AFTER_CYCLES && !_degraded) {
+    if (_staleCyclesCount >= _currentDegradedAfterCycles() && !_degraded) {
       _degraded = true;
       _degradedAt = t0;
       _degradedLoggedOnce = false;
@@ -217,7 +246,8 @@ export async function tickOnce() {
       try {
         jAlert('critical', 'futures_pricer.degraded', {
           staleCycles: _staleCyclesCount,
-          threshold:   DEGRADED_AFTER_CYCLES,
+          threshold:   _currentDegradedAfterCycles(),
+          rth:         _isRTH(),
           frozenInstruments: staleNow.map(s => s.sym),
           et,
         });
@@ -250,7 +280,8 @@ export function startFuturesPricer() {
   if (_started) return;
   _started = true;
   console.log(`  [FUT_PRICER] starting — ${INSTRUMENTS.join(', ')} every ${POLL_MS}ms via TV CDP watchlist`);
-  console.log(`  [FUT_PRICER] stale-detect: ${STALE_TICK_COUNT} identical ticks → re-probe; ${DEGRADED_AFTER_CYCLES} cycles → DEGRADED (entries blocked)`);
+  const _blocks = (process.env.STALE_DETECT_BLOCKS_ENTRIES || 'false').toLowerCase() === 'true';
+  console.log(`  [FUT_PRICER] stale-detect: RTH=${STALE_TICK_COUNT_RTH} ticks/DEGRADED@${DEGRADED_AFTER_CYCLES_RTH} · overnight=${STALE_TICK_COUNT_OVERNIGHT} ticks/DEGRADED@${DEGRADED_AFTER_CYCLES_OVERNT} — ${_blocks ? 'DEGRADED blocks entries' : 'ALERT-ONLY mode (entries proceed with last-known price)'}`);
   console.log(`  [FUT_PRICER] session-aware: stale-detect suspended during CME closed periods (Mon-Thu 17:00-18:00 ET, Fri 17:00 → Sun 18:00 ET)`);
   setTimeout(() => {
     tickOnce().catch(e => console.error(`  [FUT_PRICER] initial tick uncaught: ${e.message}`));

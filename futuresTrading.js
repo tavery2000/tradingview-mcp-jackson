@@ -590,14 +590,22 @@ export function placeFuturesOrder(consensus, requestId) {
 
   // 2026-05-18 13:40 ET: pricer DEGRADED gate. When futuresPricer detects
   // N consecutive stale cycles (TV CDP feed frozen / data stream paused
-  // silently), block new entries — managing existing positions on
-  // last-known prices is still safe via the eval loop, but opening a new
-  // position on a frozen quote is not.
+  // silently), normally block new entries.
+  // 2026-05-18 evening: operator data-collection mode. ALERT-ONLY by
+  // default — DEGRADED still logs loudly but entries proceed with
+  // last-known price. Set STALE_DETECT_BLOCKS_ENTRIES=true to restore
+  // the hard block.
   if (_isFuturesPricerDegraded()) {
-    const reason = 'FUT_PRICER_DEGRADED — price feed stale; new entries blocked until recovery';
-    futuresOrderGate.markVetoed(requestId, reason);
-    jGateBlock(consensus.engine, inst, direction, 'FUT_PRICER_DEGRADED', { instrument: inst, direction });
-    return { vetoed: true, reason };
+    const _blocksEntries = (process.env.STALE_DETECT_BLOCKS_ENTRIES || 'false').toLowerCase() === 'true';
+    if (_blocksEntries) {
+      const reason = 'FUT_PRICER_DEGRADED — price feed stale; new entries blocked until recovery';
+      futuresOrderGate.markVetoed(requestId, reason);
+      jGateBlock(consensus.engine, inst, direction, 'FUT_PRICER_DEGRADED', { instrument: inst, direction });
+      return { vetoed: true, reason };
+    } else {
+      console.log(`  ⚠ FUT_PRICER_DEGRADED  ${inst} ${direction} engine=${consensus.engine} — proceeding with last-known price (STALE_DETECT_BLOCKS_ENTRIES=false, data-collection mode)`);
+      try { jAlert('warning', 'FUT_PRICER_DEGRADED_ALERT_ONLY', { instrument: inst, direction, engine: consensus.engine }); } catch {}
+    }
   }
 
   // 2026-05-17 EOD: PATH2_HALT global circuit-breaker (manual env flag).
