@@ -47,6 +47,7 @@ const LEDGER_FILE  = join(__dirname, 'futures-ledger.json');
 const LOCK_FILE    = join(__dirname, '.futures-ledger.lock');
 const PRICES_FILE  = join(__dirname, 'latest-prices.json');
 const TARGET_STATE = join(__dirname, 'futures-daily-target-state.json');
+const CIRCUIT_BREAKER_FILE = join(__dirname, 'circuit-breaker-state.json');
 
 // ─── Config (per locked decisions + operator's daily envelope) ─────────
 
@@ -116,6 +117,78 @@ const _consecutiveLosses = { count: 0, cooldownUntil: 0 };
 let _dailyTargetFiredFor = null;     // ET-date string when target fired
 let _graduationFiredFor  = null;     // ET-date string when graduation alert fired
 let _evalTimer = null;
+
+// 2026-05-18 pre-RTH hot-fix (Mon 5/18 Task #0 partial): circuit breaker.
+// Rolling 5-min window. Trips on >= 3 closes OR cumulative loss <= -$500.
+// On trip: writes circuit-breaker-state.json + sets in-process halt flag.
+// Operator clears via `ask> clear circuit breaker` (deletes state file)
+// then restarts. Until cleared, all entries reject with CIRCUIT_BREAKER_TRIPPED.
+const CB_WINDOW_MS         = 5 * 60_000;
+const CB_MAX_CLOSES        = parseInt(process.env.CIRCUIT_BREAKER_MAX_CLOSES || '3', 10);
+const CB_MAX_CUM_LOSS      = parseFloat(process.env.CIRCUIT_BREAKER_MAX_CUM_LOSS || '500');   // absolute, positive
+let _circuitBreakerTripped = false;
+let _circuitBreakerReason  = null;
+const _recentCloses = [];   // [{ts, pnl}]
+
+// On startup, restore tripped state from disk if present
+try {
+  if (existsSync(CIRCUIT_BREAKER_FILE)) {
+    const s = JSON.parse(readFileSync(CIRCUIT_BREAKER_FILE, 'utf8'));
+    if (s && s.tripped && !s.cleared) {
+      _circuitBreakerTripped = true;
+      _circuitBreakerReason  = s.reason || 'unknown (restored from state file)';
+      console.log(`  ⛔ CIRCUIT BREAKER restored from disk: ${_circuitBreakerReason}`);
+    }
+  }
+} catch {}
+
+function _circuitBreakerCheck(closePnl) {
+  if (_circuitBreakerTripped) return;   // already tripped
+  const now = Date.now();
+  _recentCloses.push({ ts: now, pnl: closePnl });
+  // Prune entries older than window
+  while (_recentCloses.length && now - _recentCloses[0].ts > CB_WINDOW_MS) {
+    _recentCloses.shift();
+  }
+  const count   = _recentCloses.length;
+  const cumPnl  = _recentCloses.reduce((s, c) => s + c.pnl, 0);
+  let trip = null;
+  if (count >= CB_MAX_CLOSES)          trip = `COUNT (${count} closes in ${CB_WINDOW_MS/60000}min)`;
+  else if (cumPnl <= -CB_MAX_CUM_LOSS) trip = `CUMULATIVE_LOSS ($${cumPnl.toFixed(0)} in ${CB_WINDOW_MS/60000}min)`;
+  if (trip) {
+    _circuitBreakerTripped = true;
+    _circuitBreakerReason  = trip;
+    try {
+      writeFileSync(CIRCUIT_BREAKER_FILE, JSON.stringify({
+        tripped: true, cleared: false, reason: trip,
+        trippedAt: new Date().toISOString(),
+        trippedAtET: getETString(),
+        windowMs: CB_WINDOW_MS,
+        closeCount: count,
+        cumulativeLoss: parseFloat(cumPnl.toFixed(2)),
+        closes: _recentCloses.map(c => ({ ts: c.ts, et: new Date(c.ts).toLocaleString('en-US', { timeZone: 'America/New_York' }), pnl: c.pnl })),
+      }, null, 2));
+    } catch {}
+    try { jAlert('critical', 'CIRCUIT_BREAKER_TRIPPED', { reason: trip, closeCount: count, cumulativeLoss: cumPnl }); } catch {}
+    console.log(`\n  ⛔⛔⛔ CIRCUIT BREAKER TRIPPED — ${trip}`);
+    console.log(`  ⛔ All futures entries BLOCKED until operator runs \`ask> clear circuit breaker\` + restart`);
+    // Best-effort TTS via global hook if available
+    if (typeof global.pushVoiceAlert === 'function') {
+      try { global.pushVoiceAlert('circuit-breaker', 'critical', `Circuit breaker tripped. ${trip}. Futures trading halted.`, 0); } catch {}
+    }
+  }
+}
+
+export function isCircuitBreakerTripped() { return _circuitBreakerTripped; }
+export function getCircuitBreakerReason() { return _circuitBreakerReason; }
+export function clearCircuitBreaker() {
+  _circuitBreakerTripped = false;
+  _circuitBreakerReason  = null;
+  _recentCloses.length   = 0;
+  try { if (existsSync(CIRCUIT_BREAKER_FILE)) unlinkSync(CIRCUIT_BREAKER_FILE); } catch {}
+  try { jAlert('info', 'CIRCUIT_BREAKER_CLEARED', { clearedAt: new Date().toISOString() }); } catch {}
+  return true;
+}
 
 // ─── Ledger I/O ────────────────────────────────────────────────────────
 
@@ -252,14 +325,20 @@ export function placeFuturesOrder(consensus, requestId) {
   const inst = (consensus.instrument || '').toUpperCase();
   const direction = consensus.signal;   // CALLS | PUTS
 
-  // 2026-05-17 EOD: PATH2_HALT global circuit-breaker. Set true in .env
-  // to halt all Path 2 futures execution. See docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md
-  // for the catastrophic-failure context that prompted this halt.
+  // 2026-05-17 EOD: PATH2_HALT global circuit-breaker (manual env flag).
   if ((process.env.PATH2_HALT || 'false').toLowerCase() === 'true') {
     const reason = 'PATH2_HALT — futures execution halted by operator; see Mon 5/18 Task #0 gate audit';
     futuresOrderGate.markVetoed(requestId, reason);
     jGateBlock(consensus.engine, inst, direction, 'PATH2_HALT', { instrument: inst, direction, engine: consensus.engine });
     console.log(`  🛑 PATH2_HALT — rejecting ${inst} ${direction} ${consensus.engine}`);
+    return { vetoed: true, reason };
+  }
+  // 2026-05-18 pre-RTH hot-fix: auto-halt when circuit breaker tripped
+  if (_circuitBreakerTripped) {
+    const reason = `CIRCUIT_BREAKER_TRIPPED — ${_circuitBreakerReason}`;
+    futuresOrderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, inst, direction, 'CIRCUIT_BREAKER_TRIPPED', { reason: _circuitBreakerReason });
+    console.log(`  ⛔ CIRCUIT_BREAKER — rejecting ${inst} ${direction} ${consensus.engine}`);
     return { vetoed: true, reason };
   }
 
@@ -350,7 +429,20 @@ export function placeFuturesOrder(consensus, requestId) {
     return { vetoed: true, reason: tierReason };
   }
   const tierCfg = TIER[tier];
-  const contracts = tierCfg.contracts;
+  // 2026-05-18 pre-RTH hot-fix (Mon 5/18 Task #0 partial): hardcoded
+  // sizing floor. Sub-$5K accounts get 1 contract regardless of tier,
+  // bypassing the cascade-vulnerable tier sizing. Root cause of Sun 5/17
+  // 20:04-20:06 ET catastrophic failure was Tier B 3-contract entries
+  // on a $520 account. Full audit per docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md.
+  const _balanceForSizing = ledger.balance || 0;
+  let contracts = tierCfg.contracts;
+  let sizingFloorApplied = false;
+  if (_balanceForSizing < 5000 && contracts > 1) {
+    sizingFloorApplied = true;
+    console.log(`  ⚠ SIZE_FLOOR_1_CONTRACT — balance $${_balanceForSizing.toFixed(0)} < $5K, overriding tier ${tier} (${tierCfg.contracts}c → 1c)`);
+    try { jAlert('warning', 'SIZE_FLOOR_1_CONTRACT', { balance: _balanceForSizing, tierAttempted: tier, tierContracts: tierCfg.contracts, override: 1 }); } catch {}
+    contracts = 1;
+  }
   const stopPoints = tierCfg.stopPoints;
   const targetPoints = tierCfg.targetPoints;
 
@@ -483,6 +575,10 @@ export function closeFuturesPosition(requestId, exitPrice, exitReason = 'MANUAL'
         try { jAlert('warning', 'FUT_COOLDOWN_TRIGGERED', { count: _consecutiveLosses.count, until: _consecutiveLosses.cooldownUntil }); } catch {}
       }
     }
+
+    // 2026-05-18 pre-RTH hot-fix: feed close P&L to circuit breaker.
+    // Trips on >= 3 closes or cumulative -$500 in rolling 5-min window.
+    try { _circuitBreakerCheck(finalPnL); } catch {}
 
     // Daily target
     if (DAILY_TARGET > 0 && _dailyTargetFiredFor !== today

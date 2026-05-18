@@ -20,6 +20,7 @@ logs/
 paper-ledger.json
 profit-protection-state.json
 pre-switch-kill-state.json
+circuit-breaker-state.json
 calibration-scheduler-state.json
 weekly-loss-state.json
 webull-mcp-conf/

@@ -372,6 +372,8 @@ function helpText() {
     '  webull reconnect          force MCP child reconnect (after auth succeeds)',
     '  webull paper              just the paper-mode verification dump',
     '  roll guard tick           run rollGuard once and show state',
+    '  circuit breaker           show tripped state + state file',
+    '  clear circuit breaker     ⚠ clear circuit breaker (restart required to fully reset)',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
@@ -520,6 +522,38 @@ async function answerWebullReconnect() {
     out.push(`  paper-mode verified: ${pv === true ? 'YES' : pv === false ? 'NO' : 'still checking…'}`);
     return out.join('\n');
   } catch (e) { return `webull reconnect failed: ${e.message}`; }
+}
+
+// 2026-05-18 pre-RTH: circuit breaker REPL controls
+async function answerCircuitBreakerStatus() {
+  try {
+    const { isCircuitBreakerTripped, getCircuitBreakerReason } = await import('./futuresTrading.js');
+    const tripped = isCircuitBreakerTripped();
+    const reason = getCircuitBreakerReason();
+    const out = ['CIRCUIT BREAKER STATUS'];
+    out.push(`  tripped         ${tripped ? 'YES' : 'no'}`);
+    if (tripped) out.push(`  reason          ${reason}`);
+    // Also dump state file if present (cross-process visibility)
+    const cbFile = readJsonSafe('circuit-breaker-state.json');
+    if (cbFile) {
+      out.push(`  state file:`);
+      out.push(JSON.stringify(cbFile, null, 2).slice(0, 1500));
+    } else {
+      out.push(`  state file      (none)`);
+    }
+    return out.join('\n');
+  } catch (e) { return `circuit breaker status failed: ${e.message}`; }
+}
+async function answerClearCircuitBreaker() {
+  try {
+    const { clearCircuitBreaker } = await import('./futuresTrading.js');
+    clearCircuitBreaker();
+    return [
+      '✓ Circuit breaker cleared (in-process + state file deleted)',
+      '  ⚠ Restart HANK to fully reset across all processes:',
+      '     taskkill /F /FI "WINDOWTITLE eq HANK*" & start "" cmd /c start-hank.bat',
+    ].join('\n');
+  } catch (e) { return `clear circuit breaker failed: ${e.message}`; }
 }
 
 async function answerRollGuardTick() {
@@ -726,6 +760,8 @@ export async function answerQuestion(text) {
   if (/^webull\s+paper\b/.test(lo))           return answerMcpPaperCheck();
   if (/^webull\b/.test(lo))                   return answerWebullCombined();
   if (/^roll\s+guard\s+tick\b/.test(lo))      return answerRollGuardTick();
+  if (/^clear\s+circuit\s+breaker\b/.test(lo)) return answerClearCircuitBreaker();
+  if (/^circuit\s+breaker\b/.test(lo))        return answerCircuitBreakerStatus();
 
   // Symbol-bound topic combinations come first
   if (sym && /\b(why|block|gate)\b/.test(lo))      return answerWhy(sym);
