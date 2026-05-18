@@ -1570,6 +1570,50 @@ export function closePosition(requestId, exitPrice, exitReason = 'MANUAL') {
   }
 }
 
+// 2026-05-18 — Operator flatten. Closes every OPEN equity options position
+// using a synthetic exit price computed from the current cached underlying
+// (same delta-0.4 formula handlePineClose uses for SIGNAL_REVERSAL exits).
+// Called from webhook-server's /control/flatten endpoint. Skips positions
+// lacking a fresh underlying price rather than guessing.
+export function flattenAllEquity(reason = 'OPERATOR_FLATTEN') {
+  const PRICE_FILE = join(__dirname, 'latest-prices.json');
+  let prices = {};
+  try { prices = JSON.parse(readFileSync(PRICE_FILE, 'utf8')) || {}; } catch {}
+  let lg;
+  try { lg = loadLedger(); } catch { lg = { trades: [] }; }
+  const open = (lg.trades ?? []).filter(t => t.status === 'OPEN');
+  const results = [];
+  let closed = 0, failed = 0;
+  for (const t of open) {
+    const entry = prices[t.instrument];
+    const liveU = entry?.last;
+    if (!Number.isFinite(liveU)) {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: false, reason: 'NO_LIVE_UNDERLYING' });
+      failed++;
+      continue;
+    }
+    const entryU  = t.underlyingPrice ?? t.entryUnderlying ?? null;
+    if (!Number.isFinite(entryU)) {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: false, reason: 'NO_ENTRY_UNDERLYING' });
+      failed++;
+      continue;
+    }
+    const dirMult = t.signal === 'CALLS' ? 1 : -1;
+    const optMove = (liveU - entryU) * dirMult * 0.4;
+    const synthExit = Math.max(0.01, parseFloat((t.fillPrice + optMove).toFixed(4)));
+    const r = closePosition(t.requestId, synthExit, reason);
+    if (r) {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: true, exit: synthExit, pnl: r.pnl });
+      closed++;
+    } else {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: false, reason: 'CLOSE_FAILED' });
+      failed++;
+    }
+  }
+  try { jAlert('info', 'OPERATOR_FLATTEN_EQUITY', { reason, closed, failed, ts: new Date().toISOString() }); } catch {}
+  return { closed, failed, results };
+}
+
 // ─── Position Evaluation (theta.js wire-in) ──────────────
 // Called once per poll by each monitor. Loops OPEN positions, computes
 // current greeks + IV crush + burn zone + hard exit countdown.

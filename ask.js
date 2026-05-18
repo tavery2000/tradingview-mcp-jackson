@@ -374,10 +374,24 @@ function helpText() {
     '  roll guard tick           run rollGuard once and show state',
     '  circuit breaker           show tripped state + state file',
     '  clear circuit breaker     clear breaker (in-process + state file persisted clean; no restart needed)',
+    '',
+    '  ── OPERATOR OVERRIDES (live, no restart) ──────────────',
+    '  status                    all gates / halts / breaker / open positions (one screen)',
+    '  halt path2                set PATH2_HALT=true (futures dispatch blocked)',
+    '  resume path2              clear PATH2_HALT',
+    '  kill entries confirm      ⚠ set WEBULL_INTEGRATION_HALT=true (all entries blocked)',
+    '  resume entries            clear WEBULL_INTEGRATION_HALT',
+    '  toggle 1h gate            flip COUNTER_TREND_1H_ENABLED',
+    '  flatten all confirm       ⚠ CLOSE all open futures + equity',
+    '  flatten futures confirm   ⚠ CLOSE all open futures only',
+    '  flatten equity confirm    ⚠ CLOSE all open SPY/QQQ only',
+    '  mcp restart               kill + respawn Webull MCP child',
+    '',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
     '  combine: "why spy"  "spy flow"  "spy"  "flow qqq"  "kill iwm"',
+    '  destructive overrides need trailing "confirm" (e.g. "flatten all confirm")',
   ].join('\n');
 }
 
@@ -526,34 +540,131 @@ async function answerWebullReconnect() {
 
 // 2026-05-18 pre-RTH: circuit breaker REPL controls
 async function answerCircuitBreakerStatus() {
-  try {
-    const { isCircuitBreakerTripped, getCircuitBreakerReason } = await import('./futuresTrading.js');
-    const tripped = isCircuitBreakerTripped();
-    const reason = getCircuitBreakerReason();
-    const out = ['CIRCUIT BREAKER STATUS'];
-    out.push(`  tripped         ${tripped ? 'YES' : 'no'}`);
-    if (tripped) out.push(`  reason          ${reason}`);
-    // Also dump state file if present (cross-process visibility)
-    const cbFile = readJsonSafe('circuit-breaker-state.json');
-    if (cbFile) {
-      out.push(`  state file:`);
-      out.push(JSON.stringify(cbFile, null, 2).slice(0, 1500));
-    } else {
-      out.push(`  state file      (none)`);
+  // Read state file (cross-process truth) — webhook owns in-memory state,
+  // ask.js can't see it directly. For full live status, use `status`.
+  const cbFile = readJsonSafe('circuit-breaker-state.json');
+  const out = ['CIRCUIT BREAKER STATUS (state file)'];
+  if (cbFile) {
+    out.push(`  tripped   ${cbFile.tripped ? 'YES' : 'no'}`);
+    if (cbFile.tripped) {
+      out.push(`  reason    ${cbFile.reason}`);
+      out.push(`  trippedAt ${cbFile.trippedAtET || cbFile.trippedAt}`);
+      out.push(`  hardHalt  ${cbFile.hardHalt ? 'YES' : 'no'}`);
     }
-    return out.join('\n');
-  } catch (e) { return `circuit breaker status failed: ${e.message}`; }
+    out.push('');
+    out.push(JSON.stringify(cbFile, null, 2).slice(0, 1500));
+  } else {
+    out.push('  state file (none)');
+  }
+  return out.join('\n');
 }
-async function answerClearCircuitBreaker() {
+
+// 2026-05-18 — Operator override commands route via /control/* HTTP endpoints
+// on webhook-server so changes take effect in the running webhook process.
+// (Earlier import-based pattern only mutated ask.js's copy of state, which
+// the live webhook didn't see — operator perceived as "no-op".)
+const WEBHOOK_BASE = `http://localhost:${process.env.WEBHOOK_PORT || '9001'}/control`;
+
+async function _ctrlGet(path) {
   try {
-    const { clearCircuitBreaker } = await import('./futuresTrading.js');
-    clearCircuitBreaker();
-    return [
-      '✓ Circuit breaker cleared (in-process + state file persisted clean)',
-      '  Eager auto-resume now keeps the breaker from deadlocking;',
-      '  next Pine alert will route normally — no restart required.',
-    ].join('\n');
-  } catch (e) { return `clear circuit breaker failed: ${e.message}`; }
+    const r = await fetch(`${WEBHOOK_BASE}${path}`);
+    const text = await r.text();
+    try { return { ok: r.ok, status: r.status, body: JSON.parse(text) }; }
+    catch { return { ok: r.ok, status: r.status, body: text }; }
+  } catch (e) { return { ok: false, error: `webhook unreachable (${WEBHOOK_BASE}): ${e.message}` }; }
+}
+async function _ctrlPost(path, body = {}) {
+  try {
+    const r = await fetch(`${WEBHOOK_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    try { return { ok: r.ok, status: r.status, body: JSON.parse(text) }; }
+    catch { return { ok: r.ok, status: r.status, body: text }; }
+  } catch (e) { return { ok: false, error: `webhook unreachable (${WEBHOOK_BASE}): ${e.message}` }; }
+}
+function _fmtCtrl(r) {
+  if (!r.ok) return `✗ ${r.error || `webhook returned ${r.status}`}\n${typeof r.body === 'string' ? r.body : JSON.stringify(r.body, null, 2)}`;
+  return `✓ ${typeof r.body === 'object' ? JSON.stringify(r.body, null, 2) : r.body}`;
+}
+
+// Confirmation gate for destructive commands. User must re-issue with
+// trailing `confirm` to proceed. Stateless — no token tracking, just text.
+function _needsConfirm(loText, baseRe) {
+  return baseRe.test(loText) && !/\bconfirm\b/.test(loText);
+}
+
+async function answerClearCircuitBreaker() {
+  const r = await _ctrlPost('/clear-circuit-breaker');
+  return r.ok
+    ? `✓ Circuit breaker cleared in webhook process + state file.\n${JSON.stringify(r.body, null, 2)}`
+    : _fmtCtrl(r);
+}
+
+async function answerHaltPath2()       { return _fmtCtrl(await _ctrlPost('/halt-path2')); }
+async function answerResumePath2()     { return _fmtCtrl(await _ctrlPost('/resume-path2')); }
+async function answerKillEntries()     { return _fmtCtrl(await _ctrlPost('/halt-entries')); }
+async function answerResumeEntries()   { return _fmtCtrl(await _ctrlPost('/resume-entries')); }
+async function answerToggle1HGate()    { return _fmtCtrl(await _ctrlPost('/toggle-1h-gate')); }
+async function answerMcpRestartCtrl()  { return _fmtCtrl(await _ctrlPost('/mcp-restart')); }
+
+async function answerFlattenScope(scope) {
+  const r = await _ctrlPost('/flatten', { scope });
+  if (!r.ok) return _fmtCtrl(r);
+  const b = r.body || {};
+  const lines = [`✓ Flatten ${scope} executed @ ${b.ts || ''}`];
+  if (b.futures) lines.push(`  futures: ${b.futures.closed} closed, ${b.futures.failed} failed`);
+  if (b.equity)  lines.push(`  equity:  ${b.equity.closed} closed, ${b.equity.failed} failed`);
+  if (b.futures?.results?.length) {
+    lines.push('  futures detail:');
+    for (const x of b.futures.results) lines.push(`    ${x.instrument} ${x.ok ? `✓ exit=${x.exit} pnl=${x.pnl}` : `✗ ${x.reason}`}`);
+  }
+  if (b.equity?.results?.length) {
+    lines.push('  equity detail:');
+    for (const x of b.equity.results) lines.push(`    ${x.instrument} ${x.ok ? `✓ exit=${x.exit} pnl=${x.pnl}` : `✗ ${x.reason}`}`);
+  }
+  return lines.join('\n');
+}
+
+async function answerOperatorStatus() {
+  const r = await _ctrlGet('/status');
+  if (!r.ok) return _fmtCtrl(r);
+  const s = r.body;
+  const lines = [
+    `OPERATOR STATUS @ ${s.et} ET`,
+    '',
+    'HALTS:',
+    `  PATH2_HALT              ${s.halts.path2Halt ? 'ACTIVE 🛑' : 'inactive'}`,
+    `  WEBULL_INTEGRATION_HALT ${s.halts.webullIntegrationHalt ? 'ACTIVE 🛑' : 'inactive'}`,
+    `  WEBULL_MCP_DISABLED     ${s.halts.webullMcpDisabled ? 'ACTIVE 🛑' : 'inactive'}`,
+    '',
+    'GATES:',
+    `  COUNTER_TREND_1H        ${s.gates.counterTrend1HEnabled ? 'enabled' : 'DISABLED'}`,
+    `  futures mode            ${s.gates.counterTrendFuturesMode}${s.gates.counterTrendFuturesMode === 'down_weight' ? ` × ${s.gates.counterTrendDownweight}` : ''}`,
+    `  equity mode             ${s.gates.counterTrendEquityMode}${s.gates.counterTrendEquityMode  === 'down_weight' ? ` × ${s.gates.counterTrendDownweight}` : ''}`,
+    '',
+    'CIRCUIT BREAKER:',
+  ];
+  const cb = s.circuitBreakerFile || {};
+  lines.push(`  tripped      ${cb.tripped ? 'YES 🛑' : 'no'}`);
+  if (cb.tripped) {
+    lines.push(`  reason       ${cb.reason}`);
+    lines.push(`  trippedAt    ${cb.trippedAtET || cb.trippedAt}`);
+    lines.push(`  hardHalt     ${cb.hardHalt ? 'YES' : 'no'}`);
+  }
+  lines.push('');
+  lines.push('OPEN POSITIONS:');
+  lines.push(`  futures      ${s.openPositions.futures}`);
+  lines.push(`  equity       ${s.openPositions.equity}`);
+  if (s.futures?.sizing) {
+    lines.push('');
+    lines.push('SIZING:');
+    lines.push(`  MAX_LOSS_PER_TRADE       ${s.futures.sizing.maxLossPerTrade ?? '(unset)'}`);
+    lines.push(`  FUT_SIZING_FLOOR_BALANCE ${s.futures.sizing.sizingFloorBalance}`);
+  }
+  return lines.join('\n');
 }
 
 async function answerRollGuardTick() {
@@ -740,6 +851,32 @@ export async function answerQuestion(text) {
     : /\bqqq\b/i.test(q) ? 'QQQ'
     : /\biwm\b/i.test(q) ? 'IWM'
     : null;
+
+  // 2026-05-18 operator overrides — MUST be matched before the legacy
+  // `kill|flatten` catch-all below, since e.g. "kill entries" / "flatten all"
+  // share those leading verbs but route to /control/* HTTP endpoints.
+  if (/^status\b/.test(lo))                    return answerOperatorStatus();
+  if (/^halt\s+path2\b/.test(lo))              return answerHaltPath2();
+  if (/^resume\s+path2\b/.test(lo))            return answerResumePath2();
+  if (/^toggle\s+1h\s+gate\b/.test(lo))        return answerToggle1HGate();
+  if (/^mcp\s+restart\b/.test(lo))             return answerMcpRestartCtrl();
+  if (/^kill\s+entries\b/.test(lo)) {
+    if (_needsConfirm(lo, /^kill\s+entries\b/)) return '⚠ WILL HALT ALL ENTRIES (Pine alerts will be rejected).\n  Re-run as: kill entries confirm';
+    return answerKillEntries();
+  }
+  if (/^resume\s+entries\b/.test(lo))          return answerResumeEntries();
+  if (/^flatten\s+all\b/.test(lo)) {
+    if (_needsConfirm(lo, /^flatten\s+all\b/)) return '⚠ WILL CLOSE ALL OPEN POSITIONS (futures + equity).\n  Re-run as: flatten all confirm';
+    return answerFlattenScope('all');
+  }
+  if (/^flatten\s+futures\b/.test(lo)) {
+    if (_needsConfirm(lo, /^flatten\s+futures\b/)) return '⚠ WILL CLOSE ALL OPEN FUTURES POSITIONS.\n  Re-run as: flatten futures confirm';
+    return answerFlattenScope('futures');
+  }
+  if (/^flatten\s+equity\b/.test(lo)) {
+    if (_needsConfirm(lo, /^flatten\s+equity\b/)) return '⚠ WILL CLOSE ALL OPEN EQUITY (SPY/QQQ) POSITIONS.\n  Re-run as: flatten equity confirm';
+    return answerFlattenScope('equity');
+  }
 
   // Kill / flatten — WRITE commands, handled first so symbol-routing doesn't swallow them
   if (/^(kill|flatten)\b/.test(lo) || /\b(flatten)\b/.test(lo)) {

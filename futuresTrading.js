@@ -333,6 +333,48 @@ export function clearCircuitBreaker() {
   return true;
 }
 
+// 2026-05-18 — Operator flatten. Closes every OPEN futures position using
+// the latest cached underlying price. Called from webhook-server's
+// /control/flatten endpoint. Skips positions that lack a fresh price
+// rather than guessing (operator can rerun once the pricer is healthy).
+export function flattenAllFutures(reason = 'OPERATOR_FLATTEN') {
+  let lg;
+  try { lg = JSON.parse(readFileSync(LEDGER_FILE, 'utf8')); } catch { lg = { trades: [] }; }
+  const open = (lg.trades ?? []).filter(t => t.status === 'OPEN');
+  const results = [];
+  let closed = 0, failed = 0;
+  for (const t of open) {
+    const live = readLatestPrice(t.instrument);
+    if (live == null) {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: false, reason: 'NO_LIVE_PRICE' });
+      failed++;
+      continue;
+    }
+    const r = closePosition(t.requestId, live, reason);
+    if (r) {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: true, exit: live, pnl: r.pnl });
+      closed++;
+    } else {
+      results.push({ requestId: t.requestId, instrument: t.instrument, ok: false, reason: 'CLOSE_FAILED' });
+      failed++;
+    }
+  }
+  try { jAlert('info', 'OPERATOR_FLATTEN_FUTURES', { reason, closed, failed, ts: new Date().toISOString() }); } catch {}
+  return { closed, failed, results };
+}
+
+// Snapshot of operator-facing flags for the /control/status endpoint.
+export function getFuturesGateStatus() {
+  return {
+    path2Halt: (process.env.PATH2_HALT || 'false').toLowerCase() === 'true',
+    circuitBreaker: getCircuitBreakerStatus(),
+    sizing: {
+      maxLossPerTrade: parseFloat(process.env.MAX_LOSS_PER_TRADE || '0') || null,
+      sizingFloorBalance: parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000'),
+    },
+  };
+}
+
 // 2026-05-18 — Eager auto-resume probe. Called by webhook-server.js at the
 // top of every Pine alert (before any gate evaluation) so the breaker
 // clears as soon as cooldown has elapsed, regardless of whether a futures

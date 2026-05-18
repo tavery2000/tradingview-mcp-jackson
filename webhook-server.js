@@ -50,7 +50,8 @@ import { startCalibrationScheduler }          from './calibrationScheduler.js';
 // account queries, June 1 production flip) but futures execution flows
 // through futuresTrading.js → futures-ledger.json instead of MCP.
 // See webull-mcp-client.js header for MCP "parked" notes.
-import { placeFuturesOrder as placeFuturesPath2, futuresOrderGate, tryAutoResumeCircuitBreaker } from './futuresTrading.js';
+import { placeFuturesOrder as placeFuturesPath2, futuresOrderGate, tryAutoResumeCircuitBreaker, clearCircuitBreaker, flattenAllFutures, getFuturesGateStatus, isCircuitBreakerTripped } from './futuresTrading.js';
+import { flattenAllEquity } from './paperTrading.js';
 import { getWebullMCP, isMCPDisabled, isIntegrationHalted }        from './webull-mcp-client.js';
 const _FUTURES_INSTRUMENTS = new Set(
   (process.env.FUT_INSTRUMENTS || 'ES1!,NQ1!,MES1!,MNQ1!')
@@ -558,6 +559,133 @@ function handleHealth(_req, res) {
   });
 }
 
+// ─── /control/* — operator REPL overrides (added 2026-05-18) ─────────────────
+// All mutation endpoints emit jAlert 'operator.manual_override' with action +
+// timestamp. State changes that affect downstream gate behavior take effect
+// IMMEDIATELY in this webhook process (no restart needed). For env-var-style
+// knobs we mutate process.env in-process — the .env file is unchanged, so a
+// future restart re-asserts the .env baseline (operator-intended behavior:
+// runtime overrides are session-scoped; durable changes still go via .env).
+
+function _opAlert(action, detail = {}) {
+  try {
+    jAlert('info', 'operator.manual_override', { action, detail, et: etTimeString(), ts: new Date().toISOString() });
+  } catch {}
+  console.log(`  🟦 OPERATOR ${action}${Object.keys(detail).length ? ' ' + JSON.stringify(detail) : ''}`);
+}
+
+function handleControlHaltPath2(_req, res) {
+  process.env.PATH2_HALT = 'true';
+  _opAlert('halt-path2', { previous: 'inactive' });
+  send(res, 200, { ok: true, action: 'halt-path2', state: { path2Halt: true }, ts: new Date().toISOString() });
+}
+
+function handleControlResumePath2(_req, res) {
+  process.env.PATH2_HALT = 'false';
+  _opAlert('resume-path2');
+  send(res, 200, { ok: true, action: 'resume-path2', state: { path2Halt: false }, ts: new Date().toISOString() });
+}
+
+function handleControlHaltEntries(_req, res) {
+  process.env.WEBULL_INTEGRATION_HALT = 'true';
+  _opAlert('halt-entries');
+  send(res, 200, { ok: true, action: 'halt-entries', state: { webullIntegrationHalt: true }, ts: new Date().toISOString() });
+}
+
+function handleControlResumeEntries(_req, res) {
+  process.env.WEBULL_INTEGRATION_HALT = 'false';
+  _opAlert('resume-entries');
+  send(res, 200, { ok: true, action: 'resume-entries', state: { webullIntegrationHalt: false }, ts: new Date().toISOString() });
+}
+
+function handleControlToggle1H(_req, res) {
+  const cur = (process.env.COUNTER_TREND_1H_ENABLED || 'true').toLowerCase() === 'true';
+  const next = !cur;
+  process.env.COUNTER_TREND_1H_ENABLED = next ? 'true' : 'false';
+  _opAlert('toggle-1h-gate', { from: cur, to: next });
+  send(res, 200, { ok: true, action: 'toggle-1h-gate', state: { counterTrend1HEnabled: next }, ts: new Date().toISOString() });
+}
+
+function handleControlClearCircuitBreaker(_req, res) {
+  const before = isCircuitBreakerTripped();
+  clearCircuitBreaker();
+  _opAlert('clear-circuit-breaker', { wasTripped: before });
+  send(res, 200, { ok: true, action: 'clear-circuit-breaker', state: { cbTripped: false, wasTripped: before }, ts: new Date().toISOString() });
+}
+
+async function handleControlFlatten(req, res) {
+  let body = {};
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch {}
+  const scope = (body.scope || 'all').toLowerCase();
+  const out = { ok: true, action: 'flatten', scope, ts: new Date().toISOString() };
+  if (scope === 'all' || scope === 'futures') {
+    try { out.futures = flattenAllFutures('OPERATOR_FLATTEN'); } catch (e) { out.futures = { error: e.message }; }
+  }
+  if (scope === 'all' || scope === 'equity') {
+    try { out.equity = flattenAllEquity('OPERATOR_FLATTEN'); } catch (e) { out.equity = { error: e.message }; }
+  }
+  _opAlert('flatten', { scope, futuresClosed: out.futures?.closed, equityClosed: out.equity?.closed });
+  send(res, 200, out);
+}
+
+async function handleControlMcpRestart(_req, res) {
+  let result = { ok: false };
+  try {
+    const m = await import('./webull-mcp-client.js');
+    if (typeof m.forceReconnect === 'function') {
+      await m.forceReconnect();
+      result = { ok: true, method: 'forceReconnect' };
+    } else {
+      await m.shutdownWebullMCP?.();
+      await m.initWebullMCP?.();
+      result = { ok: true, method: 'shutdown+init' };
+    }
+    const mcp = m.getWebullMCP?.();
+    result.connected = mcp?.isConnected?.() ?? null;
+  } catch (e) {
+    result = { ok: false, error: e.message };
+  }
+  _opAlert('mcp-restart', result);
+  send(res, result.ok ? 200 : 500, { action: 'mcp-restart', ...result, ts: new Date().toISOString() });
+}
+
+function handleControlStatus(_req, res) {
+  let mcpStatus = null;
+  // Read state files (cross-process truth) so /status doesn't depend on
+  // in-memory caches that may differ between processes.
+  let cbFile = null;
+  try { cbFile = JSON.parse(readFileSync(join(__dirname, 'circuit-breaker-state.json'), 'utf8')); } catch {}
+  let openFut = 0, openEq = 0;
+  try {
+    const fut = JSON.parse(readFileSync(join(__dirname, 'futures-ledger.json'), 'utf8'));
+    openFut = (fut.trades ?? []).filter(t => t.status === 'OPEN').length;
+  } catch {}
+  try {
+    const eq = JSON.parse(readFileSync(join(__dirname, 'paper-ledger.json'), 'utf8'));
+    openEq = (eq.trades ?? []).filter(t => t.status === 'OPEN').length;
+  } catch {}
+  const status = {
+    ok: true,
+    et: etTimeString(),
+    halts: {
+      path2Halt:               (process.env.PATH2_HALT || 'false').toLowerCase() === 'true',
+      webullIntegrationHalt:   (process.env.WEBULL_INTEGRATION_HALT || 'false').toLowerCase() === 'true',
+      webullMcpDisabled:       (process.env.WEBULL_MCP_DISABLED || 'false').toLowerCase() === 'true',
+    },
+    gates: {
+      counterTrend1HEnabled:   (process.env.COUNTER_TREND_1H_ENABLED || 'true').toLowerCase() === 'true',
+      counterTrendFuturesMode: process.env.COUNTER_TREND_FUTURES_MODE || process.env.COUNTER_TREND_MODE || 'down_weight',
+      counterTrendEquityMode:  process.env.COUNTER_TREND_EQUITY_MODE  || process.env.COUNTER_TREND_MODE || 'down_weight',
+      counterTrendDownweight:  parseFloat(process.env.COUNTER_TREND_DOWNWEIGHT || '0.6'),
+    },
+    futures: getFuturesGateStatus(),
+    circuitBreakerFile: cbFile,
+    openPositions: { futures: openFut, equity: openEq },
+    ts: new Date().toISOString(),
+  };
+  send(res, 200, status);
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -566,6 +694,17 @@ const server = http.createServer(async (req, res) => {
   if (method === 'GET' && url === '/health')          return handleHealth(req, res);
   if (method === 'POST' && url === '/pine-alert')     return handlePineAlert(req, res);
   if (method === 'POST' && url === '/pine-close')     return handlePineClose(req, res);
+
+  // ─── /control/* — operator REPL overrides ────────────────
+  if (method === 'GET'  && url === '/control/status')                  return handleControlStatus(req, res);
+  if (method === 'POST' && url === '/control/halt-path2')              return handleControlHaltPath2(req, res);
+  if (method === 'POST' && url === '/control/resume-path2')            return handleControlResumePath2(req, res);
+  if (method === 'POST' && url === '/control/halt-entries')            return handleControlHaltEntries(req, res);
+  if (method === 'POST' && url === '/control/resume-entries')          return handleControlResumeEntries(req, res);
+  if (method === 'POST' && url === '/control/toggle-1h-gate')          return handleControlToggle1H(req, res);
+  if (method === 'POST' && url === '/control/clear-circuit-breaker')   return handleControlClearCircuitBreaker(req, res);
+  if (method === 'POST' && url === '/control/flatten')                 return handleControlFlatten(req, res);
+  if (method === 'POST' && url === '/control/mcp-restart')             return handleControlMcpRestart(req, res);
 
   send(res, 404, { ok: false, reason: 'NOT_FOUND', method, url });
 });
