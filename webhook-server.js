@@ -229,6 +229,26 @@ async function handlePineAlert(req, res) {
     try { jAlert('INFO', 'FADE_PROMOTED', { instrument, direction, price, newsEventId, headline: body.fadeHeadline, eventAgeS: body.fadeEventAgeS }); } catch {}
   }
 
+  // 2026-05-18 — Stacked-entry dedup. {instrument|direction|5m-bar-floor}
+  // bucket; first engine wins. Multiple engines firing on the same Pine
+  // bar are confluence on ONE setup, not N independent positions. Today's
+  // evidence: 13:51 MNQ1! (SELL/HTF/ZONE → -$96), 15:02 MES1! (LH/SELL →
+  // -$340), 10:15 QQQ (LH/SELL/HTF → 3× -$15). Applies to both futures and
+  // equity. Runs AFTER the FADE_CANDIDATE handler so the dedup key
+  // reflects the final engine ('FADE' for promoted, FADE_CANDIDATE drops
+  // never reach this point).
+  const _dedup = _checkStackedDedup(instrument, direction, engine);
+  if (_dedup.duplicate) {
+    jGateBlock(engine, instrument, direction, 'STACKED_ENTRY_DEDUP', {
+      firstEngine:  _dedup.firstEngine,
+      ageMs:        _dedup.ageMs,
+      bucketKey:    _dedup.key,
+      etTime:       etTimeString(),
+      note:         'Same instrument+direction within same 5m bar bucket — first engine opened the position; this is logged as confluence-only.',
+    });
+    return send(res, 200, { ok: false, reason: 'STACKED_ENTRY_DEDUP', firstEngine: _dedup.firstEngine });
+  }
+
   // 2026-05-18 — Timeframe gate. Operator switched HANK signal source from 1M
   // → 5M after side-by-side comparison; the 6-fix tuning package (commit
   // c41384b) was insufficient to overcome 1M noise. ACCEPTED_TIMEFRAMES is
@@ -383,21 +403,10 @@ async function handlePineAlert(req, res) {
     jError('WEBHOOK', 'SIGNAL_REVERSAL_LEDGER_READ', { error: e.message });
   }
 
-  // LATE_DAY_ENTRY_0DTE gate — block new entries on 0DTE ETF options after 15:30 ET.
-  // Why: theta burn on near-ATM 0DTE in the final 30 min produces deterministic
-  // HARD_EXIT losses (see 2026-05-12 15:42-15:43 -$169.19, BS math verified correct).
-  // Placed AFTER SIGNAL_REVERSAL so opposite-direction alerts can still close
-  // existing positions through this window; only new entries are blocked.
-  const ZERO_DTE_INSTRUMENTS = new Set(['SPY', 'QQQ', 'IWM']);
-  if (ZERO_DTE_INSTRUMENTS.has(instrument)) {
-    const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
-    const [h, m] = t.split(':').map(Number);
-    const etMins = h * 60 + m;
-    if (etMins >= 15 * 60 + 30) {
-      jGateBlock(engine, instrument, direction, 'LATE_DAY_ENTRY_0DTE', { etTime: etTimeString(), etMins, cutoffMins: 15 * 60 + 30 });
-      return send(res, 200, { ok: false, reason: 'LATE_DAY_ENTRY_0DTE', et: etTimeString() });
-    }
-  }
+  // LATE_DAY_ENTRY_0DTE gate moved to AFTER selectContract (2026-05-18) so
+  // we can read the resolved option expiry and only block when exp = today.
+  // 1DTE+ entries after 15:30 ET pass — no theta-burn catastrophe risk on
+  // a contract that doesn't expire for another 24+ hours.
 
   // ── Counter-trend gate (2026-05-13) ─────────────────────────────────────
   // Reads macro4h-{spy|qqq|iwm}.json (per-monitor poll cycle) for the
@@ -494,6 +503,34 @@ async function handlePineAlert(req, res) {
     } catch (e) {
       jError('WEBHOOK', 'CONTRACT_SELECT_FAIL', { error: e.message, instrument, price, direction });
       return send(res, 500, { ok: false, reason: 'CONTRACT_SELECT_FAIL', error: e.message });
+    }
+  }
+
+  // LATE_DAY_ENTRY_0DTE gate (2026-05-18 exp-aware). Was: block ALL SPY/
+  // QQQ/IWM entries after 15:30 ET. Operator clarified that the theta-burn
+  // risk only applies to 0DTE contracts (expiry = today); 1DTE+ contracts
+  // have ~24hr of value left and shouldn't be blocked.
+  // Toggle off via LATE_DAY_ENTRY_0DTE_EXP_CHECK=false (restores original
+  // block-all behavior — useful for fast revert).
+  const ZERO_DTE_INSTRUMENTS = new Set(['SPY', 'QQQ', 'IWM']);
+  if (ZERO_DTE_INSTRUMENTS.has(instrument)) {
+    const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+    const [h, m] = t.split(':').map(Number);
+    const etMins = h * 60 + m;
+    if (etMins >= 15 * 60 + 30) {
+      const _expCheck = (process.env.LATE_DAY_ENTRY_0DTE_EXP_CHECK || 'false').toLowerCase() === 'true';
+      const _todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+      const _isZeroDte = !expiry || expiry === _todayET;   // if no expiry resolved, treat as 0DTE for safety
+      if (!_expCheck || _isZeroDte) {
+        jGateBlock(engine, instrument, direction, 'LATE_DAY_ENTRY_0DTE', {
+          etTime: etTimeString(), etMins, cutoffMins: 15 * 60 + 30,
+          expiry, todayET: _todayET, expCheckEnabled: _expCheck,
+          note: _expCheck ? '0DTE detected (exp = today); theta-burn risk' : 'exp-check disabled — blocking all SPY/QQQ/IWM',
+        });
+        return send(res, 200, { ok: false, reason: 'LATE_DAY_ENTRY_0DTE', et: etTimeString(), expiry });
+      }
+      // 1DTE+ passes — log once for visibility
+      console.log(`  ✓ LATE_DAY_PASS_1DTE+  ${instrument} ${direction}  exp=${expiry} (today=${_todayET})  — past 15:30 ET but contract not expiring today`);
     }
   }
 
@@ -619,6 +656,39 @@ async function handlePineClose(req, res) {
   } catch (e) {
     return send(res, 500, { ok: false, reason: 'EXCEPTION', error: e.message });
   }
+}
+
+// ─── Stacked-entry dedup (2026-05-18) ────────────────────────────────────────
+// Multiple engines firing on the same Pine bar are CONFIRMATION of one
+// setup, not N independent positions. Buckets by {instrument|direction|
+// 5m-bar-floor} — first engine to land in the bucket opens the trade;
+// subsequent ones get gate-blocked as STACKED_ENTRY_DEDUP and logged
+// with the first-engine reference for post-session confluence analysis.
+// Applies to BOTH futures and equity paths (webhook-level — earlier than
+// the futuresTrading-internal FUT_DUPLICATE_CONFLUENCE which only covered
+// Path 2 via 60s rolling window).
+const _STACK_DEDUP_BUCKET_MS = 5 * 60 * 1000;
+const _STACK_DEDUP_GC_AFTER_MS = 6 * 60 * 1000;
+const _stackDedupMap = new Map();   // key → { firstEngine, ts }
+
+function _stackedDedupKey(instrument, direction, nowMs) {
+  const bar5m = Math.floor(nowMs / _STACK_DEDUP_BUCKET_MS) * _STACK_DEDUP_BUCKET_MS;
+  return `${instrument}|${direction}|${bar5m}`;
+}
+
+function _checkStackedDedup(instrument, direction, engine) {
+  const now = Date.now();
+  // Garbage-collect old buckets.
+  for (const [k, v] of _stackDedupMap.entries()) {
+    if (now - v.ts > _STACK_DEDUP_GC_AFTER_MS) _stackDedupMap.delete(k);
+  }
+  const key = _stackedDedupKey(instrument, direction, now);
+  const existing = _stackDedupMap.get(key);
+  if (existing) {
+    return { duplicate: true, firstEngine: existing.firstEngine, ageMs: now - existing.ts, key };
+  }
+  _stackDedupMap.set(key, { firstEngine: engine, ts: now });
+  return { duplicate: false, key };
 }
 
 // ─── FADE engine helpers (Phase 1, 2026-05-18) ───────────────────────────────
@@ -894,6 +964,11 @@ server.listen(PORT, () => {
   const _acceptedTfsBanner = (process.env.ACCEPTED_TIMEFRAMES || '5').split(',').map(s => s.trim()).filter(Boolean);
   console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
   console.log(`  [WEBHOOK] FADE_ENGINE PHASE 1 ENABLED — vol/range/VWAP triggers; news join 60s HIGH-impact; FOMC/CPI/NFP/GDP/PCE ±15min blackout; per-event dedup 5min`);
+  console.log(`  [WEBHOOK] stacked-entry dedup: ENABLED (5m bar window, first-engine wins) — applies to futures + equity`);
+  {
+    const _expCheckOn = (process.env.LATE_DAY_ENTRY_0DTE_EXP_CHECK || 'false').toLowerCase() === 'true';
+    console.log(`  [paperTrading] Late-day 0DTE gate: ${_expCheckOn ? 'exp-aware (today-exp only, 1DTE+ pass)' : 'block-all SPY/QQQ/IWM after 15:30 ET (legacy)'}`);
+  }
   // 2026-05-18: surface fresh calibration state at startup. If the lookup
   // file doesn't exist, calibrationCache returns the fallback {multiplier:1.0}
   // until analyze-calibration.js builds a new one. Operator-visible signal

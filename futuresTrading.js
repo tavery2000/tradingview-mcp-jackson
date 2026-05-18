@@ -190,6 +190,11 @@ let _evalTimer = null;
 //     log resume, allow entry
 //   - Else: reject with remaining cooldown minutes in the reason
 // Pattern matches profit-protection LIGHT/MEDIUM breach (30/60min halts).
+// 2026-05-18: master enable. When false, every CB entrypoint (entry-check,
+// auto-resume, close-side _circuitBreakerCheck, state-file persist) returns
+// a no-op. Operator chose data-collection priority — real cascades remain
+// covered by MAX_LOSS_PER_TRADE, daily-loss cap, sizing floor, etc.
+const CB_ENABLED                  = (process.env.CIRCUIT_BREAKER_ENABLED || 'true').toLowerCase() === 'true';
 const CB_WINDOW_MS                = 5 * 60_000;
 const CB_MAX_CLOSES               = parseInt(process.env.CIRCUIT_BREAKER_MAX_CLOSES || '3', 10);
 const CB_MAX_CUM_LOSS             = parseFloat(process.env.CIRCUIT_BREAKER_MAX_CUM_LOSS || '500');   // absolute, positive
@@ -242,6 +247,7 @@ try {
  *   { blocked: true, reason: '...', hardHalt: true }     — requires operator clear
  */
 export function circuitBreakerEntryCheck() {
+  if (!CB_ENABLED) return { blocked: false };
   if (!_circuitBreakerTripped) return { blocked: false };
   if (_circuitBreakerHardHalt) {
     return {
@@ -271,6 +277,7 @@ export function circuitBreakerEntryCheck() {
 }
 
 function _circuitBreakerCheck(closePnl) {
+  if (!CB_ENABLED) return;
   if (_circuitBreakerTripped) return;   // already tripped
   const now = Date.now();
   _recentCloses.push({ ts: now, pnl: closePnl });
@@ -406,6 +413,7 @@ export function getFuturesGateStatus() {
 //   { didResume: false, hardHalt: true }           — hard-halt mode, manual REPL clear required
 //   { didResume: false, remainingMin }             — still in cooldown
 export function tryAutoResumeCircuitBreaker() {
+  if (!CB_ENABLED) return { didResume: false, disabled: true };
   if (!_circuitBreakerTripped) return { didResume: false, wasNotTripped: true };
   if (_circuitBreakerHardHalt) return { didResume: false, hardHalt: true };
   const now = Date.now();
@@ -1329,9 +1337,13 @@ console.log(`  [futuresTrading] Micro-fallback: ES1!→MES1!, NQ1!→MNQ1! (auto
 console.log(`  [futuresTrading] Overnight margins:  ES=$${FUT_OVERNIGHT_MARGIN['ES']} NQ=$${FUT_OVERNIGHT_MARGIN['NQ']} MES=$${FUT_OVERNIGHT_MARGIN['MES']} MNQ=$${FUT_OVERNIGHT_MARGIN['MNQ']} (allowed contracts = floor(cap / margin))`);
 console.log(`  [futuresTrading] Max loss per trade: $${FUT_MAX_LOSS_PER_TRADE} (stop × pointValue × contracts)`);
 console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000').toFixed(0)} → 1 contract regardless of tier`);
-console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → ${CB_COOLDOWN_MIN}min auto-resume (${CB_TRIPS_BEFORE_HARD_HALT}+ trips in ${CB_HARD_HALT_WINDOW_MIN}min → hard halt)`);
+if (CB_ENABLED) {
+  console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → ${CB_COOLDOWN_MIN}min auto-resume (${CB_TRIPS_BEFORE_HARD_HALT}+ trips in ${CB_HARD_HALT_WINDOW_MIN}min → hard halt)`);
+} else {
+  console.log(`  [futuresTrading] Circuit breaker: DISABLED (data collection mode — re-evaluate 2026-05-25; real cascades still gated by MAX_LOSS_PER_TRADE / daily-loss cap / sizing floor)`);
+}
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
-console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
+console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day${MAX_TRADES_PER_DAY > 50 ? ' (data-collection mode)' : ''}`);
 console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | whipsaw=${WHIPSAW_PROTECTION}`);
 console.log(`  [futuresTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail (${TRAIL_PCT}% → 0.015% as locks fire) — Phase 1 (1c)`);
 if ((ledger.balance ?? 0) > 15000) {
