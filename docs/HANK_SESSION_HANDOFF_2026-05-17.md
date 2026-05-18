@@ -1,5 +1,12 @@
 # HANK Session Handoff — 2026-05-17 EOD
 
+> **⚠ MONDAY 5/18 TASK #0 — READ THIS FIRST:**
+> [`docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md`](MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md)
+> Catastrophic failure Sun 20:04-20:06 ET (-$19,173 on $520 paper account).
+> Trading HALTED via `WEBULL_INTEGRATION_HALT=true` + `PATH2_HALT=true`.
+> All 7 audit items must pass before futures trading resumes. This OVERRIDES
+> Monday's "observation day" entry in the weekly plan.
+
 > **⚠ SUPERSEDED FOR §7 (Upcoming Timeline):**
 > The week-ahead timeline in §7 below is replaced by
 > [`docs/HANK_WEEKLY_PLAN_2026-05-18.md`](HANK_WEEKLY_PLAN_2026-05-18.md)

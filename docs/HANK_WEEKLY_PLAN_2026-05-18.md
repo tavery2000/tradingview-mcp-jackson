@@ -37,7 +37,21 @@
 
 ---
 
-## Mon 5/18 — Observation day
+## Mon 5/18 — ⚠ OVERRIDDEN: Gate-chain audit (Task #0)
+
+> **2026-05-17 EOD UPDATE:** Catastrophic failure Sun 20:04-20:06 ET —
+> 5 simultaneous CALLS stop-outs on $520 paper account, combined -$19,173.
+> Documented hard caps failed to fire. Mon 5/18 is now a full-day gate-chain
+> audit per [`docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md`](MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md).
+> Trading HALTED via `WEBULL_INTEGRATION_HALT=true` + `PATH2_HALT=true` until
+> all 7 audit items pass acceptance criteria.
+
+**Original Mon 5/18 plan below (observation day) is SUPERSEDED but kept for
+context — equity SPY/QQQ paper-options path continues unaffected.**
+
+---
+
+### Original plan — DEFERRED to first quiet day after audit completes
 
 **Rule: NO code changes. NO deploys.** Day 3 of streak; MCP-routed paper fills
 under live CME + RTH equity. Pure observation.

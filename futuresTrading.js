@@ -252,6 +252,17 @@ export function placeFuturesOrder(consensus, requestId) {
   const inst = (consensus.instrument || '').toUpperCase();
   const direction = consensus.signal;   // CALLS | PUTS
 
+  // 2026-05-17 EOD: PATH2_HALT global circuit-breaker. Set true in .env
+  // to halt all Path 2 futures execution. See docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md
+  // for the catastrophic-failure context that prompted this halt.
+  if ((process.env.PATH2_HALT || 'false').toLowerCase() === 'true') {
+    const reason = 'PATH2_HALT — futures execution halted by operator; see Mon 5/18 Task #0 gate audit';
+    futuresOrderGate.markVetoed(requestId, reason);
+    jGateBlock(consensus.engine, inst, direction, 'PATH2_HALT', { instrument: inst, direction, engine: consensus.engine });
+    console.log(`  🛑 PATH2_HALT — rejecting ${inst} ${direction} ${consensus.engine}`);
+    return { vetoed: true, reason };
+  }
+
   // Instrument allowlist
   if (!ALLOWED_INSTRUMENTS.has(inst)) {
     const reason = `Instrument ${inst} not in FUT_INSTRUMENTS allowlist (graduation gates ES1!/NQ1!/MNQ1! at $${FUT_GRADUATION_THRESHOLD} balance)`;

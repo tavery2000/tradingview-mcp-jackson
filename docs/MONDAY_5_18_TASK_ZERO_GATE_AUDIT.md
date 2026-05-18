@@ -1,0 +1,167 @@
+# Mon 5/18 Task #0 — Gate Chain Audit
+
+> **STATUS:** TRADING HALTED via `WEBULL_INTEGRATION_HALT=true` + `PATH2_HALT=true`
+> in `.env`. Both flags must stay `true` until every item in this doc is verified
+> firing in a controlled test. **Operator does not resume futures trading until then.**
+
+> This task supersedes the "Mon 5/18 — Observation day" entry in
+> [`HANK_WEEKLY_PLAN_2026-05-18.md`](HANK_WEEKLY_PLAN_2026-05-18.md). The whole
+> Monday is now reserved for this audit.
+
+---
+
+## Context
+
+Sunday 5/17 20:04-20:06 ET: **5 simultaneous CALLS stop-outs on a $520 paper
+futures account, combined -$19,173.** Documented hard caps failed to fire.
+Full briefing context in the Sunday session chat transcript.
+
+This isn't a code-quality issue. This is the difference between HANK being a
+trading system and HANK being a random-number generator that occasionally
+makes money. Until the gate chain is verified watertight, futures trading
+stays halted.
+
+---
+
+## Required actions (in order)
+
+### 1. Gate-chain audit
+
+For **every** gate declared in startup banner (the `[paperTrading]` lines +
+the `[futuresTrading]` lines + the `[*Scheduler]` lines), verify:
+
+- **Where** in code it's checked (file:line)
+- **Which ledger** it reads (`paper-ledger.json` vs `futures-ledger.json`
+  vs MCP `get_account_balance`)
+- **What it gates** — entry only, position evaluation only, or both?
+- **Failure-mode test** — does it actually fire under the failure
+  conditions it's supposed to catch?
+
+Output: `docs/gate-chain-audit-2026-05-18.md` with a row per gate, columns
+above, plus a "verified" status.
+
+### 2. Specific bugs to fix
+
+| # | Bug | Fix |
+|---|---|---|
+| (a) | `MAX_LOSS_PER_TRADE` not enforced on futures | Wire `futuresTrading.placeFuturesOrder` to check per-trade max-loss against tier's `contracts × stopPoints × pointValue` |
+| (b) | Daily-loss cap only checked on entry, not on simultaneous stop-out | Add post-evaluation halt in `futuresTrading.evaluateOpenFutures` — after each closeFuturesPosition, re-check `dailyPnL` against caps and halt further evaluations if breached |
+| (c) | `CAPITAL_CAP_PER_TRADE=$10K` — notional or margin? | Pick one explicitly. Document in `.env` comment + add to `docs/gate-chain-audit-2026-05-18.md`. Enforce consistently in `paperTrading._capForInstrument` and any futures path |
+| (d) | Tier sizing has no balance check | Add `MIN_BALANCE_FOR_TIER` checks: Tier A requires $20K+ account balance, Tier B requires $10K+, Tier C only at <$10K. Hard cap at 1 contract if balance < $2K. Currently a $520 account spawning Tier B 3-contract trades — that's the root cause |
+| (e) | Counter-trend gate depends on `monitor.js` writing bias files; futures run 23/5 but monitor only writes during RTH | Add fallback: if `macro4H` is `UNKNOWN` OR bias file mtime stale > 15min → **BLOCK** new entries (not downweight, BLOCK). Apply in both `paperTrading.sendOrder` and `futuresTrading.placeFuturesOrder` |
+| (f) | Signal-reversal gate does not read `futures-ledger.json` | Make `signalConfidence.evaluateCounterTrend` (or the signal-reversal cousin) ledger-agnostic — fire on opposite-direction futures positions too, not just options |
+
+### 3. NEW: Circuit breaker
+
+Universal hard rule, no bypass, operator-clear required to reset:
+
+- **Window:** 5 minutes rolling
+- **Trigger A:** > 3 closed trades in the window
+- **Trigger B:** > $500 cumulative loss in the window
+- **Action on either:** auto-halt all dispatch (sets `PATH2_HALT=true` +
+  `WEBULL_INTEGRATION_HALT=true` programmatically); emit `CIRCUIT_BREAKER_TRIPPED`
+  jAlert; surface red banner on every dashboard tab; TTS announcement
+- **Clear:** operator runs `ask> clear circuit breaker` (new REPL command)
+  after manual review
+
+Implementation: new `circuitBreaker.js` module mirroring `weeklyLoss.js`
+pattern. Hooked into BOTH `sendOrder` entry chain AND `closePosition` /
+`closeFuturesPosition` exit hook.
+
+### 4. Live price feed for futures-status.js
+
+Currently reads `latest-prices.json` which is populated by `webhook-server.js`
+on every inbound Pine alert. Between alerts, prices go stale. Stops, targets,
+and trail computations in `futuresTrading.evaluateOpenFutures` depend on
+fresh prices — without them, position management is blind.
+
+**Fix BEFORE allowing any futures trading to resume:**
+- Add periodic price refresh to `futures-status.js` OR
+- New `futures-pricer.js` that polls MCP `get_futures_snapshot` every 5s
+  and writes to `latest-prices.json`
+- Verify via `futures-status.js` Window 9: live prices update independently
+  of alert traffic
+
+### 5. Ledger reset to clean state
+
+Sunday's $-19,173 catastrophic loss has corrupted `futures-ledger.json`.
+Reset to fresh state with operator-chosen starting balance.
+
+**Recommendation:** $25K starting balance — matches realistic per-tier
+sizing requirements after item (d) lands. Operator confirms before execution.
+
+Implementation: backup current `futures-ledger.json` →
+`futures-ledger.2026-05-17T-audit-reset.backup.json`, then write fresh
+ledger with new balance via `initLedger()`.
+
+### 6. Halt flags stay TRUE until done
+
+- `.env` `WEBULL_INTEGRATION_HALT=true` ✓ (set 2026-05-17 EOD)
+- `.env` `PATH2_HALT=true` ✓ (set 2026-05-17 EOD)
+- `futuresTrading.placeFuturesOrder` rejects with `PATH2_HALT` reason ✓
+  (wired in commit immediately after this doc lands)
+- `webhook-server.js` rejects with `WEBULL_INTEGRATION_HALT` ✓ (existing
+  global circuit-breaker)
+
+Both flags get flipped to `false` by operator **only after item 7 below
+passes**.
+
+### 7. Replay Sunday's 9 Pine alerts in dry-run
+
+Capture the 9 alert payloads that fired Sun 20:04-20:06 ET from the
+journal. Construct a test harness that submits each payload to a
+dry-run version of the dispatch chain. **Every single one must be BLOCKED.**
+
+If even one passes — the audit isn't complete. Iterate.
+
+Harness location: `tools/replay-sunday-alerts.js` (new file). Reads alert
+payloads from `logs/journal/journal-2026-05-17.jsonl`, replays via
+direct call into `placeFuturesOrder` with dry-run flag, asserts veto on
+every one.
+
+---
+
+## Acceptance criteria
+
+Before flipping halt flags off, all six items below must be true:
+
+| # | Criteria | Verified by |
+|---|---|---|
+| 1 | Gate chain audit complete; doc filed | `docs/gate-chain-audit-2026-05-18.md` exists with every gate row populated |
+| 2 | All six bugs (a-f) fixed | Per-bug fix commits + test cases in `docs/gate-chain-audit-2026-05-18.md` |
+| 3 | Circuit breaker live and tested | Trigger A (4 trades in 5min) and Trigger B ($600 loss in 5min) both verified halting dispatch in a controlled test |
+| 4 | Live price feed working | `futures-status.js` Window 9 shows price age < 10s consistently for at least 5 minutes |
+| 5 | Ledger reset done | `futures-ledger.json` shows clean balance + 0 trades; backup file in place |
+| 6 | Replay test passes | All 9 Sunday alerts rejected by dry-run harness; output captured |
+
+Only after ALL six → `.env` flips `WEBULL_INTEGRATION_HALT=false` +
+`PATH2_HALT=false` → operator authorizes resume → restart.
+
+---
+
+## What this work does NOT touch
+
+- Calibration code (calibrationCache.js, calibrationScheduler.js,
+  analyze-calibration.js)
+- SPY/QQQ paper-options path via `paperTrading.sendOrder` (continues
+  trading per its own gate chain, which the audit will verify separately
+  but doesn't halt)
+- IWM `RETIRED_INSTRUMENTS` gate (working)
+- MOO/MOC retirement (working)
+- Webull MCP wrapper internals (parked; will need attention at June 1
+  flip but not for this audit)
+
+---
+
+## Estimated time
+
+This is a full day's work. Operator's Mon 5/18 was scheduled as
+"observation day, no code changes." That schedule is OVERRIDDEN by
+this Task #0. Tuesday's `MAX_WEEKLY_LOSS` work (per weekly plan) may
+slip to Wednesday if audit takes the full day.
+
+---
+
+*Drafted 2026-05-17 EOD after catastrophic failure observation. Halt
+flags wired immediately to prevent further damage. Full audit + fixes
+land Monday morning.*
