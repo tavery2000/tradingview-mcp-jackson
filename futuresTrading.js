@@ -155,7 +155,15 @@ const FUT_MAX_LOSS_PER_TRADE = parseFloat(process.env.MAX_LOSS_PER_TRADE || '200
 
 // Whipsaw inheritance from P1-5-A
 const WHIPSAW_PROTECTION = (process.env.WHIPSAW_PROTECTION || 'true').toLowerCase() === 'true';
-const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'bar_close').toLowerCase();
+// 2026-05-18 15:05 ET — default flipped 'bar_close' → 'tick' after a 5M
+// catastrophic-slippage event: MES1! PUTS stop 7382 → exit 7413 (34pt
+// past, -$170 × 2 trades). bar_close confirmation waited a full minute
+// + used the polling-delayed liveU as exit price; fast moves blew right
+// past. tick mode fires on first observed breach and uses stopPrice
+// adjusted by FUT_STOP_SLIPPAGE_POINTS (simulates real broker fill
+// after STOP→MARKET conversion, ~1 tick slippage).
+const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'tick').toLowerCase();
+const FUT_STOP_SLIPPAGE_POINTS = parseFloat(process.env.FUT_STOP_SLIPPAGE_POINTS || '0.25');
 const TRAIL_PCT          = parseFloat(process.env.TRAIL_PCT || '0.03');
 
 // Eval poll interval
@@ -1136,7 +1144,12 @@ export function evaluateOpenFutures() {
 
     const isCalls = t.signal === 'CALLS';
 
-    // 1. Stop check (with whipsaw bar-close confirmation)
+    // 1. Stop check — tick-based by default (was bar_close; flipped 2026-05-18
+    // after 34pt slippage event). Exit price simulates real broker behavior:
+    // STOP order converts to MARKET on first tick at/past trigger, fills
+    // ~1 tick beyond the level. Using stopPrice ± FUT_STOP_SLIPPAGE_POINTS
+    // avoids the polling-delayed-liveU pricing that produced -$170 fills
+    // on 3pt stops.
     const stopBreached = isCalls ? liveU <= t.stopPrice : liveU >= t.stopPrice;
     if (stopBreached) {
       let exitReason = 'FUT_STOP_HIT';
@@ -1158,7 +1171,13 @@ export function evaluateOpenFutures() {
         }
       }
       if (shouldFire) {
-        try { closeFuturesPosition(t.requestId, liveU, exitReason); } catch (e) { jError('FUT_EXIT_FIRE', e.message); }
+        // Tick mode: simulate broker STOP→MARKET fill ~1 tick beyond level.
+        // bar_close mode (legacy): use the delayed liveU (preserves prior behavior).
+        const slip = FUT_STOP_SLIPPAGE_POINTS;
+        const fillPrice = (STOP_CONFIRMATION === 'tick')
+          ? parseFloat((t.stopPrice + (isCalls ? -slip : slip)).toFixed(4))
+          : liveU;
+        try { closeFuturesPosition(t.requestId, fillPrice, exitReason); } catch (e) { jError('FUT_EXIT_FIRE', e.message); }
         continue;
       }
     }
@@ -1202,6 +1221,7 @@ console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$$
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
 console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
+console.log(`  [futuresTrading] stop confirmation: ${STOP_CONFIRMATION.toUpperCase()} (slippage ±${FUT_STOP_SLIPPAGE_POINTS}pt on fire)`);
 console.log(`  [futuresTrading] graduation threshold $${FUT_GRADUATION_THRESHOLD} (operator-explicit unlock for ES1!/NQ1!/MNQ1! when crossed)`);
 
 if (!_evalTimer) {
