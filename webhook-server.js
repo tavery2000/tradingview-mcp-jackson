@@ -314,10 +314,12 @@ async function handlePineAlert(req, res) {
   // instrument's family. SPY/ES1!/MES1! → spy, QQQ/NQ1!/MNQ1! → qqq, IWM → iwm.
   // Stale files (>5 min old) fall back to UNKNOWN which never trips the gate.
   // Mode = off | down_weight (default) | block — set via COUNTER_TREND_MODE env.
-  let _macro4H    = 'UNKNOWN';
-  let _macro4HSrc = 'no-lookup';
-  let _macro1H    = { trendBias: 'NEUTRAL', structurePattern: 'NEUTRAL' };
-  let _macro1HSrc = 'no-lookup';
+  let _macro4H      = 'UNKNOWN';
+  let _macro4HSrc   = 'no-lookup';
+  let _macro4HFresh = false;
+  let _macro1H      = { trendBias: 'NEUTRAL', structurePattern: 'NEUTRAL' };
+  let _macro1HSrc   = 'no-lookup';
+  let _macro1HFresh = false;
   try {
     const family =
       instrument === 'SPY'  || instrument === 'ES1!' || instrument === 'MES1!' ? 'spy' :
@@ -330,8 +332,9 @@ async function handlePineAlert(req, res) {
       if (ageMin > 5) {
         _macro4HSrc = `stale:${ageMin.toFixed(1)}min`;
       } else {
-        _macro4H    = data.macro4H ?? 'UNKNOWN';
-        _macro4HSrc = `${family}:${ageMin.toFixed(1)}min`;
+        _macro4H      = data.macro4H ?? 'UNKNOWN';
+        _macro4HSrc   = `${family}:${ageMin.toFixed(1)}min`;
+        _macro4HFresh = true;
       }
       // P0 (2026-05-15 EOD): read 1H bias for the structural gate
       try {
@@ -341,8 +344,9 @@ async function handlePineAlert(req, res) {
         if (age1H > 5) {
           _macro1HSrc = `stale:${age1H.toFixed(1)}min`;
         } else {
-          _macro1H = { trendBias: d1H.trendBias ?? 'NEUTRAL', structurePattern: d1H.structurePattern ?? 'NEUTRAL' };
-          _macro1HSrc = `${family}:${age1H.toFixed(1)}min`;
+          _macro1H      = { trendBias: d1H.trendBias ?? 'NEUTRAL', structurePattern: d1H.structurePattern ?? 'NEUTRAL' };
+          _macro1HSrc   = `${family}:${age1H.toFixed(1)}min`;
+          _macro1HFresh = true;
         }
       } catch (e) {
         _macro1HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
@@ -352,6 +356,28 @@ async function handlePineAlert(req, res) {
     }
   } catch (e) {
     _macro4HSrc = `read-fail:${(e.message || '').slice(0, 40)}`;
+  }
+
+  // 2026-05-18 (audit D): futures fail-closed when BOTH 1H and 4H bias are stale.
+  // monitor.js writes macro{1h,4h}-spy.json only inside isMarketHours() (07:00-16:00 ET),
+  // so during the CME 23/5 overnight window the gate's data source is dark and
+  // evaluateCounterTrend silently falls back to NEUTRAL/UNKNOWN — letting counter-trend
+  // futures alerts through unfiltered. Audit confirmed via overnight 5/17→5/18 diagnostic
+  // (4 HL/ZONE/BUY CALLS lost $101 into a downtrend the PUTS engines correctly traded).
+  // Conservative fail-closed: block futures-instrument entries when both biases are stale.
+  // Proper fix (audit B) is a futures-1H monitor; tracked for post-close 5/18.
+  const _FUT_INSTRUMENTS_FOR_GATE = new Set(['ES1!', 'NQ1!', 'MES1!', 'MNQ1!']);
+  if (_FUT_INSTRUMENTS_FOR_GATE.has(instrument) && !_macro1HFresh && !_macro4HFresh) {
+    jGateBlock(engine, instrument, direction, 'COUNTER_TREND_STALE_BOTH_FUTURES', {
+      macro4H: _macro4H, macro4HSrc: _macro4HSrc,
+      macro1H: _macro1H, macro1HSrc: _macro1HSrc,
+      instrumentClass: 'futures',
+      note: 'Both 1H and 4H bias files stale; futures fail-closed pending macro1h-futures monitor (audit B, due 2026-05-18 post-close).',
+    });
+    return send(res, 200, {
+      ok: false, reason: 'COUNTER_TREND_STALE_BOTH_FUTURES',
+      macro4HSrc: _macro4HSrc, macro1HSrc: _macro1HSrc,
+    });
   }
 
   // P1-7 (2026-05-14) + P0 (2026-05-15): pass instrument AND macro1H so
