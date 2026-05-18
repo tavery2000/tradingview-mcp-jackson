@@ -908,6 +908,11 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
   }
   contracts = Math.min(contracts, MAX_CONTRACTS);
 
+  // 2026-05-18 FADE engine: force 1c regardless of tier (sizing-floor
+  // exempt per operator spec — small per-trade risk profile for the
+  // highest-edge engine in the library).
+  if (consensus.engine === 'FADE') contracts = 1;
+
   // 2026-05-16 Phase 1 Additional: calibration sizing multiplier. Only
   // applied when CALIBRATION_APPLY_MULTIPLIER=true (default false, dry-run).
   // Floored at 1 so we never go below a single contract; ceilinged at
@@ -1076,9 +1081,24 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     const _stopMul = _regime === 'PM' ? PM_STOP_MULTIPLIER   : 1.0;
     const _tgtMul  = _regime === 'PM' ? PM_TARGET_MULTIPLIER : 1.0;
     const _stopDistanceBase = _getStopDistance(consensus.instrument);
-    const _stopDistance     = _stopDistanceBase != null ? _stopDistanceBase * _stopMul : null;
-    const _entryU       = entryUnderlying ?? consensus.underlyingPrice ?? null;
     const _isCalls      = consensus.signal === 'CALLS';
+    const _entryU       = entryUnderlying ?? consensus.underlyingPrice ?? null;
+    // 2026-05-18 FADE Phase 1 override for equity options. Operator spec
+    // "1.5pt above/below entry candle high/low" converts to underlying $
+    // via 0.1x mapping (futures pt ≈ SPY/QQQ $0.15). Using 0.20 as a
+    // slightly conservative noise buffer past the bar extreme.
+    const _isFade = consensus.engine === 'FADE';
+    let _stopDistance     = _stopDistanceBase != null ? _stopDistanceBase * _stopMul : null;
+    if (_isFade && _entryU != null) {
+      const _barHi = consensus.fadeBarHigh;
+      const _barLo = consensus.fadeBarLow;
+      if (consensus.signal === 'PUTS' && Number.isFinite(_barHi)) {
+        _stopDistance = Math.max(0.05, (_barHi - _entryU) + 0.20);
+      } else if (consensus.signal === 'CALLS' && Number.isFinite(_barLo)) {
+        _stopDistance = Math.max(0.05, (_entryU - _barLo) + 0.20);
+      }
+      console.log(`  ${C.yellow}⚡ FADE_OVERRIDE${C.reset}  ${consensus.instrument} ${consensus.signal}  stopDist=$${_stopDistance?.toFixed(2)}  news="${(consensus.fadeHeadline || '').slice(0, 60)}" age=${consensus.fadeEventAgeS}s`);
+    }
     const _stopUnderlying = (_stopDistance != null && _entryU != null)
       ? parseFloat((_isCalls ? _entryU - _stopDistance : _entryU + _stopDistance).toFixed(4))
       : null;
@@ -1087,7 +1107,10 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
     // STAGE_1_ARMED on entry. evaluateOpenPositions transitions to
     // STAGE_3_TRAILING when target hits (50% close, BE stop, trail active).
     const _targetDistanceBase = _getTargetDistance(consensus.instrument);
-    const _targetDistance     = _targetDistanceBase != null ? _targetDistanceBase * _tgtMul : null;
+    let _targetDistance       = _targetDistanceBase != null ? _targetDistanceBase * _tgtMul : null;
+    if (_isFade) {
+      _targetDistance = 0.50;   // Phase 1 stub for equity ($0.50 ≈ 5pt-equiv); Wed: pre-news close lookup
+    }
     const _targetUnderlying = (_targetDistance != null && _entryU != null)
       ? parseFloat((_isCalls ? _entryU + _targetDistance : _entryU - _targetDistance).toFixed(4))
       : null;
@@ -1897,6 +1920,18 @@ export function evaluateOpenPositions(priceFeeder) {
       //    rollover IFF the underlying is still beyond stop at the new
       //    bar's first tick. Profit-locked + BE stops bypass whipsaw
       //    protection (operator wants instant lock-protection).
+      // 2026-05-18 FADE Phase 1: 15-min time-decay exit. The algo-pop
+      // thesis is bounded — if a FADE hasn't reverted to target within
+      // 15 minutes, close at market regardless of P&L.
+      if (t.engine === 'FADE' && t.fillTime) {
+        const ageMs = Date.now() - t.fillTime;
+        if (ageMs >= 15 * 60 * 1000) {
+          console.log(`  ${C.yellow}⏱ FADE_TIME_EXIT  ${t.instrument} ${t.signal}  held ${(ageMs/60000).toFixed(1)}min without target${C.reset}`);
+          try { closePosition(t.requestId, fed.optionPrice, 'FADE_TIME_EXIT'); } catch (e) { jError('FADE_TIME_EXIT', e.message, { requestId: t.requestId }); }
+          continue;
+        }
+      }
+
       if (t.stopActive && t.stopUnderlyingPrice != null && liveU != null) {
         const breached = isCalls
           ? (liveU <= t.stopUnderlyingPrice)

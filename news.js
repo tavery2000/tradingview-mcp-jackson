@@ -22,8 +22,11 @@ import { dirname, join } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 
 const __newsDir = dirname(fileURLToPath(import.meta.url));
-const OVERNIGHT_NEWS_FILE = join(__newsDir, 'overnight-news.json');
+const OVERNIGHT_NEWS_FILE     = join(__newsDir, 'overnight-news.json');
+const REALTIME_NEWS_FILE      = join(__newsDir, 'realtime-news.json');
+const ECONOMIC_CALENDAR_FILE  = join(__newsDir, 'economic-calendar.json');
 const MAX_OVERNIGHT = 50;
+const REALTIME_NEWS_WINDOW_MS = 5 * 60 * 1000;   // 5 minutes
 
 // ─── Anthropic client ─────────────────────────────────────────────────────────
 
@@ -35,6 +38,48 @@ try {
 }
 
 // ─── Overnight writer ─────────────────────────────────────────────────────────
+
+// 2026-05-18 — FADE engine real-time feed. Webhook reads this file on
+// FADE_CANDIDATE alerts and joins with a 60s lookback against HIGH-impact
+// events. 5-minute rolling window keeps the file small + immediate.
+function saveRealtimeNews(title, sourceName, tier, tickers) {
+  try {
+    const existing = existsSync(REALTIME_NEWS_FILE)
+      ? JSON.parse(readFileSync(REALTIME_NEWS_FILE, 'utf8'))
+      : [];
+    const cutoff = Date.now() - REALTIME_NEWS_WINDOW_MS;
+    const fresh  = existing.filter(e => e.ts > cutoff);
+    const impact = tier <= 2 ? 'HIGH' : tier <= 3 ? 'MEDIUM' : 'LOW';
+    fresh.push({
+      ts:    Date.now(),
+      tsISO: new Date().toISOString(),
+      et:    etNow(),
+      source: sourceName,
+      headline: title.slice(0, 240),
+      impact,
+      tier,
+      type:  'NEWS',  // Phase 2: refine to GEO/FED/ECON/EARNINGS via classifier
+      instruments_affected: (tickers && tickers.length)
+        ? tickers
+        : ['ES1!','NQ1!','MES1!','MNQ1!','SPY','QQQ'],
+    });
+    writeFileSync(REALTIME_NEWS_FILE, JSON.stringify(fresh, null, 2));
+  } catch { /* silent */ }
+}
+
+// Snapshot the in-memory economicCalendar to disk so webhook can read it
+// for FADE blackout checks (FOMC/CPI/NFP/GDP/PCE ±15min suppression).
+// Earnings calendar intentionally excluded — FADE blackout is for macro
+// regime-shift events only, not individual-stock earnings.
+function saveEconomicCalendar() {
+  try {
+    writeFileSync(ECONOMIC_CALENDAR_FILE, JSON.stringify({
+      ts: Date.now(),
+      tsISO: new Date().toISOString(),
+      events: economicCalendar,
+    }, null, 2));
+  } catch { /* silent */ }
+}
 
 function saveOvernightNews(title, tickers, tier) {
   try {
@@ -347,6 +392,8 @@ async function refreshCalendars() {
     calendarFetched = econN > 0 || earnN > 0;
     const src = calendarFetched ? `${C.green}live${C.reset}` : `${C.yellow}fallback${C.reset}`;
     console.log(`  ${C.gray}Calendar: ${econN} econ events, ${earnN} earnings  [${src}${C.gray}]${C.reset}`);
+    // 2026-05-18: snapshot calendar for FADE blackout reads
+    saveEconomicCalendar();
   } catch {
     console.log(`  ${C.gray}Calendar fetch failed — using fallback${C.reset}`);
   }
@@ -729,6 +776,8 @@ async function printNewsItem(item, sourceName, sourceColor) {
 
   // Save T1/T2/T3 to overnight-news.json
   if (tier <= 3) saveOvernightNews(title, tickers, tier);
+  // 2026-05-18: realtime-news.json for FADE engine join (5min rolling)
+  if (tier <= 3) saveRealtimeNews(title, sourceName, tier, tickers);
 
   // Auto-analysis for T1 and T2
   if (tier <= 2) {

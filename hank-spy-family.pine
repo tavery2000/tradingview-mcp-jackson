@@ -943,3 +943,22 @@ alertcondition(buyTrigger,     "BUY signal",             "SMC: BUY signal")
 alertcondition(sellTrigger,    "SELL signal",            "SMC: SELL signal")
 alertcondition(buyTriggerHTF,  "HTF-aligned BUY",        "SMC: HTF-aligned BUY")
 alertcondition(sellTriggerHTF, "HTF-aligned SELL",       "SMC: HTF-aligned SELL")
+
+// 2026-05-18 — FADE engine (operator-validated: news algo pops fade reliably).
+// Triggers: |vol_delta| > 3×SMA20 + bar_range > 2×SMA20 + |close-VWAP| > 1×ATR
+// + reversal candle (bear-close on bull spike, bull-close on bear spike).
+// Webhook (handlePineAlert) reads realtime-news.json with 60s lookback and
+// promotes engine=FADE_CANDIDATE → FADE only when a HIGH-impact news event
+// is present (and not inside FOMC/CPI/NFP/GDP/PCE ±15min blackout).
+_fadeVolDelta = close > open ? volume : close < open ? -volume : 0
+_fadeVwap     = ta.vwap
+_fadeVolHi    = math.abs(_fadeVolDelta) > 3 * ta.sma(math.abs(_fadeVolDelta), 20)
+_fadeRangeHi  = (high - low) > 2 * ta.sma(high - low, 20)
+_fadeExtnd    = math.abs(close - _fadeVwap) > 1 * atr14
+fadeBullCandidate = barstate.isconfirmed and _fadeVolHi and _fadeRangeHi and close < open and _fadeExtnd
+fadeBearCandidate = barstate.isconfirmed and _fadeVolHi and _fadeRangeHi and close > open and _fadeExtnd
+
+alertcondition(fadeBullCandidate, "FADE Bull Candidate (sell-the-pop trigger)",
+     '{"instrument":"{{ticker}}","direction":"PUTS","engine":"FADE_CANDIDATE","confidence":"HIGH","price":{{close}},"high":{{high}},"low":{{low}},"timeframe":"{{interval}}","alertName":"FADE Bull Candidate"}')
+alertcondition(fadeBearCandidate, "FADE Bear Candidate (buy-the-dump trigger)",
+     '{"instrument":"{{ticker}}","direction":"CALLS","engine":"FADE_CANDIDATE","confidence":"HIGH","price":{{close}},"high":{{high}},"low":{{low}},"timeframe":"{{interval}}","alertName":"FADE Bear Candidate"}')

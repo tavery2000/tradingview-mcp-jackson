@@ -159,7 +159,7 @@ async function handlePineAlert(req, res) {
   }
 
   const { instrument, direction, price, vwap = null, alertName = null } = body;
-  const engine     = body.engine     ?? 'PINE';
+  let   engine     = body.engine     ?? 'PINE';   // mutable: FADE_CANDIDATE promotes to FADE
   const confidence = body.confidence ?? 'MEDIUM';
   // P1-5-B (2026-05-14 EOD): structure-based stop fields from Pine.
   // CALLS: invalidation_level = prevSwingLow (HL pivot low).
@@ -182,6 +182,52 @@ async function handlePineAlert(req, res) {
   try {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, timeframe, et: etTimeString() });
   } catch {}
+
+  // 2026-05-18 — FADE engine Phase 1. Pine emits engine=FADE_CANDIDATE on
+  // vol/range/VWAP-extension reversal candles. Webhook joins with
+  // realtime-news.json (60s lookback, HIGH-impact) and either:
+  //   - drops [FADE_DROPPED_NO_NEWS]   if no qualifying news
+  //   - drops [FADE_BLACKOUT]          if inside FOMC/CPI/NFP ±15min
+  //   - drops [FADE_DEDUP]             if same news_event already has active FADE
+  //   - promotes engine='FADE' and falls through to gate chain. The
+  //     counter-trend gate already exempts FADE engine (signalConfidence
+  //     line 311: `if (engine === 'FADE') return pass;`). Sizing-floor
+  //     bypass + 15min time-decay live in futuresTrading/paperTrading.
+  if (engine === 'FADE_CANDIDATE') {
+    const newsEvent = _findFadeNewsEvent();
+    if (!newsEvent) {
+      jGateBlock(engine, instrument, direction, 'FADE_DROPPED_NO_NEWS', {
+        etTime: etTimeString(), note: 'No HIGH-impact news within 60s of FADE_CANDIDATE',
+      });
+      return send(res, 200, { ok: false, reason: 'FADE_DROPPED_NO_NEWS' });
+    }
+    const blackout = _checkFadeBlackout();
+    if (blackout) {
+      jGateBlock(engine, instrument, direction, 'FADE_BLACKOUT', {
+        etTime: etTimeString(), event: blackout.event, minutesUntil: blackout.minutesUntil,
+        note: 'Macro event ±15min — true regime shift, not algo pop',
+      });
+      return send(res, 200, { ok: false, reason: 'FADE_BLACKOUT', event: blackout.event });
+    }
+    const newsEventId = _fadeNewsEventId(newsEvent);
+    if (_fadeEventActive(newsEventId)) {
+      jGateBlock(engine, instrument, direction, 'FADE_DEDUP', {
+        etTime: etTimeString(), newsEventId, headline: newsEvent.headline.slice(0, 80),
+      });
+      return send(res, 200, { ok: false, reason: 'FADE_DEDUP', newsEventId });
+    }
+    _fadeMarkEventActive(newsEventId);
+    // Promote in-place. `engine` local + body.engine both flip so all
+    // downstream paths (gate eval, dispatch, journal) see 'FADE'.
+    engine               = 'FADE';
+    body.engine          = 'FADE';
+    body.fadeNewsEventId = newsEventId;
+    body.fadeHeadline    = newsEvent.headline.slice(0, 200);
+    body.fadeEventAgeS   = Math.floor((Date.now() - newsEvent.ts) / 1000);
+    // body.high and body.low already present from Pine's alertcondition template
+    console.log(`  ⚡ FADE_PROMOTED ${instrument} ${direction} @ ${price} — news age=${body.fadeEventAgeS}s "${newsEvent.headline.slice(0,80)}"`);
+    try { jAlert('INFO', 'FADE_PROMOTED', { instrument, direction, price, newsEventId, headline: body.fadeHeadline, eventAgeS: body.fadeEventAgeS }); } catch {}
+  }
 
   // 2026-05-18 — Timeframe gate. Operator switched HANK signal source from 1M
   // → 5M after side-by-side comparison; the 6-fix tuning package (commit
@@ -476,6 +522,12 @@ async function handlePineAlert(req, res) {
     counterTrendMultiplier: ctGate.multiplier,
     invalidationLevel:      invalidation_level,
     structureType:          structure_type,
+    // 2026-05-18 FADE engine context (only populated when engine='FADE'):
+    fadeBarHigh:            body.high  ?? null,    // entry candle high — for PUTS stop calc
+    fadeBarLow:             body.low   ?? null,    // entry candle low  — for CALLS stop calc
+    fadeNewsEventId:        body.fadeNewsEventId ?? null,
+    fadeHeadline:           body.fadeHeadline ?? null,
+    fadeEventAgeS:          body.fadeEventAgeS ?? null,
   };
 
   // 2026-05-17 EOD: WEBULL_INTEGRATION_HALT remains a global circuit-breaker
@@ -567,6 +619,85 @@ async function handlePineClose(req, res) {
   } catch (e) {
     return send(res, 500, { ok: false, reason: 'EXCEPTION', error: e.message });
   }
+}
+
+// ─── FADE engine helpers (Phase 1, 2026-05-18) ───────────────────────────────
+// Pine emits engine='FADE_CANDIDATE' on vol/range/VWAP-extension reversal
+// candles. Webhook joins with realtime-news.json (60s lookback, HIGH impact
+// required) and either promotes to engine='FADE' or drops with a loud reason.
+// Blackout check suppresses FADE inside FOMC/CPI/NFP/GDP/PCE ±15min — those
+// are regime shifts, not algo pops, so the "fade the pop" thesis breaks down.
+const _REALTIME_NEWS_FILE = join(__dirname, 'realtime-news.json');
+const _ECON_CAL_FILE      = join(__dirname, 'economic-calendar.json');
+const _FADE_NEWS_LOOKBACK_MS    = 60 * 1000;
+const _FADE_BLACKOUT_WINDOW_MS  = 15 * 60 * 1000;
+const _FADE_BLACKOUT_KEYWORDS   = ['FOMC', 'FED', 'CPI', 'NFP', 'PAYROLL', 'GDP', 'PCE'];
+const _FADE_DEDUP_WINDOW_MS     = 5 * 60 * 1000;
+const _fadeActiveEvents = new Map();   // newsEventId → timestamp
+
+function _findFadeNewsEvent() {
+  try {
+    const events = JSON.parse(readFileSync(_REALTIME_NEWS_FILE, 'utf8')) || [];
+    const cutoff = Date.now() - _FADE_NEWS_LOOKBACK_MS;
+    const hits = events.filter(e => e.impact === 'HIGH' && e.ts >= cutoff);
+    if (!hits.length) return null;
+    hits.sort((a, b) => b.ts - a.ts);
+    return hits[0];
+  } catch { return null; }
+}
+
+function _eventToMs(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
+  try {
+    const [y, m, d]  = dateStr.split('-').map(Number);
+    const [hh, mm]   = timeStr.split(':').map(Number);
+    // Naive ET→UTC: assume EDT (UTC-4) for May–Oct, EST (UTC-5) Nov–Mar.
+    // Phase 2 can swap for a proper tz library; for ±15min blackout window
+    // a 1hr DST edge case is far inside the noise floor.
+    const isDst = m >= 3 && m <= 11;   // approximate
+    return Date.UTC(y, m - 1, d, hh + (isDst ? 4 : 5), mm);
+  } catch { return null; }
+}
+
+function _checkFadeBlackout() {
+  try {
+    const data = JSON.parse(readFileSync(_ECON_CAL_FILE, 'utf8')) || {};
+    const events = data.events || [];
+    const now = Date.now();
+    for (const evt of events) {
+      if ((evt.impact || '').toUpperCase() !== 'HIGH') continue;
+      const evtType = (evt.event || '').toUpperCase();
+      const matches = _FADE_BLACKOUT_KEYWORDS.some(k => evtType.includes(k));
+      if (!matches) continue;
+      const evtMs = _eventToMs(evt.date, evt.time);
+      if (evtMs == null) continue;
+      if (Math.abs(now - evtMs) <= _FADE_BLACKOUT_WINDOW_MS) {
+        return { event: evt.event, minutesUntil: Math.round((evtMs - now) / 60000) };
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+function _fadeNewsEventId(newsEvent) {
+  const s = `${newsEvent.headline}|${newsEvent.ts}`;
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+function _fadeEventActive(id) {
+  const t = _fadeActiveEvents.get(id);
+  if (!t) return false;
+  if (Date.now() - t > _FADE_DEDUP_WINDOW_MS) {
+    _fadeActiveEvents.delete(id);
+    return false;
+  }
+  return true;
+}
+
+function _fadeMarkEventActive(id) {
+  _fadeActiveEvents.set(id, Date.now());
 }
 
 function handleHealth(_req, res) {
@@ -762,6 +893,7 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK]                      1H-structural=${_ct1H ? 'ENABLED' : 'disabled'}`);
   const _acceptedTfsBanner = (process.env.ACCEPTED_TIMEFRAMES || '5').split(',').map(s => s.trim()).filter(Boolean);
   console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
+  console.log(`  [WEBHOOK] FADE_ENGINE PHASE 1 ENABLED — vol/range/VWAP triggers; news join 60s HIGH-impact; FOMC/CPI/NFP/GDP/PCE ±15min blackout; per-event dedup 5min`);
   // 2026-05-18: surface fresh calibration state at startup. If the lookup
   // file doesn't exist, calibrationCache returns the fallback {multiplier:1.0}
   // until analyze-calibration.js builds a new one. Operator-visible signal

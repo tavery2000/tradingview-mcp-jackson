@@ -724,7 +724,7 @@ export function placeFuturesOrder(consensus, requestId) {
     try { jAlert('warning', 'SIZE_FLOOR_1_CONTRACT', { balance: _balanceForSizing, threshold: SIZING_FLOOR_THRESHOLD, tierAttempted: tier, tierContracts: tierCfg.contracts, override: 1 }); } catch {}
     contracts = 1;
   }
-  const stopPoints = tierCfg.stopPoints;
+  let stopPoints = tierCfg.stopPoints;   // FADE engine may override below
 
   // 2026-05-18 13:05 ET — micro-fallback (operator-restored).
   // When a full-contract Pine alert (ES1!/NQ1!) can't fit its overnight
@@ -801,7 +801,30 @@ export function placeFuturesOrder(consensus, requestId) {
       contracts = _maxLossImpliedContracts;
     }
   }
-  const targetPoints = tierCfg.targetPoints;
+  let targetPoints = tierCfg.targetPoints;   // FADE engine may override below
+
+  // 2026-05-18 FADE engine — Phase 1 entry overrides (operator-validated edge:
+  // news algo pops fade back to pre-news level). Sophisticated reversal
+  // detection deferred to Wed evening; Phase 1 uses Pine's reversal-candle
+  // signal as the trigger, then computes:
+  //   - Stop: 1.5pt past the entry candle high (PUTS) or low (CALLS)
+  //   - Target: ATR-stub at 5pt (Wed enhances with pre-news structural close)
+  //   - Sizing: force 1c regardless of tier (sizing-floor exempt per operator
+  //             — moot at 1c floor, matters when tier A would give 5c).
+  if (consensus.engine === 'FADE') {
+    contracts = 1;
+    const entryU = consensus.underlyingPrice ?? consensus.entryPrice ?? null;
+    const barHi  = consensus.fadeBarHigh;
+    const barLo  = consensus.fadeBarLow;
+    if (direction === 'PUTS' && Number.isFinite(barHi) && Number.isFinite(entryU)) {
+      stopPoints = Math.max(1.0, (barHi - entryU) + 1.5);
+    } else if (direction === 'CALLS' && Number.isFinite(barLo) && Number.isFinite(entryU)) {
+      stopPoints = Math.max(1.0, (entryU - barLo) + 1.5);
+    }
+    targetPoints = 5;   // Phase 1 stub
+    console.log(`  ⚡ FADE_OVERRIDE  ${inst} ${direction}  stop=${stopPoints.toFixed(2)}pt  target=${targetPoints}pt  news="${(consensus.fadeHeadline || '').slice(0, 60)}" age=${consensus.fadeEventAgeS}s`);
+    try { jAlert('info', 'FADE_ENTRY_OVERRIDE', { instrument: inst, direction, stopPoints, targetPoints, fadeNewsEventId: consensus.fadeNewsEventId, fadeEventAgeS: consensus.fadeEventAgeS }); } catch {}
+  }
 
   // Underlying entry price — Pine alert provides it via consensus.underlyingPrice
   // (or consensus.entryPrice if caller passed underlying directly)
@@ -1207,6 +1230,18 @@ export function evaluateOpenFutures() {
     }
 
     const isCalls = t.signal === 'CALLS';
+
+    // 2026-05-18 FADE Phase 1: 15-min time-decay exit. If a FADE trade
+    // hasn't hit target (or stopped) within 15 minutes, the algo-pop
+    // thesis is invalidated — close at market regardless of P&L.
+    if (t.engine === 'FADE' && t.fillTime) {
+      const ageMs = Date.now() - t.fillTime;
+      if (ageMs >= 15 * 60 * 1000) {
+        console.log(`  ⏱ FADE_TIME_EXIT  ${t.instrument} ${t.signal}  held ${(ageMs/60000).toFixed(1)}min without target — closing at ${liveU}`);
+        try { closeFuturesPosition(t.requestId, liveU, 'FADE_TIME_EXIT'); } catch (e) { jError('FADE_TIME_EXIT', e.message); }
+        continue;
+      }
+    }
 
     // 1. Stop check — tick-based by default (was bar_close; flipped 2026-05-18
     // after 34pt slippage event). Exit price simulates real broker behavior:
