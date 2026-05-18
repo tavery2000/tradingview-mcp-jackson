@@ -529,26 +529,41 @@ function _resolveTier(consensus) {
     return { tier: null, reason: 'CONFLICT_BOTH_DIRECTIONS_IN_60S', opposite: opposite.length };
   }
 
-  // Same-direction stacking
+  // Same-direction within window
   const stacked = _recentSignals.filter(s =>
     s.instrument === inst && s.direction === direction && s.ts >= cutoff
   );
 
-  // Base tier from engine
+  // 2026-05-18 ~14:00 ET — design flip: same-direction multi-engine fires
+  // on the same Pine bar are CONFLUENCE on one trade, NOT separate positions.
+  // Previous behavior opened 3 trades on triple-engine fires (e.g. today's
+  // 13:50:01-13:50:02 MNQ1! SELL/HTF/ZONE → 3 × 1c → 3 × -$32 → circuit
+  // breaker trip on what was structurally one signal). Operator policy:
+  // first engine in the window opens the position; subsequent same-direction
+  // engines get gate-blocked with DUPLICATE_CONFLUENCE_WITHIN_WINDOW. The
+  // confluence engines are captured on the journal so post-session analysis
+  // can audit which combos co-fired.
+  if (stacked.length >= 1) {
+    const first = stacked.reduce((a, b) => (a.ts <= b.ts ? a : b));
+    const ageMs = Date.now() - first.ts;
+    return {
+      tier: null,
+      reason: 'DUPLICATE_CONFLUENCE_WITHIN_WINDOW',
+      firstEngine: first.engine,
+      firstAgeMs: ageMs,
+      windowMs: STACKING_WINDOW_MS,
+      confluenceCount: stacked.length,
+    };
+  }
+
+  // Base tier from engine — first signal in window picks tier normally.
   let tier;
   if (engine === 'LIVE')                                        tier = 'C';
   else if (engine === 'HTF')                                    tier = 'A';
   else if (['HL','LH','BUY','SELL','ZONE'].includes(engine))    tier = 'B';
   else                                                          tier = 'B';
 
-  // Aggressive stacking upgrade: 1 same-direction in 60s window upgrades by one
-  if (stacked.length >= 1) {
-    if (tier === 'C') tier = 'B';
-    else if (tier === 'B') tier = 'A';
-    // A stays at A (max)
-  }
-
-  return { tier, stacked: stacked.length };
+  return { tier, stacked: 0 };
 }
 
 // ─── Place order (entry path) ──────────────────────────────────────────
@@ -666,10 +681,21 @@ export function placeFuturesOrder(consensus, requestId) {
   }
 
   // Tier resolution + stacking
-  const { tier, reason: tierReason, opposite, stacked } = _resolveTier(consensus);
+  const resolveRes = _resolveTier(consensus);
+  const { tier, reason: tierReason } = resolveRes;
   if (tier === null) {
     futuresOrderGate.markVetoed(requestId, tierReason);
-    jGateBlock(consensus.engine, inst, direction, 'FUT_CONFLICT_BLOCKED', { opposite });
+    if (tierReason === 'DUPLICATE_CONFLUENCE_WITHIN_WINDOW') {
+      jGateBlock(consensus.engine, inst, direction, 'FUT_DUPLICATE_CONFLUENCE', {
+        firstEngine:     resolveRes.firstEngine,
+        firstAgeMs:      resolveRes.firstAgeMs,
+        windowMs:        resolveRes.windowMs,
+        confluenceCount: resolveRes.confluenceCount,
+        note:            'First engine in the 60s window opened the position; this duplicate same-direction engine is recorded as confluence-only.',
+      });
+    } else {
+      jGateBlock(consensus.engine, inst, direction, 'FUT_CONFLICT_BLOCKED', { opposite: resolveRes.opposite });
+    }
     return { vetoed: true, reason: tierReason };
   }
   const tierCfg = TIER[tier];
@@ -1175,7 +1201,7 @@ console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.en
 console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → ${CB_COOLDOWN_MIN}min auto-resume (${CB_TRIPS_BEFORE_HARD_HALT}+ trips in ${CB_HARD_HALT_WINDOW_MIN}min → hard halt)`);
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
-console.log(`  [futuresTrading] stacking ${STACKING_WINDOW_MS/1000}s window (aggressive) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
+console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
 console.log(`  [futuresTrading] graduation threshold $${FUT_GRADUATION_THRESHOLD} (operator-explicit unlock for ES1!/NQ1!/MNQ1! when crossed)`);
 
 if (!_evalTimer) {
