@@ -46,9 +46,38 @@ let _staleCyclesCount = 0;
 let _degraded = false;
 let _degradedAt = 0;
 let _degradedLoggedOnce = false;
+// Session-state cache for transition logging (null on first tick).
+let _lastSessionOpen = null;
 
 function _etTimeString() {
   return new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
+}
+
+// 2026-05-18 — CME futures session schedule (ET):
+//   Sun 18:00 → Fri 17:00 OPEN (with daily Mon-Thu 17:00-18:00 maintenance)
+//   Fri 17:00 → Sun 18:00 weekend CLOSED
+// Stale-detection is suspended during closed periods — prices legitimately
+// don't move when the session is paused, and treating that as a feed
+// failure would flood logs + trip DEGRADED needlessly. Holiday calendar
+// (Memorial Day, July 4, Thanksgiving, Christmas, NYE) is a separate
+// future enhancement; this version handles the recurring weekly schedule.
+export function isCMESessionOpen() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date());
+  const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  const dow      = m.weekday;                   // 'Sun' | 'Mon' | ... | 'Sat'
+  const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
+  if (dow === 'Sat') return false;
+  if (dow === 'Sun') return totalMin >= 18 * 60;                    // reopens at 18:00 ET
+  if (dow === 'Fri') return totalMin < 17 * 60;                     // closes at 17:00 ET
+  // Mon-Thu: closed during 17:00-18:00 ET daily maintenance, otherwise open
+  if (totalMin >= 17 * 60 && totalMin < 18 * 60) return false;
+  return true;
 }
 
 function _readCache() {
@@ -135,6 +164,25 @@ export async function tickOnce() {
   _writeCache(cache);
   console.log(`  [FUT_PRICER] ${et}  ✓ ${hits.length}/${INSTRUMENTS.length}  ${hits.join(' ')}${misses.length ? '  miss:' + misses.join(',') : ''}  (${dur}ms)`);
 
+  // Session-awareness: suspend stale-detect during CME closed periods so
+  // legitimate price-pause (maintenance hour / weekend) doesn't flood
+  // logs or trip DEGRADED state. Log once on each transition.
+  const sessionOpen = isCMESessionOpen();
+  if (sessionOpen !== _lastSessionOpen) {
+    if (sessionOpen) {
+      console.log(`  [FUT_PRICER] SESSION_OPEN — CME live, stale-detect resumed`);
+    } else {
+      console.log(`  [FUT_PRICER] OUT_OF_SESSION — CME closed (Mon-Thu 17:00-18:00 ET daily maintenance / Fri 17:00 → Sun 18:00 ET weekend) — stale-detect suspended`);
+    }
+    _lastSessionOpen = sessionOpen;
+  }
+  if (!sessionOpen) {
+    // Reset the cycle counter so reopen starts fresh. Tick history keeps
+    // accumulating per _pushAndCheckStale, but we ignore the result.
+    _staleCyclesCount = 0;
+    return { ok: true, hits: hits.length, misses, durationMs: dur, et, prices, sessionOpen: false };
+  }
+
   // ── Stale-data detection ──────────────────────────────────────────────
   // Stale = N consecutive identical values for at least one instrument.
   // Recovery: drop the cached TV target so the next tick re-probes all
@@ -203,6 +251,7 @@ export function startFuturesPricer() {
   _started = true;
   console.log(`  [FUT_PRICER] starting — ${INSTRUMENTS.join(', ')} every ${POLL_MS}ms via TV CDP watchlist`);
   console.log(`  [FUT_PRICER] stale-detect: ${STALE_TICK_COUNT} identical ticks → re-probe; ${DEGRADED_AFTER_CYCLES} cycles → DEGRADED (entries blocked)`);
+  console.log(`  [FUT_PRICER] session-aware: stale-detect suspended during CME closed periods (Mon-Thu 17:00-18:00 ET, Fri 17:00 → Sun 18:00 ET)`);
   setTimeout(() => {
     tickOnce().catch(e => console.error(`  [FUT_PRICER] initial tick uncaught: ${e.message}`));
   }, INITIAL_DELAY_MS);
