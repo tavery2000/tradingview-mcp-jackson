@@ -50,7 +50,7 @@ import { startCalibrationScheduler }          from './calibrationScheduler.js';
 // account queries, June 1 production flip) but futures execution flows
 // through futuresTrading.js → futures-ledger.json instead of MCP.
 // See webull-mcp-client.js header for MCP "parked" notes.
-import { placeFuturesOrder as placeFuturesPath2, futuresOrderGate } from './futuresTrading.js';
+import { placeFuturesOrder as placeFuturesPath2, futuresOrderGate, tryAutoResumeCircuitBreaker } from './futuresTrading.js';
 import { getWebullMCP, isMCPDisabled, isIntegrationHalted }        from './webull-mcp-client.js';
 const _FUTURES_INSTRUMENTS = new Set(
   (process.env.FUT_INSTRUMENTS || 'ES1!,NQ1!,MES1!,MNQ1!')
@@ -178,6 +178,16 @@ async function handlePineAlert(req, res) {
   try {
     jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
   } catch {}
+
+  // 2026-05-18 — Eager circuit-breaker auto-resume probe.
+  // Runs BEFORE any gate evaluation so an alert arriving after the cooldown
+  // window has elapsed clears the breaker even if no in-window entry
+  // attempts had reached the futures-side entry check. Idempotent: no-op
+  // when not tripped. Fixes the 2026-05-18 deadlock where the breaker
+  // stayed tripped 9h post-cooldown because no entries had been attempted
+  // during the cooldown window to trigger the lazy clear path.
+  try { tryAutoResumeCircuitBreaker(); }
+  catch (e) { console.error(`  [WEBHOOK] eager CB auto-resume probe error: ${e.message}`); }
 
   // 2026-05-15 Task 6: hardcoded retired-instrument list (permanent). Distinct
   // from INSTRUMENT_DISABLED below (env-driven, temporary). Retired = removed

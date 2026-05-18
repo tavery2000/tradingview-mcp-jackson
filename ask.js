@@ -373,7 +373,7 @@ function helpText() {
     '  webull paper              just the paper-mode verification dump',
     '  roll guard tick           run rollGuard once and show state',
     '  circuit breaker           show tripped state + state file',
-    '  clear circuit breaker     ⚠ clear circuit breaker (restart required to fully reset)',
+    '  clear circuit breaker     clear breaker (in-process + state file persisted clean; no restart needed)',
     '  help / ?                  this list',
     '  quit / exit               leave the REPL',
     '',
@@ -549,9 +549,9 @@ async function answerClearCircuitBreaker() {
     const { clearCircuitBreaker } = await import('./futuresTrading.js');
     clearCircuitBreaker();
     return [
-      '✓ Circuit breaker cleared (in-process + state file deleted)',
-      '  ⚠ Restart HANK to fully reset across all processes:',
-      '     taskkill /F /FI "WINDOWTITLE eq HANK*" & start "" cmd /c start-hank.bat',
+      '✓ Circuit breaker cleared (in-process + state file persisted clean)',
+      '  Eager auto-resume now keeps the breaker from deadlocking;',
+      '  next Pine alert will route normally — no restart required.',
     ].join('\n');
   } catch (e) { return `clear circuit breaker failed: ${e.message}`; }
 }

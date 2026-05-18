@@ -73,16 +73,25 @@ function render() {
   const etTime = getETString();
 
   console.log(`${C.bold}${C.cyan}◆ HANK FUTURES STATUS${C.reset}   ${C.gray}${etTime} ET · refresh ${REFRESH_MS}ms${C.reset}`);
-  // 2026-05-18: circuit breaker cooldown banner
+  // 2026-05-18: circuit breaker banner — three-state, never shows "0min".
+  //   hard halt           → red HARD HALT (operator REPL clear required)
+  //   cooldown remaining  → yellow COOLDOWN with countdown
+  //   cooldown elapsed    → red DEADLOCKED (eager auto-resume on next alert)
+  //   cleared / !tripped  → no banner
   const cb = safeJson(join(__dirname, 'circuit-breaker-state.json'));
-  if (cb && cb.tripped) {
+  if (cb && cb.tripped && cb.cleared !== true) {
     if (cb.hardHalt) {
       console.log(`${C.red}${C.bold}  ⛔ CIRCUIT BREAKER HARD HALT${C.reset}  ${C.gray}${cb.reason} · ${cb.tripsInWindow} trips · operator REPL clear required${C.reset}`);
     } else {
       const trippedTs = cb.trippedAt ? new Date(cb.trippedAt).getTime() : 0;
       const elapsedMin = trippedTs ? (Date.now() - trippedTs) / 60_000 : 0;
-      const remainingMin = Math.max(0, Math.ceil((cb.cooldownMin || 30) - elapsedMin));
-      console.log(`${C.yellow}  ⏱ CIRCUIT BREAKER COOLDOWN${C.reset}  ${C.gray}${cb.reason} · resume in ${remainingMin}min${C.reset}`);
+      const cooldownMin = cb.cooldownMin || 30;
+      const remainingMin = Math.ceil(cooldownMin - elapsedMin);
+      if (remainingMin > 0) {
+        console.log(`${C.yellow}  ⏱ CIRCUIT BREAKER COOLDOWN${C.reset}  ${C.gray}${cb.reason} · resume in ${remainingMin}min${C.reset}`);
+      } else {
+        console.log(`${C.red}${C.bold}  ⚠ CIRCUIT BREAKER DEADLOCKED${C.reset}  ${C.gray}${cb.reason} · cooldown elapsed ${Math.floor(elapsedMin - cooldownMin)}min ago — next Pine alert will auto-clear${C.reset}`);
+      }
     }
   }
   console.log(C.gray + '─'.repeat(110) + C.reset);

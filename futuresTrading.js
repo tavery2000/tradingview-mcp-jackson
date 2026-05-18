@@ -325,9 +325,52 @@ export function clearCircuitBreaker() {
   _circuitBreakerHardHalt  = false;
   _circuitBreakerTrips.length = 0;
   _recentCloses.length     = 0;
-  try { if (existsSync(CIRCUIT_BREAKER_FILE)) unlinkSync(CIRCUIT_BREAKER_FILE); } catch {}
+  // 2026-05-18: persist a clean state snapshot rather than unlinking. Readers
+  // (futures-status.js) see {tripped:false} immediately and the banner
+  // disappears; restart-on-clear is no longer required.
+  try { _persistCircuitBreakerState(); } catch {}
   try { jAlert('info', 'CIRCUIT_BREAKER_CLEARED', { clearedAt: new Date().toISOString() }); } catch {}
   return true;
+}
+
+// 2026-05-18 — Eager auto-resume probe. Called by webhook-server.js at the
+// top of every Pine alert (before any gate evaluation) so the breaker
+// clears as soon as cooldown has elapsed, regardless of whether a futures
+// entry attempt would reach the per-instrument check inside placeFuturesOrder.
+//
+// Fixes the deadlock case: breaker tripped overnight, no entry attempts
+// during the cooldown window, then in-window alerts that DID arrive late
+// were silently rejected because the entry-side check only clears state
+// when called — and it's only called from the futures dispatch path.
+//
+// Returns one of:
+//   { didResume: true, elapsedMin }                — was tripped, cooldown elapsed, cleared
+//   { didResume: false, wasNotTripped: true }      — not tripped, no-op
+//   { didResume: false, hardHalt: true }           — hard-halt mode, manual REPL clear required
+//   { didResume: false, remainingMin }             — still in cooldown
+export function tryAutoResumeCircuitBreaker() {
+  if (!_circuitBreakerTripped) return { didResume: false, wasNotTripped: true };
+  if (_circuitBreakerHardHalt) return { didResume: false, hardHalt: true };
+  const now = Date.now();
+  const cooldownMs = CB_COOLDOWN_MIN * 60_000;
+  const elapsedMs  = now - _circuitBreakerTrippedAt;
+  if (elapsedMs >= cooldownMs) {
+    const elapsedMin = parseFloat((elapsedMs / 60_000).toFixed(2));
+    const previousReason = _circuitBreakerReason;
+    console.log(`  [CIRCUIT_BREAKER] eager auto-resume after ${elapsedMin}min cooldown (>= ${CB_COOLDOWN_MIN}min) — was: ${previousReason}`);
+    try {
+      jAlert('info', 'CIRCUIT_BREAKER_AUTO_RESUMED_AFTER_COOLDOWN', {
+        trippedForMin: elapsedMin, cooldownMin: CB_COOLDOWN_MIN, previousReason,
+      });
+    } catch {}
+    _circuitBreakerTripped   = false;
+    _circuitBreakerReason    = null;
+    _circuitBreakerTrippedAt = 0;
+    // Keep _circuitBreakerTrips history for hard-halt detection across cycles.
+    try { _persistCircuitBreakerState(); } catch {}
+    return { didResume: true, elapsedMin };
+  }
+  return { didResume: false, remainingMin: Math.ceil((cooldownMs - elapsedMs) / 60_000) };
 }
 
 // ─── Ledger I/O ────────────────────────────────────────────────────────
