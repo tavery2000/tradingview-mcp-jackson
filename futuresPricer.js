@@ -30,37 +30,59 @@ const INSTRUMENTS = (process.env.FUT_PRICER_SYMBOLS || 'ES1!,NQ1!,MES1!,MNQ1!')
 const INITIAL_DELAY_MS = parseInt(process.env.FUT_PRICER_INITIAL_DELAY_MS || '500', 10);
 const KEEPALIVE_INTERVAL_S = parseInt(process.env.TV_KEEPALIVE_INTERVAL_S || '30', 10);
 
-// Stale detection parameters — TF-adaptive (RTH vs overnight).
-// 2026-05-18 evening: overnight CME has legitimate 10-20s tick gaps during
-// thin-volume hours (esp. 19:00-22:00 ET Asia warm-up). RTH thresholds
-// (5 ticks / ~12s) trip on normal thin tape; loosen to (10 ticks / ~30s
-// at 3s poll) overnight + raise DEGRADED-cycle threshold so real feed
-// failures still surface but normal tape doesn't trigger.
-const STALE_TICK_COUNT_RTH         = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT           || '5',  10);
-const STALE_TICK_COUNT_OVERNIGHT   = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT_OVERNIGHT || '10', 10);
-const DEGRADED_AFTER_CYCLES_RTH    = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES           || '3', 10);
-const DEGRADED_AFTER_CYCLES_OVERNT = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES_OVERNIGHT || '5', 10);
+// Stale detection parameters — three-tier session bands (2026-05-18 evening).
+// Refined from earlier binary RTH/overnight (commit e82a9d1) after operator
+// confirmed 18:00 ET → 07:00 ET is structurally thin (Asia + early Europe),
+// 07:00-09:30 + 16:00-18:00 are moderately active flanks, 09:30-16:00 is
+// full-volume RTH. CME-closed windows (Mon-Thu 17:00-18:00, Fri 17:00 →
+// Sun 18:00) are suspended entirely via isCMESessionOpen() (commit 53c5fb9).
+const STALE_TICK_COUNT_RTH         = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT_RTH       || '5',  10);
+const STALE_TICK_COUNT_FLANKS      = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT_FLANKS    || '7',  10);
+const STALE_TICK_COUNT_OVERNIGHT   = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT_OVERNIGHT || '15', 10);
+const DEGRADED_AFTER_CYCLES_RTH    = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES_RTH       || '3', 10);
+const DEGRADED_AFTER_CYCLES_FLANKS = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES_FLANKS    || '4', 10);
+const DEGRADED_AFTER_CYCLES_OVERNT = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYCLES_OVERNIGHT || '8', 10);
 const STALE_HISTORY_SIZE = Math.max(
-  parseInt(process.env.FUT_PRICER_STALE_HISTORY_SIZE || '10', 10),
+  parseInt(process.env.FUT_PRICER_STALE_HISTORY_SIZE || '15', 10),
   STALE_TICK_COUNT_RTH,
+  STALE_TICK_COUNT_FLANKS,
   STALE_TICK_COUNT_OVERNIGHT,
 );
 
-function _isRTH() {
+// Session bands (ET):
+//   RTH       — Mon-Fri 09:30-16:00          (full-volume tape)
+//   FLANKS    — Mon-Fri 07:00-09:30 + 16:00-18:00  (pre/post moderate)
+//   OVERNIGHT — Mon-Fri 18:00 → 07:00 + Sunday 18:00+ (Asia + Europe thin)
+// Sat/Sun-pre-18:00 + CME maintenance: caller suspends via isCMESessionOpen.
+function _currentSessionBand() {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
   }).formatToParts(new Date());
   const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  if (m.weekday === 'Sat' || m.weekday === 'Sun') return false;
+  const dow = m.weekday;
   const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
-  return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
+  if (dow === 'Sat') return 'OVERNIGHT';            // (closed anyway; safe default if asked)
+  if (dow === 'Sun') return 'OVERNIGHT';            // Sun 18:00+ reopen = thin
+  // Mon-Fri:
+  if (totalMin >= 9 * 60 + 30 && totalMin < 16 * 60) return 'RTH';
+  if (totalMin >= 7 * 60      && totalMin < 9 * 60 + 30) return 'FLANKS';
+  if (totalMin >= 16 * 60     && totalMin < 18 * 60) return 'FLANKS';
+  return 'OVERNIGHT';                               // 00:00-07:00, 18:00-23:59
 }
 function _currentStaleTickCount() {
-  return _isRTH() ? STALE_TICK_COUNT_RTH : STALE_TICK_COUNT_OVERNIGHT;
+  switch (_currentSessionBand()) {
+    case 'RTH':    return STALE_TICK_COUNT_RTH;
+    case 'FLANKS': return STALE_TICK_COUNT_FLANKS;
+    default:       return STALE_TICK_COUNT_OVERNIGHT;
+  }
 }
 function _currentDegradedAfterCycles() {
-  return _isRTH() ? DEGRADED_AFTER_CYCLES_RTH : DEGRADED_AFTER_CYCLES_OVERNT;
+  switch (_currentSessionBand()) {
+    case 'RTH':    return DEGRADED_AFTER_CYCLES_RTH;
+    case 'FLANKS': return DEGRADED_AFTER_CYCLES_FLANKS;
+    default:       return DEGRADED_AFTER_CYCLES_OVERNT;
+  }
 }
 
 let _started = false;
@@ -247,7 +269,7 @@ export async function tickOnce() {
         jAlert('critical', 'futures_pricer.degraded', {
           staleCycles: _staleCyclesCount,
           threshold:   _currentDegradedAfterCycles(),
-          rth:         _isRTH(),
+          band:        _currentSessionBand(),
           frozenInstruments: staleNow.map(s => s.sym),
           et,
         });
@@ -281,7 +303,12 @@ export function startFuturesPricer() {
   _started = true;
   console.log(`  [FUT_PRICER] starting — ${INSTRUMENTS.join(', ')} every ${POLL_MS}ms via TV CDP watchlist`);
   const _blocks = (process.env.STALE_DETECT_BLOCKS_ENTRIES || 'false').toLowerCase() === 'true';
-  console.log(`  [FUT_PRICER] stale-detect: RTH=${STALE_TICK_COUNT_RTH} ticks/DEGRADED@${DEGRADED_AFTER_CYCLES_RTH} · overnight=${STALE_TICK_COUNT_OVERNIGHT} ticks/DEGRADED@${DEGRADED_AFTER_CYCLES_OVERNT} — ${_blocks ? 'DEGRADED blocks entries' : 'ALERT-ONLY mode (entries proceed with last-known price)'}`);
+  const _pollS  = POLL_MS / 1000;
+  console.log(`  [FUT_PRICER] stale-detect: tiered windows`);
+  console.log(`  [FUT_PRICER]   RTH (Mon-Fri 09:30-16:00):           ${STALE_TICK_COUNT_RTH} ticks/${(STALE_TICK_COUNT_RTH * _pollS).toFixed(0)}s · DEGRADED@${DEGRADED_AFTER_CYCLES_RTH}`);
+  console.log(`  [FUT_PRICER]   FLANKS (Mon-Fri 07-09:30, 16-18):    ${STALE_TICK_COUNT_FLANKS} ticks/${(STALE_TICK_COUNT_FLANKS * _pollS).toFixed(0)}s · DEGRADED@${DEGRADED_AFTER_CYCLES_FLANKS}`);
+  console.log(`  [FUT_PRICER]   OVERNIGHT (18:00→07:00 + Sun reopen): ${STALE_TICK_COUNT_OVERNIGHT} ticks/${(STALE_TICK_COUNT_OVERNIGHT * _pollS).toFixed(0)}s · DEGRADED@${DEGRADED_AFTER_CYCLES_OVERNT}`);
+  console.log(`  [FUT_PRICER] stale state: ${_blocks ? 'BLOCKS ENTRIES (DEGRADED → veto)' : 'ALERT-ONLY (entries proceed with last-known price)'}`);
   console.log(`  [FUT_PRICER] session-aware: stale-detect suspended during CME closed periods (Mon-Thu 17:00-18:00 ET, Fri 17:00 → Sun 18:00 ET)`);
   setTimeout(() => {
     tickOnce().catch(e => console.error(`  [FUT_PRICER] initial tick uncaught: ${e.message}`));
