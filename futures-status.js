@@ -104,9 +104,17 @@ function render() {
   );
 
   // ── Live prices line ──
+  // 2026-05-18: futuresPricer.js writes `stale: true` after 3 consecutive MCP
+  // snapshot failures per operator spec; render LIVE=STALE in red with
+  // last-good ET time so the operator isn't silently flying blind.
   const priceCells = ['ES1!', 'NQ1!', 'MES1!', 'MNQ1!'].map(sym => {
-    const p = prices[sym]?.last;
-    const ageS = prices[sym]?.ts ? Math.floor((Date.now() - prices[sym].ts) / 1000) : null;
+    const entry = prices[sym];
+    const p = entry?.last;
+    const ageS = entry?.ts ? Math.floor((Date.now() - entry.ts) / 1000) : null;
+    if (entry?.stale === true) {
+      const lastEt = entry?.et || '—';
+      return `${C.dim}${sym}${C.reset} ${C.red}STALE${C.reset} ${C.gray}(last ${lastEt})${C.reset}`;
+    }
     if (!Number.isFinite(p)) return `${C.dim}${sym}=—${C.reset}`;
     const ageMark = ageS == null ? '' : ageS > 60 ? C.red + `(${ageS}s)` + C.reset : C.gray + `(${ageS}s)` + C.reset;
     return `${C.dim}${sym}${C.reset} ${C.cyan}${p.toLocaleString()}${C.reset} ${ageMark}`;
@@ -125,20 +133,28 @@ function render() {
       `${pad('STOP', 10, 'left')} ${pad('TARGET', 10, 'left')} ${pad('uPnL', 12, 'left')} ${pad('STAGE', 18)}${C.reset}`
     );
     for (const t of open) {
-      const live = prices[t.instrument]?.last;
+      const priceEntry = prices[t.instrument];
+      const live = priceEntry?.last;
+      const liveStale = priceEntry?.stale === true;
       const dirMult = t.signal === 'CALLS' ? 1 : -1;
-      const uPnL = Number.isFinite(live)
+      const uPnL = (Number.isFinite(live) && !liveStale)
         ? (live - t.entryPrice) * dirMult * (t.pointValue || 0) * (t.contracts || 0)
         : null;
       const dirColor = t.signal === 'CALLS' ? C.green : C.red;
+      const liveCell = liveStale
+        ? C.red + 'STALE' + C.reset
+        : (Number.isFinite(live) ? live.toLocaleString() : '—');
+      const uPnLCell = liveStale
+        ? C.red + 'STALE' + C.reset
+        : (uPnL == null ? '—' : (uPnL >= 0 ? C.green : C.red) + fmtMoney(uPnL) + C.reset);
       console.log(
         `  ${pad(t.fillTimeET || '—', 8)} ${pad(t.instrument, 6)} ${dirColor}${pad(t.signal, 5)}${C.reset} ` +
         `${pad(t.engine || '—', 5)} ${pad(t.tier || '—', 4)} ${pad(t.contracts ?? '—', 3, 'left')} ` +
         `${pad((t.entryPrice ?? 0).toLocaleString(), 10, 'left')} ` +
-        `${pad(Number.isFinite(live) ? live.toLocaleString() : '—', 10, 'left')} ` +
+        `${pad(liveCell, 10, 'left')} ` +
         `${pad((t.stopPrice ?? 0).toLocaleString(), 10, 'left')} ` +
         `${pad((t.targetPrice ?? 0).toLocaleString(), 10, 'left')} ` +
-        `${pad(uPnL == null ? '—' : (uPnL >= 0 ? C.green : C.red) + fmtMoney(uPnL) + C.reset, 12, 'left')} ` +
+        `${pad(uPnLCell, 12, 'left')} ` +
         `${pad(t.stage || '—', 18)}`
       );
     }

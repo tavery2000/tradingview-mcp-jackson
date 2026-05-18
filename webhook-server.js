@@ -217,7 +217,20 @@ async function handlePineAlert(req, res) {
     if (existsSync(PRICE_CACHE_FILE)) {
       try { cache = JSON.parse(readFileSync(PRICE_CACHE_FILE, 'utf8')) || {}; } catch {}
     }
-    cache[instrument] = { price, ts: Date.now(), et: etTimeString() };
+    // 2026-05-18: write `last` alongside `price` so futures-status.js (which
+    // reads .last) and the futuresPricer-fed readers see a consistent shape.
+    // Pine-alert is authoritative — clear any prior stale flag from the poller.
+    cache[instrument] = {
+      ...(cache[instrument] || {}),
+      last: price,
+      price,
+      ts: Date.now(),
+      et: etTimeString(),
+      src: 'pine-alert',
+      stale: false,
+      staleSince: null,
+      lastFailReason: null,
+    };
     writeFileSync(PRICE_CACHE_FILE, JSON.stringify(cache, null, 2));
   } catch (e) {
     try { jError('WEBHOOK', 'PRICE_CACHE_WRITE_FAIL', { instrument, error: e.message }); } catch {}
@@ -568,6 +581,11 @@ server.listen(PORT, () => {
   }).catch(e => console.error(`  [WEBHOOK] Webull MCP init failed: ${e.message}`));
   // 2026-05-17 Roll Guard scaffolding (detection only; auto-roll Thu 5/21).
   import('./rollGuard.js').then(m => m.startRollGuard()).catch(e => console.error(`  [WEBHOOK] Roll Guard init failed: ${e.message}`));
+  // 2026-05-18 Futures pricer — polls Webull MCP get_futures_snapshot every
+  // 3s and writes latest-prices.json so futures-status.js (Window 9) renders
+  // LIVE / uPnL columns. Starts after a brief grace period to let the MCP
+  // child process connect; tolerates MCP being unavailable (silent no-op).
+  import('./futuresPricer.js').then(m => m.startFuturesPricer()).catch(e => console.error(`  [WEBHOOK] Futures pricer init failed: ${e.message}`));
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
 ║  HANK Pine Webhook Server                                            ║
