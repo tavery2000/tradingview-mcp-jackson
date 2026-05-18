@@ -199,6 +199,52 @@ export async function getFuturesWatchlistPrices() {
   return out;
 }
 
+// 2026-05-18 — TV watchlist keepalive. Chrome background-tab throttling +
+// TV's internal pause-on-inactive cause the watchlist DOM to freeze on
+// unfocused tabs. Operator verified that a manual scroll on the panel
+// breaks the cache and triggers fresh price renders. This nudge
+// oscillates scrollTop by 1px (then resets on the next frame), causing
+// TV's renderer to re-paint without any visual change for the operator.
+// Stays as a primary defense; stale-detection in futuresPricer becomes
+// the safety net for the residual case where the panel renderer is
+// fully paused.
+const _NUDGE_JS = `
+(function() {
+  try {
+    var panel = document.querySelector('[class*="layout__area--right"]');
+    if (!panel || panel.offsetWidth < 50) return { ok: false, reason: 'panel_closed' };
+    var scrollable = panel.querySelector('[class*="list-"]')
+                  || panel.querySelector('[class*="watchlist"]')
+                  || panel;
+    var origScroll = scrollable.scrollTop;
+    scrollable.scrollTop = origScroll + 1;
+    // Restore on next frame so the visible scroll position doesn't drift.
+    requestAnimationFrame(function() { scrollable.scrollTop = origScroll; });
+    return { ok: true, scrollTop: origScroll };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || 'unknown' };
+  }
+})()
+`;
+
+export async function nudgeWatchlist() {
+  let client;
+  try {
+    client = await _ensureGoodClient();
+  } catch (e) {
+    return { ok: false, error: 'no-client: ' + (e.message || 'unknown').slice(0, 80) };
+  }
+  try {
+    const r = await client.Runtime.evaluate({ expression: _NUDGE_JS, returnByValue: true });
+    if (r.exceptionDetails) {
+      return { ok: false, error: 'cdp-eval: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'unknown').slice(0, 80) };
+    }
+    return r.result?.value || { ok: false, reason: 'no_result' };
+  } catch (e) {
+    return { ok: false, error: (e.message || 'unknown').slice(0, 80) };
+  }
+}
+
 export async function disconnectTvPriceClient() {
   if (_client) {
     try { await _client.close(); } catch {}

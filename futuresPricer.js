@@ -19,7 +19,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { isMCPDisabled, isIntegrationHalted } from './webull-mcp-client.js';
-import { getFuturesWatchlistPrices, disconnectTvPriceClient } from './tvPriceClient.js';
+import { getFuturesWatchlistPrices, disconnectTvPriceClient, nudgeWatchlist } from './tvPriceClient.js';
 import { jAlert, journal } from './journal.js';
 
 const __dirname  = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,7 @@ const POLL_MS    = parseInt(process.env.FUT_PRICER_POLL_MS || '3000', 10);
 const INSTRUMENTS = (process.env.FUT_PRICER_SYMBOLS || 'ES1!,NQ1!,MES1!,MNQ1!')
   .split(',').map(s => s.trim()).filter(Boolean);
 const INITIAL_DELAY_MS = parseInt(process.env.FUT_PRICER_INITIAL_DELAY_MS || '500', 10);
+const KEEPALIVE_INTERVAL_S = parseInt(process.env.TV_KEEPALIVE_INTERVAL_S || '30', 10);
 
 // Stale detection parameters (env-tunable for operator runtime experimentation)
 const STALE_TICK_COUNT      = parseInt(process.env.FUT_PRICER_STALE_TICK_COUNT      || '5',  10);
@@ -36,6 +37,7 @@ const DEGRADED_AFTER_CYCLES = parseInt(process.env.FUT_PRICER_DEGRADED_AFTER_CYC
 
 let _started = false;
 let _timer   = null;
+let _keepaliveTimer = null;
 
 // Per-instrument tick history: instrument → [{last, ts}] (ring of STALE_HISTORY_SIZE)
 const _tickHistory = new Map();
@@ -207,10 +209,37 @@ export function startFuturesPricer() {
   _timer = setInterval(() => {
     tickOnce().catch(e => console.error(`  [FUT_PRICER] tick uncaught: ${e.message}`));
   }, POLL_MS);
+
+  // 2026-05-18 — TV watchlist keepalive. Oscillates scrollTop ±1px every
+  // KEEPALIVE_INTERVAL_S to force TV's renderer to re-paint fresh prices.
+  // Operator verified manually that a scroll breaks the watchlist DOM
+  // cache when the panel sits unfocused. Primary defense; the
+  // stale-detection ladder remains as the safety net.
+  if (KEEPALIVE_INTERVAL_S > 0) {
+    console.log(`  [FUT_PRICER] keepalive: nudging TV watchlist every ${KEEPALIVE_INTERVAL_S}s (scrollTop ±1px) to prevent renderer cache stall`);
+    _keepaliveTimer = setInterval(async () => {
+      if (isMCPDisabled() || isIntegrationHalted()) return;
+      try {
+        const r = await nudgeWatchlist();
+        if (r.ok) {
+          console.log(`  [tvPriceClient] keepalive nudge sent (scrollTop=${r.scrollTop})`);
+        } else if (r.reason !== 'panel_closed') {
+          // panel_closed already shows up loudly via the stale-detection
+          // recovery path; don't double-log.
+          console.log(`  [tvPriceClient] keepalive skipped — ${r.reason || r.error}`);
+        }
+      } catch (e) {
+        console.error(`  [tvPriceClient] keepalive error: ${e.message}`);
+      }
+    }, KEEPALIVE_INTERVAL_S * 1000);
+    if (_keepaliveTimer.unref) _keepaliveTimer.unref();
+  }
 }
 
 export function stopFuturesPricer() {
   if (_timer) clearInterval(_timer);
+  if (_keepaliveTimer) clearInterval(_keepaliveTimer);
   _timer = null;
+  _keepaliveTimer = null;
   _started = false;
 }
