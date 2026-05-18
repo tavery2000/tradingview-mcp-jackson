@@ -887,6 +887,7 @@ payloadJSON(direction, engine, confidence) =>
       '","price":' + str.tostring(close, "#.##") +
       ',"invalidation_level":' + invalStr +
       ',"structure_type":"' + structType + '"' +
+      ',"timeframe":"' + timeframe.period + '"' +
       ',"alertName":"' + engine + ' ' + direction + '"}'
 
 // Confirmed-bar signals (barstate.isconfirmed gated upstream) — once per bar close

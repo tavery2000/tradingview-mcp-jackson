@@ -169,7 +169,10 @@ async function handlePineAlert(req, res) {
     ? null : Number(body.invalidation_level);
   const structure_type     = body.structure_type || null;
 
-  console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | ${etTimeString()} ET`);
+  // 2026-05-18: Pine now emits `timeframe` (e.g. "5", "1", "15") so we can
+  // gate by TF. Older Pine versions without the field log as "—".
+  const timeframe = body.timeframe == null ? '—' : String(body.timeframe);
+  console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | tf ${timeframe} | ${etTimeString()} ET`);
 
   // Journal every inbound Pine alert at receipt — BEFORE any gate or
   // downstream code path. Prevents the "[PINE-ALERT] logged to console but
@@ -177,8 +180,25 @@ async function handlePineAlert(req, res) {
   // post-mortem dataset. Subsequent records (GATE_BLOCK / SIGNAL / ERROR /
   // ENTRY) then narrate what happened to this specific alert.
   try {
-    jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, et: etTimeString() });
+    jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, timeframe, et: etTimeString() });
   } catch {}
+
+  // 2026-05-18 — Timeframe gate. Operator switched HANK signal source from 1M
+  // → 5M after side-by-side comparison; the 6-fix tuning package (commit
+  // c41384b) was insufficient to overcome 1M noise. ACCEPTED_TIMEFRAMES is
+  // a comma-separated env list (default "5"). Alerts arriving with any other
+  // timeframe value are rejected with a LOUD gate-block — operator needs to
+  // know if old 1M alerts are still firing in TradingView. Missing timeframe
+  // (older Pine without the field) is allowed for backward compat.
+  const _acceptedTfs = (process.env.ACCEPTED_TIMEFRAMES || '5')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (timeframe !== '—' && !_acceptedTfs.includes(timeframe)) {
+    jGateBlock(engine, instrument, direction, 'IGNORED_TIMEFRAME', {
+      timeframe, accepted: _acceptedTfs, etTime: etTimeString(),
+      note: 'Disable this alert in TradingView — HANK only listens to the configured TFs.',
+    });
+    return send(res, 200, { ok: false, reason: 'IGNORED_TIMEFRAME', timeframe, accepted: _acceptedTfs });
+  }
 
   // 2026-05-18 — Eager circuit-breaker auto-resume probe.
   // Runs BEFORE any gate evaluation so an alert arriving after the cooldown
@@ -734,6 +754,8 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK] Counter-trend gates: futures=${_ctFmt(_ctFut)}`);
   console.log(`  [WEBHOOK]                      equity=${_ctFmt(_ctEq)}`);
   console.log(`  [WEBHOOK]                      1H-structural=${_ct1H ? 'ENABLED' : 'disabled'}`);
+  const _acceptedTfsBanner = (process.env.ACCEPTED_TIMEFRAMES || '5').split(',').map(s => s.trim()).filter(Boolean);
+  console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
   // 2026-05-15 Task 7: arm the pre-12:00-ET kill scheduler. Idempotent.
   startPreSwitchScheduler();
   // 2026-05-16 Phase 1 Additional: arm the daily calibration rebuild.
