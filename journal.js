@@ -60,6 +60,26 @@ export function jSignal(engine, direction, confidence, reason, extra = {}) {
 }
 export function jGateBlock(engine, instrument, signal, blockedBy, detail = {}) {
   journal({ type: 'GATE_BLOCK', engine, instrument, signal, blockedBy, ...detail });
+  // 2026-05-18 pre-RTH: ALL gate blocks echo to console with 🛑 so operator
+  // sees rejections in real-time. Prior to this every gate wrote only to
+  // the journal, making rejections invisible in the live webhook stream
+  // (operator perceived as "silent drops"). Detail keys are truncated to
+  // keep console lines scannable.
+  try {
+    const ctx = [];
+    if (detail.source)         ctx.push(`source=${detail.source}`);
+    if (detail.macro4H)        ctx.push(`4H=${detail.macro4H}`);
+    if (detail.macro1H) {
+      const m1 = detail.macro1H;
+      ctx.push(`1H={tb:${m1.trendBias},sp:${m1.structurePattern}}`);
+    }
+    if (detail.macro4HSrc)     ctx.push(`4Hsrc=${detail.macro4HSrc}`);
+    if (detail.macro1HSrc)     ctx.push(`1Hsrc=${detail.macro1HSrc}`);
+    if (detail.reason)         ctx.push(`reason=${detail.reason}`);
+    if (detail.instrumentClass) ctx.push(`class=${detail.instrumentClass}`);
+    if (detail.etTime)         ctx.push(`et=${detail.etTime}`);
+    console.log(`  🛑 GATE_BLOCK ${blockedBy} ${instrument} ${signal} engine=${engine}${ctx.length ? '  [' + ctx.join(' · ') + ']' : ''}`);
+  } catch {}
 }
 export function jEntry(trade) {
   journal({
