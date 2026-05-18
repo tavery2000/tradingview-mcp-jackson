@@ -1,20 +1,20 @@
 /**
  * tvPriceClient.js — TradingView CDP watchlist price feed
  *
- * 2026-05-18: replacement data source for futuresPricer.js after Webull paper
- * account proved to lack US_FUTURES quote entitlement (401 Unauthorized on
- * every get_futures_snapshot call). TV Desktop is already running with CDP
- * on port 9222 and the operator has added ES1!/NQ1!/MES1!/MNQ1! to the
- * watchlist (confirmed 2026-05-18 ~08:30 ET — all four present with prices).
+ * 2026-05-18: replacement data source for futuresPricer.js after Webull
+ * paper account proved to lack US_FUTURES quote entitlement.
  *
- * Self-contained CDP client — does NOT import src/connection.js. The MCP
- * server's CDP client is for the agent layer; this one is for the
- * webhook-server price feed. Both can attach to the same TV page
- * simultaneously (CDP supports multiple clients per target).
+ * 2026-05-18 11:05 ET: when operator has multiple TV chart tabs open (12
+ * CDP targets observed today, 5 of them chart pages), the watchlist panel
+ * is open on SOME tabs and collapsed on others. Earlier _findTvTarget()
+ * grabbed whichever chart target came back first from /json/list and
+ * stuck with it — non-deterministic, and after restart it landed on a
+ * 45px-wide tab with zero symbols, producing perpetual
+ * SCRAPER_PANEL_CLOSED despite operator's "watchlist is still active".
  *
- * Scraper mirrors src/core/watchlist.js (data-symbol-full attributes +
- * first-numeric-cell extraction). One CDP evaluate per tick returns all 4
- * prices in a single round-trip — no per-symbol MCP calls.
+ * Fix: probe every chart target on first connect (and on miss), pick the
+ * one where our target futures (ES1!/NQ1!/MES1!/MNQ1!) are actually
+ * present. Cache the winning target ID; re-probe only when it goes bad.
  *
  * Symbol matching uses exact colon-suffix form (`endsWith(':ES1!')`) so
  * `CME_MINI:MES1!` doesn't false-positive when looking for `ES1!`.
@@ -25,45 +25,103 @@ import CDP from 'chrome-remote-interface';
 const CDP_HOST = 'localhost';
 const CDP_PORT = parseInt(process.env.TV_CDP_PORT || '9222', 10);
 
+const _TARGET_SYMBOLS = ['ES1!', 'NQ1!', 'MES1!', 'MNQ1!'];
+
 let _client   = null;
 let _targetId = null;
 
-async function _findTvTarget() {
+async function _listChartTargets() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
-  const targets = await resp.json();
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-      || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-      || null;
+  const all  = await resp.json();
+  return all.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
 }
 
-async function _connect() {
-  const target = await _findTvTarget();
-  if (!target) throw new Error(`No TradingView chart target on CDP port ${CDP_PORT} — is TV Desktop running?`);
-  const client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
-  await client.Runtime.enable();
-  _client = client;
-  _targetId = target.id;
-  return client;
+async function _connectTo(targetId) {
+  if (_client) { try { await _client.close(); } catch {} }
+  const c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+  await c.Runtime.enable();
+  _client = c;
+  _targetId = targetId;
+  return c;
 }
 
-async function _getClient() {
-  if (_client) {
-    try {
-      await _client.Runtime.evaluate({ expression: '1', returnByValue: true });
-      return _client;
-    } catch {
-      try { await _client.close(); } catch {}
-      _client = null;
-      _targetId = null;
+// Light-weight probe: count how many of our target futures are visible in
+// the right-panel watchlist. Returns { matchCount, totalRows, panelWidth }.
+// Doesn't extract prices — just confirms the right tab.
+const _PROBE_JS = `
+(function() {
+  var ra = document.querySelector('[class*="layout__area--right"]');
+  var panelWidth = ra ? ra.offsetWidth : 0;
+  if (!ra || panelWidth < 50) return { matchCount: 0, totalRows: 0, panelWidth: panelWidth, matchedSymbols: [] };
+  var rows = ra.querySelectorAll('[data-symbol-full]');
+  var targets = ${JSON.stringify(_TARGET_SYMBOLS)};
+  var matched = [];
+  for (var i = 0; i < rows.length; i++) {
+    var sym = rows[i].getAttribute('data-symbol-full') || '';
+    for (var j = 0; j < targets.length; j++) {
+      if (sym === targets[j] || sym.endsWith(':' + targets[j])) {
+        if (matched.indexOf(targets[j]) === -1) matched.push(targets[j]);
+        break;
+      }
     }
   }
-  return _connect();
+  return { matchCount: matched.length, totalRows: rows.length, panelWidth: panelWidth, matchedSymbols: matched };
+})()
+`;
+
+async function _probeClient(client) {
+  try {
+    const r = await client.Runtime.evaluate({ expression: _PROBE_JS, returnByValue: true });
+    return r.result?.value || { matchCount: 0, totalRows: 0, panelWidth: 0 };
+  } catch { return { matchCount: 0, totalRows: 0, panelWidth: 0 }; }
 }
 
-// Watchlist scraper — runs in TV page context. Returns either { prices: {...} }
-// keyed by full TV symbol (e.g. "CME_MINI:ES1!") or { error: '<reason>' }.
-// First numeric cell per row is treated as `last`; subsequent cells (change,
-// pct) are not consumed here since the consumer only needs last-price.
+async function _ensureGoodClient() {
+  const targets = await _listChartTargets();
+  if (!targets.length) throw new Error('NO_TV_CHART_TARGETS — is TradingView Desktop running?');
+
+  // 1. Try cached target first (fast path)
+  if (_client && _targetId && targets.find(t => t.id === _targetId)) {
+    try {
+      const v = await _probeClient(_client);
+      if (v.matchCount === _TARGET_SYMBOLS.length) return _client;
+    } catch {
+      _client = null; _targetId = null;
+    }
+  }
+
+  // 2. Probe every chart target, pick the one with all 4 target futures
+  let bestTarget = null;
+  let bestMatch  = -1;
+  for (const t of targets) {
+    try {
+      const c = await _connectTo(t.id);
+      const v = await _probeClient(c);
+      if (v.matchCount > bestMatch) {
+        bestMatch = v.matchCount;
+        bestTarget = { target: t, probe: v };
+      }
+      if (v.matchCount === _TARGET_SYMBOLS.length) {
+        console.log(`  [tvPriceClient] using TV target ${t.id.slice(0, 8)}  (${v.matchCount}/${_TARGET_SYMBOLS.length} target symbols, ${v.totalRows} rows, ${v.panelWidth}px)`);
+        return c;
+      }
+    } catch {}
+  }
+
+  // 3. No tab has all 4 — surface the best partial we found, fail loudly
+  if (bestTarget && bestMatch > 0) {
+    // Reconnect to best partial; surface what's missing
+    const c = await _connectTo(bestTarget.target.id);
+    const missing = _TARGET_SYMBOLS.filter(s => !bestTarget.probe.matchedSymbols.includes(s));
+    console.log(`  [tvPriceClient] PARTIAL — best TV target ${bestTarget.target.id.slice(0, 8)} has ${bestMatch}/${_TARGET_SYMBOLS.length}; missing: ${missing.join(',')}`);
+    return c;
+  }
+  _client = null; _targetId = null;
+  throw new Error(`NO_TV_TAB_WITH_TARGET_SYMBOLS — probed ${targets.length} chart tab(s), none have any of ${_TARGET_SYMBOLS.join('/')} in a visible watchlist (≥50px panel width)`);
+}
+
+// Full scraper — pulls last-price for every symbol in the right panel.
+// Called only after _ensureGoodClient confirms we're on the right tab.
 const _SCRAPER_JS = `
 (function() {
   var container = document.querySelector('[class*="layout__area--right"]');
@@ -82,7 +140,6 @@ const _SCRAPER_JS = `
     for (var j = 0; j < cells.length; j++) {
       var t = cells[j].textContent.trim();
       if (!t) continue;
-      // First cell that's a pure number (no % suffix) is the last-price column
       var stripped = t.replace(/[\\s,]/g, '');
       if (/^[\\-+]?\\d+\\.?\\d*$/.test(stripped)) {
         var n = parseFloat(stripped);
@@ -95,20 +152,18 @@ const _SCRAPER_JS = `
 })()
 `;
 
-const _TARGET_SYMBOLS = ['ES1!', 'NQ1!', 'MES1!', 'MNQ1!'];
-
 /**
  * Fetch the latest last-prices for ES1!/NQ1!/MES1!/MNQ1! from the TV
- * watchlist. Returns a partial map — symbols not in the watchlist (or
- * without a valid numeric `last` cell) are omitted; caller handles
- * missing entries as per-symbol failures.
+ * watchlist. Auto-discovers the correct TV tab when multiple are open.
  *
- * Throws on CDP unavailability, TV not running, or scraper-level errors
- * (panel_closed / no_symbol_rows) so the caller's tick-level fail
- * counter increments uniformly across all symbols.
+ * Throws on:
+ *   NO_TV_CHART_TARGETS         — TV Desktop not running
+ *   NO_TV_TAB_WITH_TARGET_SYMBOLS — no tab has the target futures visible
+ *   CDP_EVAL_ERROR              — runtime exception during scrape
+ *   SCRAPER_*                   — page-side scraper detected stale state
  */
 export async function getFuturesWatchlistPrices() {
-  const client = await _getClient();
+  const client = await _ensureGoodClient();
   const result = await client.Runtime.evaluate({
     expression: _SCRAPER_JS,
     returnByValue: true,
@@ -117,14 +172,21 @@ export async function getFuturesWatchlistPrices() {
     const msg = result.exceptionDetails.exception?.description
              || result.exceptionDetails.text
              || 'unknown CDP eval error';
+    // Drop the cached client — next call re-probes.
+    try { await _client?.close(); } catch {}
+    _client = null; _targetId = null;
     throw new Error(`CDP_EVAL_ERROR: ${msg}`);
   }
   const data = result.result?.value;
-  if (data?.error) throw new Error(`SCRAPER_${String(data.error).toUpperCase()}`);
+  if (data?.error) {
+    // Likely the operator collapsed the watchlist on the cached tab;
+    // drop the cached client so next call re-probes other tabs.
+    try { await _client?.close(); } catch {}
+    _client = null; _targetId = null;
+    throw new Error(`SCRAPER_${String(data.error).toUpperCase()}`);
+  }
   const all = data?.prices || {};
 
-  // Exact-match the suffix to avoid MES1!↔ES1! confusion. Accept both the
-  // exchange-prefixed form ("CME_MINI:ES1!") and the bare form ("ES1!").
   const out = {};
   for (const sym of _TARGET_SYMBOLS) {
     for (const key of Object.keys(all)) {
