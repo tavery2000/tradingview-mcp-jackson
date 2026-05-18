@@ -274,8 +274,9 @@ function getContractMultiplier(instrument) {
     `SPY=$${STOP_DOLLARS['SPY']} QQQ=$${STOP_DOLLARS['QQQ']} IWM=$${STOP_DOLLARS['IWM']}`);
   console.log(`  [paperTrading] Take-profit (P1-5): ` +
     `ES/MES=${TARGET_POINTS['ES1!']}pt NQ/MNQ=${TARGET_POINTS['NQ1!']}pt ` +
-    `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']} ` +
-    `(50/50 scale-out + BE + ${TRAIL_PCT}% trail + R-locks at +3R/+4R)`);
+    `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']}`);
+  console.log(`  [paperTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail — Phase 1 (1c skip-scaleOut)`);
+  console.log(`  [paperTrading] trail base: 0DTE=${parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015')}% / 1DTE+=${parseFloat(process.env.TRAIL_PCT_OPTIONS_1DTE_PLUS || '0.030')}% (tightens 25% per R-lock)`);
   console.log(`  [paperTrading] Structure stop (P1-5-B): ${STRUCTURE_STOP_ENABLED ? `ENABLED on ${[...STRUCTURE_STOP_INSTRUMENTS].join(',')} (priority above point-based)` : 'disabled'}`);
   console.log(`  [paperTrading] Capital cap per trade: equity=$${CAPITAL_CAP_EQUITY.toLocaleString()}  futures=$${CAPITAL_CAP_FUTURES.toLocaleString()} (HOTFIX 2026-05-15)`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
@@ -1178,6 +1179,50 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
 }
 
 // ─── P1-5 (2026-05-14 EOD): scale-out + stage transitions ──────────────────
+// 2026-05-18 Phase 1 R-lock-and-trail: 1c trades skip the scale-out path
+// entirely. Promote STAGE_1 → STAGE_3 at +1R with BE stop + trail; the
+// R-lock chain then progressively tightens (handled in _updateStage3).
+// Phase 2 (balance > $15K → 2c tier B) will route back through
+// _executeScaleOut for the 50/50 partial.
+function _promoteToStage3At1R(requestId, liveU) {
+  const locked = acquireLock();
+  try {
+    const fresh = loadLedger();
+    const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
+    if (!trade || trade.stage !== 'STAGE_1_ARMED') return null;
+    if ((trade.originalContracts ?? trade.contracts) !== 1) return null;   // safety
+    if (!_isUnderlyingSane(liveU, trade.entryUnderlyingPrice)) return null;
+
+    trade.stage              = 'STAGE_3_TRAILING';
+    trade.stopUnderlyingPrice = trade.entryUnderlyingPrice;   // BE
+    trade.peakFavorablePrice = liveU;
+    // Use the 0DTE base since SPY/QQQ default to 0DTE in this system.
+    // (Future: read trade.dte once entry path populates it.)
+    const baseTrailPct       = parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015');
+    const trailDist          = liveU * (baseTrailPct / 100);
+    trade.trailStopPrice     = trade.signal === 'CALLS'
+      ? parseFloat((liveU - trailDist).toFixed(4))
+      : parseFloat((liveU + trailDist).toFixed(4));
+    trade.lockedStopLevel    = 'BE';   // new state (was 'NONE' under 2-step ladder)
+
+    saveLedgerDirect(fresh);
+    const local = ledger.trades.find(t => t.requestId === requestId);
+    if (local) Object.assign(local, {
+      stage:                trade.stage,
+      stopUnderlyingPrice:  trade.stopUnderlyingPrice,
+      peakFavorablePrice:   trade.peakFavorablePrice,
+      trailStopPrice:       trade.trailStopPrice,
+      lockedStopLevel:      trade.lockedStopLevel,
+    });
+
+    console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal}  +1R → STAGE_3  stop=BE@${trade.entryUnderlyingPrice.toFixed(2)}  trail ${baseTrailPct}%${C.reset}`);
+    try { jAlert?.('info', 'PROMOTE_1R_BE', { requestId, instrument: trade.instrument, signal: trade.signal, entryU: trade.entryUnderlyingPrice }); } catch {}
+    return trade;
+  } finally {
+    if (locked) releaseLock();
+  }
+}
+
 // _executeScaleOut: STAGE_1 → STAGE_3 transition. Closes 50% of contracts
 // at current option price (logged as SCALE_OUT_PARTIAL exit), moves stop
 // on remainder to breakeven (entryUnderlyingPrice), activates trail, and
@@ -1301,12 +1346,54 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // Trail stop = peak ± TRAIL_PCT% of peak
-    const trailDist = (trade.peakFavorablePrice ?? liveU) * (TRAIL_PCT / 100);
+    // R-multiple math: R = stop_distance. New ladder (2026-05-18 Phase 1):
+    //   +1R: BE      lockedStopLevel='BE'  (already set on promoteToStage3At1R)
+    //   +2R: lock +1R                       '1R'
+    //   +3R: lock +2R                       '2R'
+    //   +4R: lock +3R                       '3R'
+    const R = trade.stopDistance;
+    const moveFromEntry = isCalls
+      ? (trade.peakFavorablePrice - trade.entryUnderlyingPrice)
+      : (trade.entryUnderlyingPrice - trade.peakFavorablePrice);
+    const RMultiple = R > 0 ? moveFromEntry / R : 0;
+
+    const lvlRank = { NONE: 0, BE: 1, '1R': 2, '2R': 3, '3R': 4 };
+    const promote = (toLevel, lockR, triggerR) => {
+      if ((lvlRank[trade.lockedStopLevel] ?? 0) >= (lvlRank[toLevel] ?? 0)) return false;
+      trade.lockedStopLevel = toLevel;
+      dirty = true;
+      const lockPrice = lockR === 0
+        ? trade.entryUnderlyingPrice
+        : (isCalls
+            ? parseFloat((trade.entryUnderlyingPrice + lockR * R).toFixed(4))
+            : parseFloat((trade.entryUnderlyingPrice - lockR * R).toFixed(4)));
+      console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal}  +${triggerR}R → stop locked at ${lockR === 0 ? 'BE' : '+' + lockR + 'R'} (${lockPrice.toFixed(2)})${C.reset}`);
+      return true;
+    };
+    if (RMultiple >= 4) promote('3R', 3, 4);
+    else if (RMultiple >= 3) promote('2R', 2, 3);
+    else if (RMultiple >= 2) promote('1R', 1, 2);
+    else if (RMultiple >= 1) promote('BE',  0, 1);
+
+    // Dynamic trail percent. Base depends on DTE (0DTE = tighter); each
+    // R-lock tightens the trail by ~25%.
+    //   0DTE base 0.015% → 0.0125% → 0.010% → 0.0075% as locks fire
+    //   1DTE+ base 0.030% → 0.025% → 0.020% → 0.015%
+    // Until entry-path populates trade.dte, treat all option trades as 0DTE
+    // (SPY/QQQ-family in this system are 0DTE by default per the 15:45 cutoff).
+    const isZeroDte = (trade.dte == null) ? true : (trade.dte === 0);
+    const trailBase = isZeroDte
+      ? parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015')
+      : parseFloat(process.env.TRAIL_PCT_OPTIONS_1DTE_PLUS || '0.030');
+    let effectiveTrailPct = trailBase;
+    if      (trade.lockedStopLevel === '1R') effectiveTrailPct = trailBase * (0.025 / 0.030);
+    else if (trade.lockedStopLevel === '2R') effectiveTrailPct = trailBase * (0.020 / 0.030);
+    else if (trade.lockedStopLevel === '3R') effectiveTrailPct = trailBase * (0.015 / 0.030);
+
+    const trailDist = (trade.peakFavorablePrice ?? liveU) * (effectiveTrailPct / 100);
     const newTrailStop = isCalls
       ? parseFloat((trade.peakFavorablePrice - trailDist).toFixed(4))
       : parseFloat((trade.peakFavorablePrice + trailDist).toFixed(4));
-    // Only ratchet trail in the favorable direction (never loosen)
     if (trade.trailStopPrice == null
         || (isCalls  && newTrailStop > trade.trailStopPrice)
         || (!isCalls && newTrailStop < trade.trailStopPrice)) {
@@ -1314,46 +1401,28 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // R-multiple math: R = stop_distance. Lock 1R at +3R, lock 2R at +4R.
-    const R = trade.stopDistance;
-    const moveFromEntry = isCalls
-      ? (trade.peakFavorablePrice - trade.entryUnderlyingPrice)
-      : (trade.entryUnderlyingPrice - trade.peakFavorablePrice);
-    const RMultiple = moveFromEntry / R;
-
-    if (RMultiple >= 4 && trade.lockedStopLevel !== '2R') {
-      // Lock at +2R from entry
-      const lockPrice = isCalls
-        ? parseFloat((trade.entryUnderlyingPrice + 2 * R).toFixed(4))
-        : parseFloat((trade.entryUnderlyingPrice - 2 * R).toFixed(4));
-      // Use the higher of trail and lock for CALLS, lower for PUTS — locked stop floors the protection
-      trade.stopUnderlyingPrice = isCalls
-        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
-        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
-      trade.lockedStopLevel = '2R';
+    // Final stop = max(lockFloor, trail) for CALLS / min for PUTS.
+    let lockFloor = null;
+    switch (trade.lockedStopLevel) {
+      case '3R': lockFloor = isCalls ? trade.entryUnderlyingPrice + 3*R : trade.entryUnderlyingPrice - 3*R; break;
+      case '2R': lockFloor = isCalls ? trade.entryUnderlyingPrice + 2*R : trade.entryUnderlyingPrice - 2*R; break;
+      case '1R': lockFloor = isCalls ? trade.entryUnderlyingPrice + 1*R : trade.entryUnderlyingPrice - 1*R; break;
+      case 'BE': lockFloor = trade.entryUnderlyingPrice; break;
+      default:   lockFloor = null;
+    }
+    let bestStop;
+    if (lockFloor == null) {
+      bestStop = trade.trailStopPrice;
+    } else if (trade.trailStopPrice == null) {
+      bestStop = lockFloor;
+    } else {
+      bestStop = isCalls
+        ? Math.max(lockFloor, trade.trailStopPrice)
+        : Math.min(lockFloor, trade.trailStopPrice);
+    }
+    if (bestStop != null && bestStop !== trade.stopUnderlyingPrice) {
+      trade.stopUnderlyingPrice = parseFloat(bestStop.toFixed(4));
       dirty = true;
-      console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal} +4R reached — stop locked at +2R (${trade.stopUnderlyingPrice.toFixed(2)})${C.reset}`);
-    } else if (RMultiple >= 3 && trade.lockedStopLevel === 'NONE') {
-      // Lock at +1R from entry
-      const lockPrice = isCalls
-        ? parseFloat((trade.entryUnderlyingPrice + 1 * R).toFixed(4))
-        : parseFloat((trade.entryUnderlyingPrice - 1 * R).toFixed(4));
-      trade.stopUnderlyingPrice = isCalls
-        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
-        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
-      trade.lockedStopLevel = '1R';
-      dirty = true;
-      console.log(`  ${C.green}🔒 ${trade.instrument} ${trade.signal} +3R reached — stop locked at +1R (${trade.stopUnderlyingPrice.toFixed(2)})${C.reset}`);
-    } else if (trade.lockedStopLevel === 'NONE') {
-      // No R-lock yet — stopUnderlyingPrice tracks the trail (already at BE
-      // from STAGE_2 transition). Use the more favorable of BE and trail.
-      const trailWinsOverBE = isCalls
-        ? (trade.trailStopPrice > trade.entryUnderlyingPrice)
-        : (trade.trailStopPrice < trade.entryUnderlyingPrice);
-      if (trailWinsOverBE && trade.trailStopPrice != null) {
-        trade.stopUnderlyingPrice = trade.trailStopPrice;
-        dirty = true;
-      }
     }
 
     if (dirty) {
@@ -1877,14 +1946,28 @@ export function evaluateOpenPositions(priceFeeder) {
         }
       }
 
-      // 2. STAGE_1 → STAGE_2 transition: target hit triggers scale-out
-      if (t.stage === 'STAGE_1_ARMED' && t.targetUnderlyingPrice != null && liveU != null) {
-        const targetHit = isCalls
-          ? (liveU >= t.targetUnderlyingPrice)
-          : (liveU <= t.targetUnderlyingPrice);
-        if (targetHit) {
-          try { _executeScaleOut(t.requestId, fed.optionPrice, liveU); } catch (e) { jError('scale-out', e.message, { requestId: t.requestId }); }
-          continue;  // STAGE_2 is transient; trade is now in STAGE_3 with reduced contracts
+      // 2. STAGE_1 → STAGE_3 promotion
+      //    1c (Phase 1 default): promote at +1R, BE lock + trail, no partial close
+      //    2c+ (Phase 2, balance > $15K): existing 50/50 scaleOut at target
+      if (t.stage === 'STAGE_1_ARMED' && liveU != null) {
+        const origC = t.originalContracts ?? t.contracts ?? 1;
+        if (origC === 1 && t.entryUnderlyingPrice != null && t.stopDistance != null) {
+          const oneRPrice = isCalls
+            ? t.entryUnderlyingPrice + t.stopDistance
+            : t.entryUnderlyingPrice - t.stopDistance;
+          const oneRHit   = isCalls ? (liveU >= oneRPrice) : (liveU <= oneRPrice);
+          if (oneRHit) {
+            try { _promoteToStage3At1R(t.requestId, liveU); } catch (e) { jError('promote-1R', e.message, { requestId: t.requestId }); }
+            continue;
+          }
+        } else if (t.targetUnderlyingPrice != null) {
+          const targetHit = isCalls
+            ? (liveU >= t.targetUnderlyingPrice)
+            : (liveU <= t.targetUnderlyingPrice);
+          if (targetHit) {
+            try { _executeScaleOut(t.requestId, fed.optionPrice, liveU); } catch (e) { jError('scale-out', e.message, { requestId: t.requestId }); }
+            continue;
+          }
         }
       }
 

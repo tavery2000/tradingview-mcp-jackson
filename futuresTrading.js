@@ -981,6 +981,41 @@ export function closeFuturesPosition(requestId, exitPrice, exitReason = 'MANUAL'
 
 // ─── Partial close (50/50 scale-out at STAGE_2 transition) ─────────────
 
+// 2026-05-18 Phase 1 R-lock-and-trail: when originalContracts === 1 (the
+// default at sub-$15K balance), there's no partial close to make at +1R.
+// Promote directly STAGE_1 → STAGE_3 with BE lock + trail active, no
+// scaleOut event, no partial pnl. Phase 2 (balance > $15K → 2c tier B)
+// will route back through _executeScaleOut.
+function _promoteToStage3At1R(requestId, liveU) {
+  const locked = acquireLock();
+  try {
+    const fresh = loadLedger();
+    const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
+    if (!trade || trade.stage !== 'STAGE_1_ARMED') return null;
+    if ((trade.originalContracts ?? trade.contracts) !== 1) return null; // safety net
+    if (!_futIsSane(liveU, trade.entryPrice)) return null;
+
+    trade.stage             = 'STAGE_3_TRAILING';
+    trade.stopPrice         = trade.entryPrice;   // BE
+    trade.peakFavorablePrice = liveU;
+    const trailDist         = liveU * (TRAIL_PCT / 100);
+    trade.trailStopPrice    = trade.signal === 'CALLS'
+      ? parseFloat((liveU - trailDist).toFixed(4))
+      : parseFloat((liveU + trailDist).toFixed(4));
+    trade.lockedStopLevel   = 'BE';   // new state — was 'NONE'
+
+    saveLedger(fresh);
+    const local = ledger.trades.find(t => t.requestId === requestId);
+    if (local) Object.assign(local, trade);
+
+    console.log(`  🔒 FUT ${trade.instrument} ${trade.signal}  +1R → STAGE_3  stop=BE@${trade.entryPrice}  trail ${TRAIL_PCT}%`);
+    try { jAlert('info', 'FUT_PROMOTE_1R_BE', { requestId, instrument: trade.instrument, signal: trade.signal, entry: trade.entryPrice, liveU }); } catch {}
+    return trade;
+  } finally {
+    if (locked) releaseLock();
+  }
+}
+
 function _executeScaleOut(requestId, exitPrice, liveU) {
   const locked = acquireLock();
   try {
@@ -1065,8 +1100,47 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // Trail
-    const trailDist = (trade.peakFavorablePrice ?? liveU) * (TRAIL_PCT / 100);
+    // R-progression check (R = stopPoints).
+    // 2026-05-18 Phase 1 ladder:
+    //   +1R: BE       (lockedStopLevel='BE')   — set at promoteToStage3At1R
+    //   +2R: lock+1R  (lockedStopLevel='1R')
+    //   +3R: lock+2R  (lockedStopLevel='2R')
+    //   +4R: lock+3R  (lockedStopLevel='3R')
+    const R = trade.stopPoints;
+    const moveFromEntry = isCalls
+      ? (trade.peakFavorablePrice - trade.entryPrice)
+      : (trade.entryPrice - trade.peakFavorablePrice);
+    const RMultiple = R > 0 ? moveFromEntry / R : 0;
+
+    const lvlRank = { NONE: 0, BE: 1, '1R': 2, '2R': 3, '3R': 4 };
+    const promote = (toLevel, lockR, triggerR) => {
+      if ((lvlRank[trade.lockedStopLevel] ?? 0) >= (lvlRank[toLevel] ?? 0)) return false;
+      trade.lockedStopLevel = toLevel;
+      dirty = true;
+      const lockPrice = lockR === 0
+        ? trade.entryPrice
+        : (isCalls
+            ? parseFloat((trade.entryPrice + lockR * R).toFixed(4))
+            : parseFloat((trade.entryPrice - lockR * R).toFixed(4)));
+      console.log(`  🔒 FUT ${trade.instrument} ${trade.signal}  +${triggerR}R → stop locked at ${lockR === 0 ? 'BE' : '+' + lockR + 'R'} (${lockPrice})`);
+      return true;
+    };
+    if (RMultiple >= 4) promote('3R', 3, 4);
+    else if (RMultiple >= 3) promote('2R', 2, 3);
+    else if (RMultiple >= 2) promote('1R', 1, 2);
+    else if (RMultiple >= 1) promote('BE',  0, 1);
+
+    // Dynamic trail percent — tightens by 25% at each R-lock per operator
+    // spec (commit-level approved). Pre-1R / BE: TRAIL_PCT (0.03%).
+    //   1R lock: 0.025% (TRAIL_PCT × 0.833)
+    //   2R lock: 0.020% (TRAIL_PCT × 0.667)
+    //   3R lock: 0.015% (TRAIL_PCT × 0.500)
+    let effectiveTrailPct = TRAIL_PCT;
+    if      (trade.lockedStopLevel === '1R') effectiveTrailPct = TRAIL_PCT * (0.025 / 0.030);
+    else if (trade.lockedStopLevel === '2R') effectiveTrailPct = TRAIL_PCT * (0.020 / 0.030);
+    else if (trade.lockedStopLevel === '3R') effectiveTrailPct = TRAIL_PCT * (0.015 / 0.030);
+
+    const trailDist = (trade.peakFavorablePrice ?? liveU) * (effectiveTrailPct / 100);
     const newTrailStop = isCalls
       ? parseFloat((trade.peakFavorablePrice - trailDist).toFixed(4))
       : parseFloat((trade.peakFavorablePrice + trailDist).toFixed(4));
@@ -1077,41 +1151,31 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // R-locks (R = stopPoints)
-    const R = trade.stopPoints;
-    const moveFromEntry = isCalls
-      ? (trade.peakFavorablePrice - trade.entryPrice)
-      : (trade.entryPrice - trade.peakFavorablePrice);
-    const RMultiple = R > 0 ? moveFromEntry / R : 0;
-    if (RMultiple >= 4 && trade.lockedStopLevel !== '2R') {
-      const lockPrice = isCalls
-        ? parseFloat((trade.entryPrice + 2 * R).toFixed(4))
-        : parseFloat((trade.entryPrice - 2 * R).toFixed(4));
-      trade.stopPrice = isCalls
-        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
-        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
-      trade.lockedStopLevel = '2R';
+    // Compute final stop = max(lockFloor, trail) for CALLS / min for PUTS.
+    // Lock acts as a hard floor; trail can tighten further once it crosses
+    // the lock level. Without this, the stop would freeze at the lock and
+    // not capture additional gains as price kept moving.
+    let lockFloor = null;
+    switch (trade.lockedStopLevel) {
+      case '3R': lockFloor = isCalls ? trade.entryPrice + 3*R : trade.entryPrice - 3*R; break;
+      case '2R': lockFloor = isCalls ? trade.entryPrice + 2*R : trade.entryPrice - 2*R; break;
+      case '1R': lockFloor = isCalls ? trade.entryPrice + 1*R : trade.entryPrice - 1*R; break;
+      case 'BE': lockFloor = trade.entryPrice; break;
+      default:   lockFloor = null;   // NONE — trail alone governs
+    }
+    let bestStop;
+    if (lockFloor == null) {
+      bestStop = trade.trailStopPrice;
+    } else if (trade.trailStopPrice == null) {
+      bestStop = lockFloor;
+    } else {
+      bestStop = isCalls
+        ? Math.max(lockFloor, trade.trailStopPrice)
+        : Math.min(lockFloor, trade.trailStopPrice);
+    }
+    if (bestStop != null && bestStop !== trade.stopPrice) {
+      trade.stopPrice = parseFloat(bestStop.toFixed(4));
       dirty = true;
-      console.log(`  🔒 FUT ${trade.instrument} ${trade.signal} +4R → stop locked at +2R (${trade.stopPrice})`);
-    } else if (RMultiple >= 3 && trade.lockedStopLevel === 'NONE') {
-      const lockPrice = isCalls
-        ? parseFloat((trade.entryPrice + 1 * R).toFixed(4))
-        : parseFloat((trade.entryPrice - 1 * R).toFixed(4));
-      trade.stopPrice = isCalls
-        ? Math.max(lockPrice, trade.trailStopPrice ?? lockPrice)
-        : Math.min(lockPrice, trade.trailStopPrice ?? lockPrice);
-      trade.lockedStopLevel = '1R';
-      dirty = true;
-      console.log(`  🔒 FUT ${trade.instrument} ${trade.signal} +3R → stop locked at +1R (${trade.stopPrice})`);
-    } else if (trade.lockedStopLevel === 'NONE') {
-      // No lock yet — stop tracks the better of BE and trail
-      const trailWinsOverBE = isCalls
-        ? trade.trailStopPrice > trade.entryPrice
-        : trade.trailStopPrice < trade.entryPrice;
-      if (trailWinsOverBE && trade.trailStopPrice != null) {
-        trade.stopPrice = trade.trailStopPrice;
-        dirty = true;
-      }
     }
 
     if (dirty) {
@@ -1182,12 +1246,25 @@ export function evaluateOpenFutures() {
       }
     }
 
-    // 2. STAGE_1 target hit → STAGE_2 scale-out → STAGE_3
-    if (t.stage === 'STAGE_1_ARMED' && t.targetPrice != null) {
-      const tgtHit = isCalls ? liveU >= t.targetPrice : liveU <= t.targetPrice;
-      if (tgtHit) {
-        try { _executeScaleOut(t.requestId, liveU, liveU); } catch (e) { jError('FUT_SCALE_OUT', e.message); }
-        continue;
+    // 2. STAGE_1 → STAGE_3 promotion
+    //    1c path (Phase 1 default): promote at +1R, no scale-out, BE lock + trail
+    //    2c+ path (Phase 2, balance>$15K): promote at target, 50/50 scale-out + trail
+    if (t.stage === 'STAGE_1_ARMED') {
+      const origC = t.originalContracts ?? t.contracts ?? 1;
+      if (origC === 1) {
+        const R = t.stopPoints;
+        const oneRPrice = isCalls ? t.entryPrice + R : t.entryPrice - R;
+        const oneRHit   = isCalls ? liveU >= oneRPrice : liveU <= oneRPrice;
+        if (oneRHit) {
+          try { _promoteToStage3At1R(t.requestId, liveU); } catch (e) { jError('FUT_PROMOTE_1R', e.message); }
+          continue;
+        }
+      } else if (t.targetPrice != null) {
+        const tgtHit = isCalls ? liveU >= t.targetPrice : liveU <= t.targetPrice;
+        if (tgtHit) {
+          try { _executeScaleOut(t.requestId, liveU, liveU); } catch (e) { jError('FUT_SCALE_OUT', e.message); }
+          continue;
+        }
       }
     }
 
@@ -1220,7 +1297,11 @@ console.log(`  [futuresTrading] Sizing floor: balance < $${parseFloat(process.en
 console.log(`  [futuresTrading] Circuit breaker: ${CB_MAX_CLOSES}+ closes OR -$${CB_MAX_CUM_LOSS} cumulative in ${CB_WINDOW_MS/60000}min → ${CB_COOLDOWN_MIN}min auto-resume (${CB_TRIPS_BEFORE_HARD_HALT}+ trips in ${CB_HARD_HALT_WINDOW_MIN}min → hard halt)`);
 console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPoints}pt tgt${TIER.A.targetPoints}pt | B=${TIER.B.contracts}c ${TIER.B.stopPoints}pt ${TIER.B.targetPoints}pt | C=${TIER.C.contracts}c ${TIER.C.stopPoints}pt ${TIER.C.targetPoints}pt`);
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day`);
-console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | trail ${TRAIL_PCT}% | R-locks at +3R/+4R | whipsaw=${WHIPSAW_PROTECTION}`);
+console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | whipsaw=${WHIPSAW_PROTECTION}`);
+console.log(`  [futuresTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail (${TRAIL_PCT}% → 0.015% as locks fire) — Phase 1 (1c)`);
+if ((ledger.balance ?? 0) > 15000) {
+  console.log(`  [futuresTrading] ⚠ BALANCE >$15K ($${ledger.balance.toFixed(0)}) — Phase 2 ELIGIBLE (tier B 2c + scaleOut). Operator review required before flip; no auto-promote.`);
+}
 console.log(`  [futuresTrading] stop confirmation: ${STOP_CONFIRMATION.toUpperCase()} (slippage ±${FUT_STOP_SLIPPAGE_POINTS}pt on fire)`);
 console.log(`  [futuresTrading] graduation threshold $${FUT_GRADUATION_THRESHOLD} (operator-explicit unlock for ES1!/NQ1!/MNQ1! when crossed)`);
 
