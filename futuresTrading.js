@@ -430,17 +430,20 @@ export function placeFuturesOrder(consensus, requestId) {
   }
   const tierCfg = TIER[tier];
   // 2026-05-18 pre-RTH hot-fix (Mon 5/18 Task #0 partial): hardcoded
-  // sizing floor. Sub-$5K accounts get 1 contract regardless of tier,
+  // sizing floor. Sub-$10K accounts get 1 contract regardless of tier,
   // bypassing the cascade-vulnerable tier sizing. Root cause of Sun 5/17
   // 20:04-20:06 ET catastrophic failure was Tier B 3-contract entries
-  // on a $520 account. Full audit per docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md.
+  // on a $520 account. Operator bumped floor to $10K so the fresh
+  // $10K-reset account starts at 1c per signal until balance grows.
+  // Full audit per docs/MONDAY_5_18_TASK_ZERO_GATE_AUDIT.md.
+  const SIZING_FLOOR_THRESHOLD = parseFloat(process.env.FUT_SIZING_FLOOR_BALANCE || '10000');
   const _balanceForSizing = ledger.balance || 0;
   let contracts = tierCfg.contracts;
   let sizingFloorApplied = false;
-  if (_balanceForSizing < 5000 && contracts > 1) {
+  if (_balanceForSizing < SIZING_FLOOR_THRESHOLD && contracts > 1) {
     sizingFloorApplied = true;
-    console.log(`  ⚠ SIZE_FLOOR_1_CONTRACT — balance $${_balanceForSizing.toFixed(0)} < $5K, overriding tier ${tier} (${tierCfg.contracts}c → 1c)`);
-    try { jAlert('warning', 'SIZE_FLOOR_1_CONTRACT', { balance: _balanceForSizing, tierAttempted: tier, tierContracts: tierCfg.contracts, override: 1 }); } catch {}
+    console.log(`  ⚠ SIZE_FLOOR_1_CONTRACT — balance $${_balanceForSizing.toFixed(0)} < $${SIZING_FLOOR_THRESHOLD.toFixed(0)}, overriding tier ${tier} (${tierCfg.contracts}c → 1c)`);
+    try { jAlert('warning', 'SIZE_FLOOR_1_CONTRACT', { balance: _balanceForSizing, threshold: SIZING_FLOOR_THRESHOLD, tierAttempted: tier, tierContracts: tierCfg.contracts, override: 1 }); } catch {}
     contracts = 1;
   }
   const stopPoints = tierCfg.stopPoints;
