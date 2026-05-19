@@ -685,7 +685,9 @@ async function handlePineAlert(req, res) {
   // by default (don't block trade on infra hiccup).
   const _vis = await _evaluateVisionGate(consensus);
   if (_vis.action === 'reject') {
-    const blockReason = _vis.reason === 'late_fire_veto' ? 'VISION_REJECT_VETO' : 'VISION_REJECT_LOW_SCORE';
+    const blockReason = _vis.reason === 'zone_invalid_setup' ? 'VISION_REJECT_ZONE_INVALID'
+                      : _vis.reason === 'late_fire_veto' ? 'VISION_REJECT_VETO'
+                      : 'VISION_REJECT_LOW_SCORE';
     jGateBlock(engine, instrument, direction, blockReason, {
       composite: _vis.score?.composite,
       tier: _vis.score?.tier,
@@ -1165,7 +1167,18 @@ async function _evaluateVisionGate(consensus) {
   const vetoEnabled = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
   const wouldRejectByComposite = gateEnabled && composite != null && composite < rejectThr;
   const wouldRejectByVeto      = vetoEnabled && result.lateFireVeto === true;
-  const wouldReject = wouldRejectByComposite || wouldRejectByVeto;
+
+  // 2026-05-19 19:35 ET — zone_setup_quality reject for ZONE engine.
+  // Operator priority: "Vision must learn supply/demand trades." When
+  // Pine's ZONE engine fires but model says zone quality is poor (price
+  // already through the zone, signal opposed to nearby zone, chasing
+  // breakout from wrong side), reject.
+  const zoneRejectEnabled = (process.env.VISION_ZONE_REJECT_ENABLED || 'true').toLowerCase() === 'true';
+  const zoneRejectThr     = parseFloat(process.env.VISION_ZONE_REJECT_THRESHOLD || '4');
+  const isZoneEngine      = (engine || '').toUpperCase() === 'ZONE';
+  const wouldRejectByZone = zoneRejectEnabled && isZoneEngine && typeof result.zoneSetupQuality === 'number' && result.zoneSetupQuality < zoneRejectThr;
+
+  const wouldReject = wouldRejectByComposite || wouldRejectByVeto || wouldRejectByZone;
 
   // 2026-05-19 18:05 ET — off-RTH bypass. Operator data-collection mode
   // through June 1 (MNQ futures activate). Outside 09:30-16:00 ET Mon-Fri,
@@ -1192,14 +1205,18 @@ async function _evaluateVisionGate(consensus) {
     return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
   })();
   // off-RTH bypass fires when: bypass is enabled, we're off-RTH, would-reject
-  // is true, AND the would-reject reason is NOT veto (or respectVetoOff is false).
-  // Veto-rejections punch through the bypass when respectVetoOff is true.
+  // is true, AND the would-reject reason is NOT veto AND NOT zone-quality.
+  // Both veto and zone-reject punch through bypass (both are high-signal
+  // binary judgments worth respecting overnight per data-collection mode).
   const _vetoBreaksBypass = respectVetoOff && wouldRejectByVeto;
-  const offRthBypass = bypassOffRth && !_isRTH && wouldReject && !_vetoBreaksBypass;
+  const _zoneBreaksBypass = wouldRejectByZone;  // always respect zone reject
+  const offRthBypass = bypassOffRth && !_isRTH && wouldReject && !_vetoBreaksBypass && !_zoneBreaksBypass;
   const shouldReject = wouldReject && !offRthBypass;
   const shouldRejectByComposite = shouldReject && wouldRejectByComposite;
   const shouldRejectByVeto      = shouldReject && wouldRejectByVeto;
-  const rejectCause = offRthBypass ? `off_rth_bypass (would_reject: ${wouldRejectByVeto ? 'veto' : 'composite '+composite+' < '+rejectThr})`
+  const shouldRejectByZone      = shouldReject && wouldRejectByZone;
+  const rejectCause = offRthBypass ? `off_rth_bypass (would_reject: composite ${composite} < ${rejectThr})`
+                    : shouldRejectByZone ? `zone_setup_quality ${result.zoneSetupQuality} < ${zoneRejectThr} (ZONE engine)`
                     : shouldRejectByVeto ? 'late_fire_veto'
                     : shouldRejectByComposite ? `composite ${composite} < ${rejectThr}`
                     : null;
@@ -1212,6 +1229,7 @@ async function _evaluateVisionGate(consensus) {
       capturedViaFallback: shot.viaFallback,
       composite, multiplier: result.multiplier, tier: result.tier,
       lateFireVeto: result.lateFireVeto,
+      zoneSetupQuality: result.zoneSetupQuality,
       dims: {
         trend_alignment:   result.trend_alignment,
         momentum:          result.momentum,
@@ -1268,8 +1286,11 @@ async function _evaluateVisionGate(consensus) {
   }
 
   if (shouldReject) {
-    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  cause=${rejectCause}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
-    return { action: 'reject', reason: shouldRejectByVeto ? 'late_fire_veto' : 'low_score', score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
+    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  cause=${rejectCause}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    const reason = shouldRejectByZone ? 'zone_invalid_setup'
+                 : shouldRejectByVeto ? 'late_fire_veto'
+                 : 'low_score';
+    return { action: 'reject', reason, score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
   }
   if (offRthBypass) {
     console.log(`  ⏰ VISION_OFFRTH_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (would-reject: ${rejectCause}, but off-RTH bypass — data-collection mode)  (${totalLatencyMs}ms)`);
@@ -1799,8 +1820,11 @@ server.listen(PORT, () => {
       const _veto = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
       const _offRth = (process.env.VISION_BYPASS_OFFRTH || 'true').toLowerCase() === 'true';
       const _respVeto = (process.env.VISION_OFFRTH_RESPECT_VETO || 'true').toLowerCase() === 'true';
-      const offRthMode = _offRth ? `; OFF-RTH bypass composite${_respVeto && _veto ? ' (veto still rejects)' : ' + veto'}` : '';
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${offRthMode})` : 'LOG-ONLY (no reject)';
+      const _zoneRej = (process.env.VISION_ZONE_REJECT_ENABLED || 'true').toLowerCase() === 'true';
+      const _zoneThr = parseFloat(process.env.VISION_ZONE_REJECT_THRESHOLD || '4');
+      const offRthMode = _offRth ? `; OFF-RTH bypass composite${(_respVeto && _veto) || _zoneRej ? ' (veto+zone still reject)' : ' + veto'}` : '';
+      const zoneMode = _zoneRej ? ` OR (ZONE engine AND zone_setup_quality < ${_zoneThr})` : '';
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${zoneMode}${offRthMode})` : 'LOG-ONLY (no reject)';
       console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
