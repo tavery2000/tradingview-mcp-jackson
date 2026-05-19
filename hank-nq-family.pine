@@ -903,12 +903,59 @@ payloadJSON(direction, engine, confidence) =>
     // (3M primary + 5M context per operator spec). Pine sends the bar
     // period in minutes (rounded); webhook matches against ACCEPTED_TIMEFRAMES.
     tfStr      = str.tostring(timeframe.in_seconds() / 60, "#")
+    // §FIX12 (2026-05-19 EOD) — emit nearest supply/demand zone coordinates
+    // so Vision has ground-truth zone data. zoneMathFilter on webhook uses
+    // these for mechanical R:R checks. See spy-family for full rationale.
+    float nSupLower = na
+    float nSupUpper = na
+    float nDemLower = na
+    float nDemUpper = na
+    if array.size(bearOBs) > 0
+        for i = 0 to array.size(bearOBs) - 1
+            b = array.get(bearOBs, i)
+            bot = box.get_bottom(b)
+            top = box.get_top(b)
+            if bot >= close and (na(nSupLower) or bot < nSupLower)
+                nSupLower := bot
+                nSupUpper := top
+    if array.size(bearFVGs) > 0
+        for i = 0 to array.size(bearFVGs) - 1
+            b = array.get(bearFVGs, i)
+            bot = box.get_bottom(b)
+            top = box.get_top(b)
+            if bot >= close and (na(nSupLower) or bot < nSupLower)
+                nSupLower := bot
+                nSupUpper := top
+    if array.size(bullOBs) > 0
+        for i = 0 to array.size(bullOBs) - 1
+            b = array.get(bullOBs, i)
+            bot = box.get_bottom(b)
+            top = box.get_top(b)
+            if top <= close and (na(nDemUpper) or top > nDemUpper)
+                nDemUpper := top
+                nDemLower := bot
+    if array.size(bullFVGs) > 0
+        for i = 0 to array.size(bullFVGs) - 1
+            b = array.get(bullFVGs, i)
+            bot = box.get_bottom(b)
+            top = box.get_top(b)
+            if top <= close and (na(nDemUpper) or top > nDemUpper)
+                nDemUpper := top
+                nDemLower := bot
+    nSupLowerStr = na(nSupLower) ? "null" : str.tostring(nSupLower, "#.####")
+    nSupUpperStr = na(nSupUpper) ? "null" : str.tostring(nSupUpper, "#.####")
+    nDemLowerStr = na(nDemLower) ? "null" : str.tostring(nDemLower, "#.####")
+    nDemUpperStr = na(nDemUpper) ? "null" : str.tostring(nDemUpper, "#.####")
     '{"instrument":"' + instStr + '","direction":"' + direction +
       '","engine":"' + engine + '","confidence":"' + confidence +
       '","price":' + str.tostring(close, "#.##") +
       ',"tf":"' + tfStr + '"' +
       ',"invalidation_level":' + invalStr +
       ',"structure_type":"' + structType + '"' +
+      ',"nearest_supply_lower":' + nSupLowerStr +
+      ',"nearest_supply_upper":' + nSupUpperStr +
+      ',"nearest_demand_lower":' + nDemLowerStr +
+      ',"nearest_demand_upper":' + nDemUpperStr +
       ',"alertName":"' + engine + ' ' + direction + '"}'
 
 if buyTrigger

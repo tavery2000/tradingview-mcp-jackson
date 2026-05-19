@@ -685,21 +685,28 @@ async function handlePineAlert(req, res) {
   // by default (don't block trade on infra hiccup).
   const _vis = await _evaluateVisionGate(consensus);
   if (_vis.action === 'reject') {
-    const blockReason = _vis.reason === 'zone_invalid_setup' ? 'VISION_REJECT_ZONE_INVALID'
-                      : _vis.reason === 'late_fire_veto' ? 'VISION_REJECT_VETO'
+    const blockReason = _vis.reason === 'zone_math_block'    ? 'VISION_REJECT_ZONE_MATH'
+                      : _vis.reason === 'action_mult_zero'   ? 'VISION_REJECT_ACTION_ZERO'
+                      : _vis.reason === 'zone_invalid_setup' ? 'VISION_REJECT_ZONE_INVALID'
+                      : _vis.reason === 'late_fire_veto'     ? 'VISION_REJECT_VETO'
                       : 'VISION_REJECT_LOW_SCORE';
     jGateBlock(engine, instrument, direction, blockReason, {
       composite: _vis.score?.composite,
       tier: _vis.score?.tier,
       lateFireVeto: _vis.score?.lateFireVeto,
+      zoneSetupQuality: _vis.score?.zoneSetupQuality,
+      actionMultiplier: _vis.score?.actionMultiplier,
+      structureState: _vis.score?.structureState,
+      detectedSupplyZone: _vis.score?.detectedSupplyZone,
+      detectedDemandZone: _vis.score?.detectedDemandZone,
+      currentPriceVision: _vis.score?.currentPriceVision,
+      zoneMathBlock: _vis.zoneMathBlock,
       rejectThreshold: _vis.rejectThreshold,
       rejectCause: _vis.rejectCause,
       reasoning: _vis.score?.reasoning,
       latencyMs: _vis.totalLatencyMs,
       etTime: etTimeString(),
-      note: _vis.reason === 'late_fire_veto'
-        ? `Late-fire veto fired (composite ${_vis.score?.composite}). Reasoning: ${_vis.score?.reasoning || '(none)'}`
-        : `Composite ${_vis.score?.composite} < ${_vis.rejectThreshold}. Reasoning: ${_vis.score?.reasoning || '(none)'}`,
+      note: `${_vis.rejectCause}. Reasoning: ${_vis.score?.reasoning || '(none)'}`,
     });
     return send(res, 200, {
       ok: false, reason: blockReason,
@@ -1275,7 +1282,50 @@ async function _evaluateVisionGate(consensus) {
   const isZoneEngine      = (engine || '').toUpperCase() === 'ZONE';
   const wouldRejectByZone = zoneRejectEnabled && isZoneEngine && typeof result.zoneSetupQuality === 'number' && result.zoneSetupQuality < zoneRejectThr;
 
-  const wouldReject = wouldRejectByComposite || wouldRejectByVeto || wouldRejectByZone;
+  // 2026-05-19 EOD — Action multiplier hard block (operator spec).
+  // Model returns one of {0.0, 0.25, 0.7, 1.0, 1.2} as holistic edge.
+  // 0.0 means HARD BLOCK (toxic proximity, zone disrespect, inside-zone wrong side).
+  const actionMultRejectEnabled = (process.env.VISION_ACTION_MULT_REJECT_ENABLED || 'true').toLowerCase() === 'true';
+  const wouldRejectByActionMult = actionMultRejectEnabled && result.actionMultiplier === 0.0;
+
+  // 2026-05-19 EOD — zoneMathFilter: mechanical R:R check using model's
+  // extracted spatial coordinates. Catches "late entry at the top of a
+  // move into supply" (operator's 19:48 ES1! SELL @7388 example).
+  // Rules (per operator spec):
+  //   CALLS:
+  //     upside    = supply_lower - current  (room to target)
+  //     downside  = current - demand_upper  (room before stop area)
+  //     if upside <= 0           → INSIDE_OR_ABOVE_SUPPLY
+  //     if upside < 2.0          → TOXIC_PROXIMITY_SUPPLY
+  //     if downside > upside     → NEGATIVE_RR_TO_DEMAND
+  //   PUTS: mirror.
+  function _zoneMathBlock() {
+    if ((process.env.VISION_ZONE_MATH_FILTER_ENABLED || 'true').toLowerCase() !== 'true') return null;
+    const cur = result.currentPriceVision ?? price;
+    const supLower = result.detectedSupplyZone?.lower;
+    const demUpper = result.detectedDemandZone?.upper;
+    if (cur == null || supLower == null || demUpper == null) return null;
+    const toxicPts = parseFloat(process.env.VISION_ZONE_TOXIC_POINTS || '2.0');
+    const dir = (direction || '').toUpperCase();
+    if (dir === 'CALLS') {
+      const upside = supLower - cur;
+      const downside = cur - demUpper;
+      if (upside <= 0) return { reason: 'INSIDE_OR_ABOVE_SUPPLY', upside, downside };
+      if (upside < toxicPts) return { reason: 'TOXIC_PROXIMITY_SUPPLY', upside, downside, toxicPts };
+      if (downside > upside) return { reason: 'NEGATIVE_RR_TO_DEMAND', upside, downside, rr: +(upside/downside).toFixed(2) };
+    } else if (dir === 'PUTS') {
+      const downside = cur - demUpper;
+      const upside   = supLower - cur;
+      if (downside <= 0) return { reason: 'INSIDE_OR_BELOW_DEMAND', upside, downside };
+      if (downside < toxicPts) return { reason: 'TOXIC_PROXIMITY_DEMAND', upside, downside, toxicPts };
+      if (upside > downside) return { reason: 'NEGATIVE_RR_TO_SUPPLY', upside, downside, rr: +(downside/upside).toFixed(2) };
+    }
+    return null;
+  }
+  const zoneMathBlock = _zoneMathBlock();
+  const wouldRejectByZoneMath = zoneMathBlock !== null;
+
+  const wouldReject = wouldRejectByComposite || wouldRejectByVeto || wouldRejectByZone || wouldRejectByActionMult || wouldRejectByZoneMath;
 
   // 2026-05-19 18:05 ET — off-RTH bypass. Operator data-collection mode
   // through June 1 (MNQ futures activate). Outside 09:30-16:00 ET Mon-Fri,
@@ -1302,17 +1352,27 @@ async function _evaluateVisionGate(consensus) {
     return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
   })();
   // off-RTH bypass fires when: bypass is enabled, we're off-RTH, would-reject
-  // is true, AND the would-reject reason is NOT veto AND NOT zone-quality.
-  // Both veto and zone-reject punch through bypass (both are high-signal
-  // binary judgments worth respecting overnight per data-collection mode).
-  const _vetoBreaksBypass = respectVetoOff && wouldRejectByVeto;
-  const _zoneBreaksBypass = wouldRejectByZone;  // always respect zone reject
-  const offRthBypass = bypassOffRth && !_isRTH && wouldReject && !_vetoBreaksBypass && !_zoneBreaksBypass;
+  // is true, AND the would-reject reason is composite-only.
+  // Veto, zone-quality, action_multiplier=0, and zone-math all PUNCH THROUGH
+  // bypass overnight — these are high-signal binary judgments worth respecting
+  // even in data-collection mode.
+  const _vetoBreaksBypass     = respectVetoOff && wouldRejectByVeto;
+  const _zoneBreaksBypass     = wouldRejectByZone;
+  const _actionMultBreaksBypass = wouldRejectByActionMult;
+  const _zoneMathBreaksBypass = wouldRejectByZoneMath;
+  const offRthBypass = bypassOffRth && !_isRTH && wouldReject &&
+                       !_vetoBreaksBypass && !_zoneBreaksBypass &&
+                       !_actionMultBreaksBypass && !_zoneMathBreaksBypass;
   const shouldReject = wouldReject && !offRthBypass;
-  const shouldRejectByComposite = shouldReject && wouldRejectByComposite;
-  const shouldRejectByVeto      = shouldReject && wouldRejectByVeto;
-  const shouldRejectByZone      = shouldReject && wouldRejectByZone;
+  const shouldRejectByComposite  = shouldReject && wouldRejectByComposite;
+  const shouldRejectByVeto       = shouldReject && wouldRejectByVeto;
+  const shouldRejectByZone       = shouldReject && wouldRejectByZone;
+  const shouldRejectByActionMult = shouldReject && wouldRejectByActionMult;
+  const shouldRejectByZoneMath   = shouldReject && wouldRejectByZoneMath;
+  // Precedence (most specific → least): zone_math > action_mult > zone_quality > veto > composite
   const rejectCause = offRthBypass ? `off_rth_bypass (would_reject: composite ${composite} < ${rejectThr})`
+                    : shouldRejectByZoneMath ? `zone_math: ${zoneMathBlock.reason} (upside=${zoneMathBlock.upside?.toFixed(2)} downside=${zoneMathBlock.downside?.toFixed(2)})`
+                    : shouldRejectByActionMult ? `action_multiplier=0.0 (model HARD BLOCK; structure=${result.structureState})`
                     : shouldRejectByZone ? `zone_setup_quality ${result.zoneSetupQuality} < ${zoneRejectThr} (ZONE engine)`
                     : shouldRejectByVeto ? 'late_fire_veto'
                     : shouldRejectByComposite ? `composite ${composite} < ${rejectThr}`
@@ -1327,6 +1387,12 @@ async function _evaluateVisionGate(consensus) {
       composite, multiplier: result.multiplier, tier: result.tier,
       lateFireVeto: result.lateFireVeto,
       zoneSetupQuality: result.zoneSetupQuality,
+      detectedSupplyZone: result.detectedSupplyZone,
+      detectedDemandZone: result.detectedDemandZone,
+      currentPriceVision: result.currentPriceVision,
+      structureState: result.structureState,
+      actionMultiplier: result.actionMultiplier,
+      zoneMathBlock,
       dims: {
         trend_alignment:   result.trend_alignment,
         momentum:          result.momentum,
@@ -1384,11 +1450,13 @@ async function _evaluateVisionGate(consensus) {
 
   let verdict;
   if (shouldReject) {
-    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  cause=${rejectCause}  band=${_band}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
-    const reason = shouldRejectByZone ? 'zone_invalid_setup'
-                 : shouldRejectByVeto ? 'late_fire_veto'
+    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  comp=${composite}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  mult=${result.actionMultiplier}  struct=${result.structureState}  cause=${rejectCause}  band=${_band}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    const reason = shouldRejectByZoneMath   ? 'zone_math_block'
+                 : shouldRejectByActionMult ? 'action_mult_zero'
+                 : shouldRejectByZone       ? 'zone_invalid_setup'
+                 : shouldRejectByVeto       ? 'late_fire_veto'
                  : 'low_score';
-    verdict = { action: 'reject', reason, score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
+    verdict = { action: 'reject', reason, score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs, zoneMathBlock };
   } else {
     if (offRthBypass) {
       console.log(`  ⏰ VISION_OFFRTH_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (would-reject: ${rejectCause}, but off-RTH bypass — data-collection mode)  band=${_band}  (${totalLatencyMs}ms)`);
@@ -1932,14 +2000,15 @@ server.listen(PORT, () => {
       const _respVeto = (process.env.VISION_OFFRTH_RESPECT_VETO || 'true').toLowerCase() === 'true';
       const _zoneRej = (process.env.VISION_ZONE_REJECT_ENABLED || 'true').toLowerCase() === 'true';
       const _zoneThr = parseFloat(process.env.VISION_ZONE_REJECT_THRESHOLD || '4');
+      const _actMult = (process.env.VISION_ACTION_MULT_REJECT_ENABLED || 'true').toLowerCase() === 'true';
+      const _zoneMath = (process.env.VISION_ZONE_MATH_FILTER_ENABLED || 'true').toLowerCase() === 'true';
+      const _toxic = parseFloat(process.env.VISION_ZONE_TOXIC_POINTS || '2.0');
       const _sibCache = (process.env.VISION_SIBLING_CACHE_ENABLED || 'true').toLowerCase() === 'true';
       const _dzThr   = parseFloat(process.env.VISION_REJECT_THRESHOLD_DEAD_ZONE || '5.0');
-      const offRthMode = _offRth ? `; OFF-RTH bypass composite${(_respVeto && _veto) || _zoneRej ? ' (veto+zone still reject)' : ' + veto'}` : '';
-      const zoneMode = _zoneRej ? ` OR (ZONE engine AND zone_setup_quality < ${_zoneThr})` : '';
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr} [DEAD_ZONE < ${_dzThr}]${_veto ? ' OR late_fire_veto=yes' : ''}${zoneMode}${offRthMode})` : 'LOG-ONLY (no reject)';
-      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}`);
-      console.log(`  [WEBHOOK]   bypass=[${_vBypass}], fail-open=${_vFO}, sibling-cache=${_sibCache ? 'on (60s TTL, ES_FAM/NQ_FAM)' : 'off'}, model=${_vModel}`);
-      console.log(`  [WEBHOOK]   current session band: ${_sessionBand()}`);
+      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — model=${_vModel}, session=${_sessionBand()}`);
+      console.log(`  [WEBHOOK]   reject ladder: composite<${_vThr} [DEAD_ZONE<${_dzThr}]${_veto?' | veto=yes':''}${_zoneRej?` | ZONE-engine zone_setup_quality<${_zoneThr}`:''}${_actMult?' | action_mult=0.0':''}${_zoneMath?` | zone_math (toxic<${_toxic}pt)`:''}`);
+      console.log(`  [WEBHOOK]   OFF-RTH bypass: ${_offRth ? `composite-only (veto+zone+action+math punch through)` : 'disabled'}`);
+      console.log(`  [WEBHOOK]   bypass-engines=[${_vBypass}], fail-open=${_vFO}, sibling-cache=${_sibCache ? 'on' : 'off'}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
     }

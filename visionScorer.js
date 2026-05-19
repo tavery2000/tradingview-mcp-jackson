@@ -86,9 +86,37 @@ Score the chart on these 5 dimensions (0=very bad for this trade, 10=ideal):
 
 7. zone_setup_quality (0-10) — Supply/demand zone test quality. Pine identifies these as Order Blocks + FVGs visible as colored boxes on chart. 10 = signal direction aligns with FRESH zone test (CALLS at a clean demand zone bounce OR PUTS at a clean supply zone rejection) with rejection wick + good headroom to opposing zone. 7-9 = good zone test with minor flaws (multiple touches, weak wick). 4-6 = generic level test (PDH/PDL/VWAP), not a structural zone. 0-3 = price ALREADY THROUGH the zone (chasing a breakout from the wrong side), OR signal direction OPPOSED to the nearby zone (CALLS at supply / PUTS at demand = will be rejected). LATE-CHASE indicator: low score here = entering at top of breakout with supply overhead, or bottom of breakdown with demand below.
 
+═══ SPATIAL ZONE EXTRACTION (2026-05-19 EOD addition) ═══
+
+Now also extract numerical spatial data from the chart for the math layer:
+
+8. detected_supply_zone — Nearest SUPPLY zone above current price (red/orange shaded boxes near resistance). Read price values from Y-axis labels. Return {"upper": X, "lower": Y} as price numbers. If no clear supply zone above, return {"upper": null, "lower": null}.
+
+9. detected_demand_zone — Nearest DEMAND zone below current price (blue/green shaded boxes near support). Same format.
+
+10. current_price — Exact current price from the right-edge Y-axis price label (bright green/red number).
+
+11. structure_state — One of:
+    - "HH_HL_backtest"      clean BO + retest of demand (premium LONG setup)
+    - "LH_LL_retest"        clean breakdown + retest of supply (premium SHORT setup)
+    - "range_chop"          oscillating between zones (low quality, no edge)
+    - "breakout_extension"  post-zone-break momentum (medium quality)
+    - "zone_disrespect"     signal direction opposes nearby zone (HARD VETO)
+
+12. action_multiplier — Holistic edge score, one of: 0.0 | 0.25 | 0.7 | 1.0 | 1.2
+    - 0.0  HARD BLOCK: price inside supply (CALLS) or inside demand (PUTS), or zone_disrespect setup
+    - 0.25 NO MAN'S LAND: range_chop with no zone touch
+    - 0.7  STANDARD: default for structurally clean but unremarkable setup
+    - 1.0  GOOD: clear directional setup with reasonable zone alignment
+    - 1.2  PREMIUM: HH_HL_backtest + bouncing from demand (LONG), OR LH_LL_retest + rejecting from supply (SHORT) — max edge
+
+Toxic-proximity rule for action_multiplier 0.0:
+    CALLS signal AND current_price within 2 points BELOW supply_lower → 0.0
+    PUTS  signal AND current_price within 2 points ABOVE demand_upper → 0.0
+
 Respond in this EXACT JSON shape — no markdown, no prose outside the JSON:
 
-{"trend_alignment": <0-10>, "momentum": <0-10>, "sr_headroom": <0-10>, "volume_confirm": <0-10>, "exhaustion_safety": <0-10>, "late_fire_veto": "<yes|no>", "zone_setup_quality": <0-10>, "reasoning": "<one sentence, max 25 words, naming the deciding factor>"}`;
+{"trend_alignment": <0-10>, "momentum": <0-10>, "sr_headroom": <0-10>, "volume_confirm": <0-10>, "exhaustion_safety": <0-10>, "late_fire_veto": "<yes|no>", "zone_setup_quality": <0-10>, "detected_supply_zone": {"upper": <num|null>, "lower": <num|null>}, "detected_demand_zone": {"upper": <num|null>, "lower": <num|null>}, "current_price": <num>, "structure_state": "<HH_HL_backtest|LH_LL_retest|range_chop|breakout_extension|zone_disrespect>", "action_multiplier": <0.0|0.25|0.7|1.0|1.2>, "reasoning": "<one sentence, max 25 words, naming the deciding factor>"}`;
 }
 
 function _multiplierFromComposite(c) {
@@ -155,6 +183,26 @@ export async function scoreChart(signal, imageBuffer) {
   // for catching chase-the-breakout trades that other dims miss.
   const zoneSetupQuality = _clamp(parsed?.zone_setup_quality);
 
+  // 2026-05-19 EOD — spatial zone extraction (operator spec):
+  //   detected_supply_zone / detected_demand_zone — coords from chart
+  //   current_price                                 — exact price
+  //   structure_state                               — categorical
+  //   action_multiplier                             — holistic edge score
+  function _numOrNull(v) { const n = typeof v === 'number' ? v : parseFloat(v); return isFinite(n) ? n : null; }
+  const detectedSupplyZone = parsed?.detected_supply_zone
+    ? { upper: _numOrNull(parsed.detected_supply_zone.upper), lower: _numOrNull(parsed.detected_supply_zone.lower) }
+    : { upper: null, lower: null };
+  const detectedDemandZone = parsed?.detected_demand_zone
+    ? { upper: _numOrNull(parsed.detected_demand_zone.upper), lower: _numOrNull(parsed.detected_demand_zone.lower) }
+    : { upper: null, lower: null };
+  const currentPriceVision = _numOrNull(parsed?.current_price);
+  const structureState = typeof parsed?.structure_state === 'string' ? parsed.structure_state : null;
+  const actionMultRaw = _numOrNull(parsed?.action_multiplier);
+  // Snap to allowed values
+  const _allowedMults = [0.0, 0.25, 0.7, 1.0, 1.2];
+  const actionMultiplier = (actionMultRaw == null) ? null
+    : _allowedMults.reduce((best, v) => Math.abs(v - actionMultRaw) < Math.abs(best - actionMultRaw) ? v : best, _allowedMults[0]);
+
   const composite = dims
     ? (dims.trend_alignment + dims.momentum + dims.sr_headroom + dims.volume_confirm + dims.exhaustion_safety) / 5
     : null;
@@ -173,6 +221,12 @@ export async function scoreChart(signal, imageBuffer) {
     tier,
     lateFireVeto,
     zoneSetupQuality,
+    // Spatial zone extraction (operator spec 2026-05-19 EOD):
+    detectedSupplyZone,
+    detectedDemandZone,
+    currentPriceVision,
+    structureState,
+    actionMultiplier,
     reasoning: parsed?.reasoning || null,
     parseError,
     raw: raw.slice(0, 300),
