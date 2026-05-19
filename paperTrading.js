@@ -289,6 +289,12 @@ function getContractMultiplier(instrument) {
     console.log(`  [paperTrading] early-arm: underlying ${_partialThr}R/${_beThr}R OR option-pnl ${_optPart}%/${_optBe}% — whichever fires first arms PARTIAL_LOCK/BE_EARLY before +1R STAGE_3`);
   }
   console.log(`  [paperTrading] trail base: 0DTE=${parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015')}% / 1DTE+=${parseFloat(process.env.TRAIL_PCT_OPTIONS_1DTE_PLUS || '0.030')}% (tightens 25% per R-lock)`);
+  {
+    const _zdEn = (process.env.ZERO_DTE_THETA_STOP_ENABLED || 'true').toLowerCase() === 'true';
+    const _zdFloor = parseFloat(process.env.ZERO_DTE_THETA_FLOOR_PCT || '-15');
+    const _zdFlat = parseFloat(process.env.ZERO_DTE_THETA_FLAT_R || '0.3');
+    console.log(`  [paperTrading] 0DTE theta-stop: ${_zdEn ? `ENABLED (option pnl ≤ ${_zdFloor}% AND underlying within ±${_zdFlat}R of entry → exit)` : 'disabled'}`);
+  }
   console.log(`  [paperTrading] peak-pct floor: ${PEAK_PCT_FLOOR > 0 ? `${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock (max ${((1-PEAK_PCT_FLOOR)*100).toFixed(0)}% giveback from peak)` : 'disabled'}`);
   console.log(`  [paperTrading] Structure stop (P1-5-B): ${STRUCTURE_STOP_ENABLED ? `ENABLED on ${[...STRUCTURE_STOP_INSTRUMENTS].join(',')} (priority above point-based)` : 'disabled'}`);
   console.log(`  [paperTrading] Capital cap per trade: equity=$${CAPITAL_CAP_EQUITY.toLocaleString()}  futures=$${CAPITAL_CAP_FUTURES.toLocaleString()} (HOTFIX 2026-05-15)`);
@@ -2061,6 +2067,50 @@ export function evaluateOpenPositions(priceFeeder) {
           continue;
         }
       }
+
+      // 0.5. ZERO_DTE_THETA_STOP (2026-05-19) — operator's 15:35 SPY PUTS
+      //      LH @ $1.47 reached lock=BE via +1R promote but option premium
+      //      decayed -$0.38 over 12 min while underlying was flat. The
+      //      underlying stop at entry-level didn't protect option premium.
+      //
+      //      Fires when:
+      //        - trade.expiry == today's ET date (0DTE)
+      //        - option pnl pct ≤ ZERO_DTE_THETA_FLOOR_PCT (default -15%)
+      //        - underlying within ±0.3R of entry (i.e., flat — the
+      //          loss is theta, not a directional move that justifies a
+      //          stop hit)
+      //
+      //      Catches "locked but bleeding theta" pattern specific to
+      //      0DTE options near close. Doesn't apply to futures (no theta)
+      //      or 1DTE+ (less acute).
+      try {
+        const _zeroDteEnabled = (process.env.ZERO_DTE_THETA_STOP_ENABLED || 'true').toLowerCase() === 'true';
+        if (_zeroDteEnabled && t.expiry && t.fillPrice > 0 && fed.optionPrice != null && liveU != null && t.entryUnderlyingPrice != null && t.stopDistance) {
+          // Compare expiry to today's ET date
+          const _etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+          const _isZeroDTE = (String(t.expiry).slice(0, 10) === _etDate);
+          if (_isZeroDTE) {
+            const _optionPnlPct = ((fed.optionPrice - t.fillPrice) / t.fillPrice) * 100;
+            const _floorPct = parseFloat(process.env.ZERO_DTE_THETA_FLOOR_PCT || '-15');
+            const _underlyingFromEntry = Math.abs(liveU - t.entryUnderlyingPrice);
+            const _flatRThreshold = parseFloat(process.env.ZERO_DTE_THETA_FLAT_R || '0.3') * t.stopDistance;
+            if (_optionPnlPct <= _floorPct && _underlyingFromEntry <= _flatRThreshold) {
+              exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: 'ZERO_DTE_THETA_STOP' });
+              try { jAlert('INFO', 'ZERO_DTE_THETA_STOP', {
+                requestId: t.requestId, instrument: t.instrument, signal: t.signal, engine: t.engine,
+                expiry: t.expiry, optionPnlPct: parseFloat(_optionPnlPct.toFixed(2)),
+                floorPct: _floorPct, underlyingFromEntryR: parseFloat((_underlyingFromEntry/t.stopDistance).toFixed(2)),
+                flatRThreshold: parseFloat(process.env.ZERO_DTE_THETA_FLAT_R || '0.3'),
+                entryUnderlying: t.entryUnderlyingPrice, currentUnderlying: liveU,
+                entryOption: t.fillPrice, currentOption: fed.optionPrice,
+                lockedStopLevel: t.lockedStopLevel, stage: t.stage,
+                note: '0DTE option premium decayed below floor while underlying near entry — theta-protection exit.',
+              }); } catch {}
+              continue;
+            }
+          }
+        }
+      } catch {}
 
       // 1. STOP check — respects current effective stop (may be BE or
       //    profit-locked level after STAGE_3 transitions). P1-5-A whipsaw

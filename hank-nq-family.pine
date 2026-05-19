@@ -706,8 +706,12 @@ if barstate.isconfirmed
         sellTrigger := bearBreak
 
     // §FIX1/§FIX7 — TF-adaptive cooldown via timeframe.in_seconds()
-    // ≤300s (≤5M): 5 bars  |  >300s: signalCooldown input
-    tfCooldown = timeframe.in_seconds() <= 300 ? 5 : signalCooldown
+    // 2026-05-19 EOD: ≤300s reduced from 5 → 2 bars after operator's
+    // 15:35 ES1!/MES1! PUTS LH + ZONE fired then Pine internally locked
+    // out subsequent PUTS for 25 min (5 bars × 5M), missing a real put
+    // continuation move that came in at 15:40-15:50. 2-bar cooldown on
+    // ≤5M (10 min) better matches the chop tape rhythm.
+    tfCooldown = timeframe.in_seconds() <= 300 ? 2 : signalCooldown
 
     if buyTrigger  and not na(lastBuyBar)  and (bar_index - lastBuyBar)  < tfCooldown
         buyTrigger  := false
