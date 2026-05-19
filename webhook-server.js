@@ -297,20 +297,24 @@ async function handlePineAlert(req, res) {
 
   // 2026-05-18 — Stacked-entry dedup. {instrument|direction|5m-bar-floor}
   // bucket; first engine wins. Multiple engines firing on the same Pine
-  // bar are confluence on ONE setup, not N independent positions. Today's
-  // evidence: 13:51 MNQ1! (SELL/HTF/ZONE → -$96), 15:02 MES1! (LH/SELL →
-  // -$340), 10:15 QQQ (LH/SELL/HTF → 3× -$15). Applies to both futures and
-  // equity. Runs AFTER the FADE_CANDIDATE handler so the dedup key
-  // reflects the final engine ('FADE' for promoted, FADE_CANDIDATE drops
-  // never reach this point).
-  const _dedup = _checkStackedDedup(instrument, direction, engine);
+  // bar are confluence on ONE setup, not N independent positions.
+  //
+  // 2026-05-19 14:54 ET split: PEEK here (no claim) — catches obvious
+  // duplicates early without wasting compute on the gate stack. CLAIM is
+  // deferred until right before dispatch (after counter-trend, Vision,
+  // and all other gates pass). Prevents the bug where a SELL blocked by
+  // counter-trend was registered as "first engine" and dedup-blocked the
+  // subsequent HTF + ZONE alerts that would have been valid.
+  const _dedup = _peekStackedDedup(instrument, direction, engine);
   if (_dedup.duplicate) {
     jGateBlock(engine, instrument, direction, 'STACKED_ENTRY_DEDUP', {
       firstEngine:  _dedup.firstEngine,
       ageMs:        _dedup.ageMs,
       bucketKey:    _dedup.key,
       etTime:       etTimeString(),
-      note:         'Same instrument+direction within same 5m bar bucket — first engine opened the position; this is logged as confluence-only.',
+      note:         _dedup.reason === 'OPEN_POSITION_EXISTS'
+        ? 'Open position already exists for instrument+direction (incl. futures micro-fallback target).'
+        : 'Same instrument+direction within same 5m bar bucket — first engine opened the position; this is logged as confluence-only.',
     });
     return send(res, 200, { ok: false, reason: 'STACKED_ENTRY_DEDUP', firstEngine: _dedup.firstEngine });
   }
@@ -490,11 +494,16 @@ async function handlePineAlert(req, res) {
       instrument === 'SPY'  || instrument === 'ES1!' || instrument === 'MES1!' ? 'spy' :
       instrument === 'QQQ'  || instrument === 'NQ1!' || instrument === 'MNQ1!' ? 'qqq' :
       instrument === 'IWM'                                                       ? 'iwm' : null;
+    // 2026-05-19 14:54 ET: stale threshold widened 5min → 15min after operator
+    // hit COUNTER_TREND_STALE_BOTH_FUTURES with bias 10.6min stale during RTH.
+    // monitor.js write cadence is variable (especially during the 14:00-15:00
+    // mid-afternoon lull); a 5min window was too tight. Env-tunable.
+    const _macroStaleMaxMin = parseFloat(process.env.MACRO_BIAS_MAX_STALE_MIN || '15');
     if (family) {
       const file = join(__dirname, `macro4h-${family}.json`);
       const data = JSON.parse(readFileSync(file, 'utf8'));
       const ageMin = (Date.now() - (data.ts ?? 0)) / 60000;
-      if (ageMin > 5) {
+      if (ageMin > _macroStaleMaxMin) {
         _macro4HSrc = `stale:${ageMin.toFixed(1)}min`;
       } else {
         _macro4H      = data.macro4H ?? 'UNKNOWN';
@@ -506,7 +515,7 @@ async function handlePineAlert(req, res) {
         const f1H = join(__dirname, `macro1h-${family}.json`);
         const d1H = JSON.parse(readFileSync(f1H, 'utf8'));
         const age1H = (Date.now() - (d1H.ts ?? 0)) / 60000;
-        if (age1H > 5) {
+        if (age1H > _macroStaleMaxMin) {
           _macro1HSrc = `stale:${age1H.toFixed(1)}min`;
         } else {
           _macro1H      = { trendBias: d1H.trendBias ?? 'NEUTRAL', structurePattern: d1H.structurePattern ?? 'NEUTRAL' };
@@ -672,7 +681,7 @@ async function handlePineAlert(req, res) {
 
   // 2026-05-19 — Vision Phase 5 sync gate. Last gate before dispatch.
   // Awaits screenshot + Haiku 4.5 score (~2s). REJECT below threshold
-  // (default 3.5). LIVE engine bypasses (intra-bar). API error fails open
+  // (default 3.0). LIVE engine bypasses (intra-bar). API error fails open
   // by default (don't block trade on infra hiccup).
   const _vis = await _evaluateVisionGate(consensus);
   if (_vis.action === 'reject') {
@@ -690,6 +699,24 @@ async function handlePineAlert(req, res) {
       composite: _vis.score?.composite, tier: _vis.score?.tier,
       rejectThreshold: _vis.rejectThreshold,
     });
+  }
+
+  // 2026-05-19 14:54 ET — FINAL dedup claim (split from the early peek).
+  // All gates passed; claim the bucket NOW so subsequent same-bar engines
+  // dedup against THIS engine (which actually opens a position) rather
+  // than some earlier gate-blocked alert that never reached dispatch.
+  // Re-checks position-open + bucket atomically in case the 2s Vision
+  // wait window had another alert squeeze in.
+  const _dedupClaim = _claimStackedDedup(instrument, direction, engine);
+  if (_dedupClaim.duplicate) {
+    jGateBlock(engine, instrument, direction, 'STACKED_ENTRY_DEDUP', {
+      firstEngine: _dedupClaim.firstEngine,
+      ageMs: _dedupClaim.ageMs,
+      bucketKey: _dedupClaim.key,
+      etTime: etTimeString(),
+      note: 'Race-window block: another alert claimed the bucket while this one was in the gate stack (Vision wait, etc).',
+    });
+    return send(res, 200, { ok: false, reason: 'STACKED_ENTRY_DEDUP', firstEngine: _dedupClaim.firstEngine });
   }
   // WEBULL_MCP_DISABLED check intentionally removed from the dispatch chain
   // — MCP is parked, Path 2 doesn't depend on it. Re-add when MCP becomes
@@ -1226,6 +1253,102 @@ function _isAnyOpenPositionFor(instrument, direction) {
   return false;
 }
 
+// 2026-05-19 14:54 ET — split into peek (early-check, doesn't claim) and
+// claim (called right before dispatch, after all gates pass). Operator
+// evidence: SELL was blocked by counter-trend gate, but the bucket-claim
+// already happened in the top-of-handler dedup check. Subsequent HTF +
+// ZONE alerts saw the bucket as occupied and got blocked. The claim
+// should only happen if the alert actually goes through to dispatch.
+//
+// PRIMARY check (position-based) stays at top — pure read, no state change.
+// BUCKET peek stays at top too — pure read.
+// BUCKET claim moves to right before dispatch.
+function _peekStackedDedup(instrument, direction, engine) {
+  const now = Date.now();
+  // GC old buckets (state mutation but safe — only removes stale entries)
+  for (const [k, v] of _stackDedupMap.entries()) {
+    if (now - v.ts > _STACK_DEDUP_GC_AFTER_MS) _stackDedupMap.delete(k);
+  }
+
+  // PRIMARY: position-based dedup (pure read)
+  const positionOpenCheckEnabled = (process.env.STACKED_DEDUP_POSITION_CHECK_ENABLED || 'true').toLowerCase() === 'true';
+  if (positionOpenCheckEnabled && _isAnyOpenPositionFor(instrument, direction)) {
+    return {
+      duplicate: true,
+      firstEngine: 'OPEN_POSITION',
+      reason: 'OPEN_POSITION_EXISTS',
+      key: `${(instrument||'').toUpperCase()}|${(direction||'').toUpperCase()}|OPEN`,
+      ageMs: 0,
+    };
+  }
+
+  // SECONDARY: bucket-based peek (no claim)
+  const key = _stackedDedupKey(instrument, direction, now);
+  const existing = _stackDedupMap.get(key);
+  if (existing) {
+    const passthroughEnabled = (process.env.STACKED_DEDUP_PASSTHROUGH_ENABLED || 'true').toLowerCase() === 'true';
+    const minAgeMs = parseInt(process.env.STACKED_DEDUP_PASSTHROUGH_MIN_AGE_MS || '5000', 10);
+    const bucketAgeMs = now - existing.ts;
+    if (passthroughEnabled && bucketAgeMs >= minAgeMs) {
+      const stillOpen = _isAnyOpenPositionFor(instrument, direction);
+      if (!stillOpen) {
+        // Bucket is stale + prior position closed — peek says pass.
+        // The claim step at dispatch time will RECLAIM the bucket with this engine.
+        return { duplicate: false, key, passthroughExpected: true };
+      }
+    }
+    return { duplicate: true, firstEngine: existing.firstEngine, ageMs: bucketAgeMs, key };
+  }
+  return { duplicate: false, key };
+}
+
+// Called right before dispatch (after all gates pass). Re-validates +
+// commits the claim atomically. Returns the same shape as _peekStackedDedup
+// — if a different alert claimed the bucket during the gate-wait window
+// (e.g., 2s Vision wait), this catches it.
+function _claimStackedDedup(instrument, direction, engine) {
+  const now = Date.now();
+  // Re-check position-based first (fastest fail)
+  const positionOpenCheckEnabled = (process.env.STACKED_DEDUP_POSITION_CHECK_ENABLED || 'true').toLowerCase() === 'true';
+  if (positionOpenCheckEnabled && _isAnyOpenPositionFor(instrument, direction)) {
+    return {
+      duplicate: true,
+      firstEngine: 'OPEN_POSITION',
+      reason: 'OPEN_POSITION_EXISTS',
+      key: `${(instrument||'').toUpperCase()}|${(direction||'').toUpperCase()}|OPEN`,
+      ageMs: 0,
+    };
+  }
+  const key = _stackedDedupKey(instrument, direction, now);
+  const existing = _stackDedupMap.get(key);
+  if (existing) {
+    const passthroughEnabled = (process.env.STACKED_DEDUP_PASSTHROUGH_ENABLED || 'true').toLowerCase() === 'true';
+    const minAgeMs = parseInt(process.env.STACKED_DEDUP_PASSTHROUGH_MIN_AGE_MS || '5000', 10);
+    const bucketAgeMs = now - existing.ts;
+    if (passthroughEnabled && bucketAgeMs >= minAgeMs) {
+      const stillOpen = _isAnyOpenPositionFor(instrument, direction);
+      if (!stillOpen) {
+        // Release and re-claim with new engine
+        _stackDedupMap.set(key, { firstEngine: engine, ts: now });
+        try {
+          jAlert('INFO', 'STACKED_ENTRY_DEDUP_PASSTHROUGH', {
+            instrument, direction, newEngine: engine,
+            priorFirstEngine: existing.firstEngine, priorClaimedAgeMs: bucketAgeMs,
+            etTime: etTimeString(),
+            note: 'Prior position closed — bucket released to new engine (not a stacked duplicate).',
+          });
+        } catch {}
+        return { duplicate: false, key, passthrough: true, claimed: true };
+      }
+    }
+    return { duplicate: true, firstEngine: existing.firstEngine, ageMs: bucketAgeMs, key };
+  }
+  // Fresh claim
+  _stackDedupMap.set(key, { firstEngine: engine, ts: now });
+  return { duplicate: false, key, claimed: true };
+}
+
+// Legacy wrapper — preserves the old call signature for any unconverted call sites.
 function _checkStackedDedup(instrument, direction, engine) {
   const now = Date.now();
   // Garbage-collect old buckets.
