@@ -916,7 +916,7 @@ export function placeFuturesOrder(consensus, requestId) {
 
   futuresOrderGate.markExecuted(requestId, trade);
   try { jFutEntry(trade); } catch {}
-  console.log(`\n  🟦 FUT_ENTRY  ${inst} ${direction} ${consensus.engine}  tier=${tier}  ${contracts}c @ ${entryUnderlying} | stop=${stopPrice} target=${targetPrice} (stacked=${stacked})`);
+  console.log(`\n  🟦 FUT_ENTRY  ${inst} ${direction} ${consensus.engine}  tier=${tier}  ${contracts}c @ ${entryUnderlying} | stop=${stopPrice} target=${targetPrice}`);
   return trade;
 }
 
