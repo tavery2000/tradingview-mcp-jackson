@@ -45,6 +45,18 @@ indicator(title="HANK SMC Pro — NQ Family", shorttitle="SMC-NQ", overlay=true,
 //        1.3×SMA20. Zero pivot lag — fires at bar close only.
 //        Bug-fixed: close[1] <= rollingHigh[1] (not rollingHigh) for
 //        true first-bar detection.
+//
+// ─── PATCH 2026-05-19 EOD — Cooldown + ROLLING_BO session-tuning ──────
+// §FIX10 ≤5M signal cooldown reduced 5 → 2 bars (10 min on 5M, 6 min
+//        on 3M). Eliminates the 25-min lockout after a 15:35 ET-style
+//        cluster fire that today missed continuation moves at 15:40 /
+//        15:45 / 15:50 bar closes.
+// §FIX11 ROLLING_BO session-aware: RTH uses rboVolMult (1.3×SMA20).
+//        OFF-RTH uses rboVolMultOff (1.0×SMA20) plus an ATR-distance
+//        gate of rboAtrDistMult × ATR14 (default 1.5). Overnight SMA20
+//        is itself a thin average → 1.3× rarely triggers; ATR-distance
+//        gate preserves quality. Today's eval: only 1 ▲ RBO fired all
+//        session due to RTH-tight gate.
 // =====================================================================
 
 // =====================================================================
@@ -90,7 +102,13 @@ zbWickMult       = input.float(0.5,  "Rejection wick (× ATR)",        minval=0.
 gRBO            = "Rolling Breakout (ROLLING_BO)"
 enableRBO       = input.bool(true,   "Enable ROLLING_BO engine",      group=gRBO, tooltip="Pivot-free breakout: fires when close crosses the 20-bar rolling high/low with volume confirmation. Zero pivot lag — complements the pivot-based BOS/CHoCH path. Best on 1M-5M.")
 rboLookback     = input.int(20,      "Lookback (bars)",               minval=5, maxval=100, group=gRBO)
-rboVolMult      = input.float(1.3,   "Volume multiplier (× SMA20)",   minval=0.5, step=0.1,  group=gRBO)
+rboVolMult      = input.float(1.3,   "Volume multiplier RTH (× SMA20)",   minval=0.5, step=0.1,  group=gRBO, tooltip="RTH (09:30-16:00 ET) volume gate. 1.3× catches genuine breakout-volume bars. (§FIX11)")
+// §FIX11 — operator 2026-05-19 EOD: RTH volume gate too strict for
+// overnight sessions where volume rarely spikes vs SMA20. Session-aware:
+// overnight uses a lower volume mult but adds an ATR-distance gate to
+// preserve quality. Today's eval: only 1 ▲ RBO label fired all session.
+rboVolMultOff   = input.float(1.0,   "Volume multiplier OFF-RTH (× SMA20)", minval=0.3, step=0.1, group=gRBO, tooltip="Overnight + pre/post-market volume gate. 1.0× since SMA20 itself is a thin overnight average. ATR-distance compensates for relaxed volume. (§FIX11)")
+rboAtrDistMult  = input.float(1.5,   "ATR-distance gate OFF-RTH (× ATR14)", minval=0.0, step=0.1, group=gRBO, tooltip="Overnight ROLLING_BO requires close to be N×ATR beyond the rolling extreme. Set 0 to disable. RTH ignores this gate. (§FIX11)")
 showRBOLabels   = input.bool(true,   "Show ▲▼ RBO labels on chart",   group=gRBO)
 
 // --- Live intra-bar triggers (§12) ---
@@ -620,15 +638,23 @@ rollingBearBO = false
 
 if enableRBO and barstate.isconfirmed
     avgVol20   = ta.sma(volume, 20)
-    rboVol     = not na(avgVol20) and volume >= avgVol20 * rboVolMult
     rollingHigh = ta.highest(close[1], rboLookback)
     rollingLow  = ta.lowest(close[1],  rboLookback)
 
-    if close > rollingHigh and close[1] <= rollingHigh[1] and rboVol
+    // §FIX11 — session-aware volume gate + ATR-distance compensation
+    isRBORTH        = not na(time(timeframe.period, "0930-1600:23456", "America/New_York"))
+    rboEffVolMult   = isRBORTH ? rboVolMult : rboVolMultOff
+    rboVol          = not na(avgVol20) and volume >= avgVol20 * rboEffVolMult
+    // ATR-distance gate only applies OFF-RTH (overnight). Set rboAtrDistMult=0 to disable.
+    rboAtrOk        = isRBORTH or rboAtrDistMult <= 0 or na(atr14) or
+                       (close > rollingHigh ? (close - rollingHigh) >= atr14 * rboAtrDistMult :
+                        close < rollingLow  ? (rollingLow - close) >= atr14 * rboAtrDistMult : true)
+
+    if close > rollingHigh and close[1] <= rollingHigh[1] and rboVol and rboAtrOk
         rollingBullBO := true
         rboBullFiredThisBar := true
 
-    if close < rollingLow and close[1] >= rollingLow[1] and rboVol
+    if close < rollingLow and close[1] >= rollingLow[1] and rboVol and rboAtrOk
         rollingBearBO := true
         rboBearFiredThisBar := true
 
