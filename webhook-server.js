@@ -821,6 +821,45 @@ function _checkStretchedFromExtreme(instrument, direction, price) {
   return { block: false };
 }
 
+// 2026-05-19 — PASSTHROUGH fix for STACKED_ENTRY_DEDUP.
+// When a bucket is already claimed and the new alert arrives, check whether
+// the first engine's resulting position is STILL OPEN. If yes → legit
+// confluence dedup (block). If no (already closed/stopped) → release the
+// bucket to the new engine. The first engine had its shot, the position
+// is gone, this is a fresh opportunity not a stacked duplicate.
+//
+// Today's evidence (audit of 84 dedup blocks): 2 eaten signals followed
+// the same pattern — first engine (ZONE) opened, won, closed, then
+// subsequent engines in the same 5m bucket were blocked despite the
+// position being long gone.
+//
+// Reads paper-ledger.json + futures-ledger.json on each call (small JSON
+// files, sub-ms read; paperTrading/futuresTrading write atomically after
+// each open/close so the read sees consistent state).
+function _isAnyOpenPositionFor(instrument, direction) {
+  const inst = (instrument || '').toUpperCase();
+  const dir  = (direction  || '').toUpperCase();
+  try {
+    const eqFile = join(__dirname, 'paper-ledger.json');
+    if (existsSync(eqFile)) {
+      const eq = JSON.parse(readFileSync(eqFile, 'utf8'));
+      if ((eq.trades || []).some(t => t.status === 'OPEN' && (t.instrument || '').toUpperCase() === inst && (t.signal || '').toUpperCase() === dir)) {
+        return true;
+      }
+    }
+  } catch {}
+  try {
+    const fuFile = join(__dirname, 'futures-ledger.json');
+    if (existsSync(fuFile)) {
+      const fu = JSON.parse(readFileSync(fuFile, 'utf8'));
+      if ((fu.trades || []).some(t => t.status === 'OPEN' && (t.instrument || '').toUpperCase() === inst && (t.signal || '').toUpperCase() === dir)) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 function _checkStackedDedup(instrument, direction, engine) {
   const now = Date.now();
   // Garbage-collect old buckets.
@@ -830,6 +869,33 @@ function _checkStackedDedup(instrument, direction, engine) {
   const key = _stackedDedupKey(instrument, direction, now);
   const existing = _stackDedupMap.get(key);
   if (existing) {
+    // 2026-05-19 PASSTHROUGH: if the first engine's position has already
+    // closed, this is a fresh opportunity — release the bucket.
+    // Safety: require the bucket to be at least N ms old before evaluating
+    // open-position state. Protects against race where first sendOrder is
+    // still in flight (ledger write hasn't landed yet) — a 0-age bucket
+    // means the first alert just arrived; assume it's still becoming a
+    // trade. Default 5s, well past typical sendOrder roundtrip.
+    const passthroughEnabled = (process.env.STACKED_DEDUP_PASSTHROUGH_ENABLED || 'true').toLowerCase() === 'true';
+    const minAgeMs = parseInt(process.env.STACKED_DEDUP_PASSTHROUGH_MIN_AGE_MS || '5000', 10);
+    const bucketAgeMs = now - existing.ts;
+    if (passthroughEnabled && bucketAgeMs >= minAgeMs) {
+      const stillOpen = _isAnyOpenPositionFor(instrument, direction);
+      if (!stillOpen) {
+        // Free the bucket → record the new engine as the bucket owner.
+        _stackDedupMap.set(key, { firstEngine: engine, ts: now });
+        try {
+          jAlert('INFO', 'STACKED_ENTRY_DEDUP_PASSTHROUGH', {
+            instrument, direction, newEngine: engine,
+            priorFirstEngine: existing.firstEngine,
+            priorClaimedAgeMs: now - existing.ts,
+            etTime: etTimeString(),
+            note: 'Prior position closed — bucket released to new engine (not a stacked duplicate).',
+          });
+        } catch {}
+        return { duplicate: false, key, passthrough: true };
+      }
+    }
     return { duplicate: true, firstEngine: existing.firstEngine, ageMs: now - existing.ts, key };
   }
   _stackDedupMap.set(key, { firstEngine: engine, ts: now });
