@@ -1163,10 +1163,32 @@ async function _evaluateVisionGate(consensus) {
   // comp=4.8 NEUTRAL passed despite reasoning "exhaustion and late-entry
   // risk" — exactly what the veto is meant to catch.
   const vetoEnabled = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
-  const shouldRejectByComposite = gateEnabled && composite != null && composite < rejectThr;
-  const shouldRejectByVeto      = vetoEnabled && result.lateFireVeto === true;
-  const shouldReject = shouldRejectByComposite || shouldRejectByVeto;
-  const rejectCause = shouldRejectByVeto ? 'late_fire_veto'
+  const wouldRejectByComposite = gateEnabled && composite != null && composite < rejectThr;
+  const wouldRejectByVeto      = vetoEnabled && result.lateFireVeto === true;
+  const wouldReject = wouldRejectByComposite || wouldRejectByVeto;
+
+  // 2026-05-19 18:05 ET — off-RTH bypass. Operator data-collection mode
+  // through June 1 (MNQ futures activate). Outside 09:30-16:00 ET Mon-Fri,
+  // Vision STILL scores + journals (data for future calibration) but
+  // does NOT reject — every overnight trade dispatches regardless of
+  // composite or veto. RTH stays under full gating.
+  const bypassOffRth = (process.env.VISION_BYPASS_OFFRTH || 'true').toLowerCase() === 'true';
+  const _isRTH = (() => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(new Date());
+    const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    if (m.weekday === 'Sat' || m.weekday === 'Sun') return false;
+    const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
+    return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
+  })();
+  const offRthBypass = bypassOffRth && !_isRTH && wouldReject;
+  const shouldReject = wouldReject && !offRthBypass;
+  const shouldRejectByComposite = shouldReject && wouldRejectByComposite;
+  const shouldRejectByVeto      = shouldReject && wouldRejectByVeto;
+  const rejectCause = offRthBypass ? `off_rth_bypass (would_reject: ${wouldRejectByVeto ? 'veto' : 'composite '+composite+' < '+rejectThr})`
+                    : shouldRejectByVeto ? 'late_fire_veto'
                     : shouldRejectByComposite ? `composite ${composite} < ${rejectThr}`
                     : null;
 
@@ -1193,6 +1215,8 @@ async function _evaluateVisionGate(consensus) {
       rejectThreshold: rejectThr,
       action: shouldReject ? 'reject' : 'pass',
       rejectCause,
+      offRthBypass,
+      isRTH: _isRTH,
       etTime: etTimeString(),
     });
   } catch {}
@@ -1233,8 +1257,12 @@ async function _evaluateVisionGate(consensus) {
     console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  cause=${rejectCause}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
     return { action: 'reject', reason: shouldRejectByVeto ? 'late_fire_veto' : 'low_score', score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
   }
-  console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
-  return { action: 'pass', score: result, totalLatencyMs };
+  if (offRthBypass) {
+    console.log(`  ⏰ VISION_OFFRTH_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (would-reject: ${rejectCause}, but off-RTH bypass — data-collection mode)  (${totalLatencyMs}ms)`);
+  } else {
+    console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+  }
+  return { action: 'pass', score: result, totalLatencyMs, offRthBypass };
 }
 
 // 2026-05-19 — PASSTHROUGH fix for STACKED_ENTRY_DEDUP.
@@ -1755,7 +1783,8 @@ server.listen(PORT, () => {
     const _vFO    = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
     if (_vOn) {
       const _veto = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''})` : 'LOG-ONLY (no reject)';
+      const _offRth = (process.env.VISION_BYPASS_OFFRTH || 'true').toLowerCase() === 'true';
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${_offRth ? '; OFF-RTH = log-only pass' : ''})` : 'LOG-ONLY (no reject)';
       console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
