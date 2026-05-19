@@ -82,9 +82,11 @@ Score the chart on these 5 dimensions (0=very bad for this trade, 10=ideal):
 
 5. exhaustion_safety — Inverted exhaustion risk. 10 = move is fresh, low exhaustion. 0 = move is mature, stretched, parabolic, likely to mean-revert. Look at distance-from-VWAP, consecutive same-direction bars, RSI-style extremes.
 
+6. late_fire_veto — BINARY override. Set to "yes" ONLY if this signal shows the textbook late-fire pattern: signal direction firing at the END of an already-completed move (e.g. SELL at the bottom after price already dropped 80% of the range; BUY at the top after price already rallied 80% of the range), counter-trend at a structural extreme (selling into PDL support, buying into PDH resistance), or chart shows clear exhaustion with no remaining room in the signal direction. The dim scores may be moderate but the holistic read says "this is the textbook late-fire we want to skip." Use sparingly — only when the pattern is unambiguous. Otherwise "no".
+
 Respond in this EXACT JSON shape — no markdown, no prose outside the JSON:
 
-{"trend_alignment": <0-10>, "momentum": <0-10>, "sr_headroom": <0-10>, "volume_confirm": <0-10>, "exhaustion_safety": <0-10>, "reasoning": "<one sentence, max 25 words, naming the deciding factor>"}`;
+{"trend_alignment": <0-10>, "momentum": <0-10>, "sr_headroom": <0-10>, "volume_confirm": <0-10>, "exhaustion_safety": <0-10>, "late_fire_veto": "<yes|no>", "reasoning": "<one sentence, max 25 words, naming the deciding factor>"}`;
 }
 
 function _multiplierFromComposite(c) {
@@ -139,6 +141,13 @@ export async function scoreChart(signal, imageBuffer) {
     exhaustion_safety:  _clamp(parsed.exhaustion_safety),
   } : null;
 
+  // 2026-05-19 — late_fire_veto: binary "yes/no" model override.
+  // Triggers REJECT regardless of composite when model identifies the
+  // textbook late-fire pattern (signal at end of completed move, counter-
+  // trend at structural extreme, etc).
+  const _vetoRaw = parsed?.late_fire_veto;
+  const lateFireVeto = (typeof _vetoRaw === 'string' && _vetoRaw.toLowerCase() === 'yes');
+
   const composite = dims
     ? (dims.trend_alignment + dims.momentum + dims.sr_headroom + dims.volume_confirm + dims.exhaustion_safety) / 5
     : null;
@@ -155,6 +164,7 @@ export async function scoreChart(signal, imageBuffer) {
     composite: composite != null ? +composite.toFixed(2) : null,
     multiplier: mult,
     tier,
+    lateFireVeto,
     reasoning: parsed?.reasoning || null,
     parseError,
     raw: raw.slice(0, 300),

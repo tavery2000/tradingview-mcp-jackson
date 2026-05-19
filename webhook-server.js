@@ -685,18 +685,24 @@ async function handlePineAlert(req, res) {
   // by default (don't block trade on infra hiccup).
   const _vis = await _evaluateVisionGate(consensus);
   if (_vis.action === 'reject') {
-    jGateBlock(engine, instrument, direction, 'VISION_REJECT_LOW_SCORE', {
+    const blockReason = _vis.reason === 'late_fire_veto' ? 'VISION_REJECT_VETO' : 'VISION_REJECT_LOW_SCORE';
+    jGateBlock(engine, instrument, direction, blockReason, {
       composite: _vis.score?.composite,
       tier: _vis.score?.tier,
+      lateFireVeto: _vis.score?.lateFireVeto,
       rejectThreshold: _vis.rejectThreshold,
+      rejectCause: _vis.rejectCause,
       reasoning: _vis.score?.reasoning,
       latencyMs: _vis.totalLatencyMs,
       etTime: etTimeString(),
-      note: `Composite ${_vis.score?.composite} < ${_vis.rejectThreshold} — entry blocked. Reasoning: ${_vis.score?.reasoning || '(none)'}`,
+      note: _vis.reason === 'late_fire_veto'
+        ? `Late-fire veto fired (composite ${_vis.score?.composite}). Reasoning: ${_vis.score?.reasoning || '(none)'}`
+        : `Composite ${_vis.score?.composite} < ${_vis.rejectThreshold}. Reasoning: ${_vis.score?.reasoning || '(none)'}`,
     });
     return send(res, 200, {
-      ok: false, reason: 'VISION_REJECT_LOW_SCORE',
+      ok: false, reason: blockReason,
       composite: _vis.score?.composite, tier: _vis.score?.tier,
+      lateFireVeto: _vis.score?.lateFireVeto,
       rejectThreshold: _vis.rejectThreshold,
     });
   }
@@ -1126,22 +1132,33 @@ async function _evaluateVisionGate(consensus) {
 
   const totalLatencyMs = Date.now() - t0;
   const composite = result.composite;
-  // 2026-05-19 14:35 ET: tuned 3.5 → 3.0 after computing today's score-vs-
-  // outcome matrix across 10 trades. At 3.5 we block all 2.8-3.4 → captures
-  // more losers but misses $60 of winners (MES 2.8 PUTS + SPY 3.2-3.4 ZONE/
-  // SELL that won via R-lock trail). At 3.0 we block only the 2.8 trades:
-  // catches all 5 clearest losers, misses $25.50 of MES winners, but the
-  // SPY 3.2-3.4 winners pass through. Net P&L impact: +$47.58 at 3.0 vs
-  // +$44.42 at 3.5. Small edge to 3.0; revisit after Wed's RTH data.
-  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '3.0');
+  // 2026-05-19 15:32 ET: tuned 3.0 → 4.0 after two more losses passed.
+  // 15:27 MES1! PUTS RBO @ comp=3.8 (3.8 > 3.0 → passed) → lost -$16.25.
+  // The 3.8 reasoning explicitly called "limited downside room, stretched
+  // conditions" but composite math is too forgiving. Threshold lifted to
+  // 4.0 (top of WEAK band; anything below NEUTRAL is rejected).
+  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '4.0');
   const gateEnabled = (process.env.VISION_GATE_ENABLED || 'true').toLowerCase() === 'true';
-  const shouldReject = gateEnabled && composite != null && composite < rejectThr;
+
+  // 2026-05-19 — late_fire_veto: binary model override. Catches the
+  // textbook late-fire pattern that scores above composite threshold but
+  // reads bearish in the model's reasoning. 15:30 MES1! CALLS ZONE @
+  // comp=4.8 NEUTRAL passed despite reasoning "exhaustion and late-entry
+  // risk" — exactly what the veto is meant to catch.
+  const vetoEnabled = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
+  const shouldRejectByComposite = gateEnabled && composite != null && composite < rejectThr;
+  const shouldRejectByVeto      = vetoEnabled && result.lateFireVeto === true;
+  const shouldReject = shouldRejectByComposite || shouldRejectByVeto;
+  const rejectCause = shouldRejectByVeto ? 'late_fire_veto'
+                    : shouldRejectByComposite ? `composite ${composite} < ${rejectThr}`
+                    : null;
 
   // Journal the score (success path)
   try {
     jAlert('INFO', 'VISION_SCORE', {
       instrument, direction, engine, price,
       composite, multiplier: result.multiplier, tier: result.tier,
+      lateFireVeto: result.lateFireVeto,
       dims: {
         trend_alignment:   result.trend_alignment,
         momentum:          result.momentum,
@@ -1158,6 +1175,7 @@ async function _evaluateVisionGate(consensus) {
       costEstimateUsd: result.costEstimateUsd,
       rejectThreshold: rejectThr,
       action: shouldReject ? 'reject' : 'pass',
+      rejectCause,
       etTime: etTimeString(),
     });
   } catch {}
@@ -1195,10 +1213,10 @@ async function _evaluateVisionGate(consensus) {
   }
 
   if (shouldReject) {
-    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (threshold ${rejectThr}, ${totalLatencyMs}ms, $${result.costEstimateUsd})`);
-    return { action: 'reject', reason: 'low_score', score: result, rejectThreshold: rejectThr, totalLatencyMs };
+    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  cause=${rejectCause}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    return { action: 'reject', reason: shouldRejectByVeto ? 'late_fire_veto' : 'low_score', score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
   }
-  console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+  console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
   return { action: 'pass', score: result, totalLatencyMs };
 }
 
@@ -1719,7 +1737,8 @@ server.listen(PORT, () => {
     const _vModel = process.env.VISION_MODEL || 'claude-haiku-4-5-20251001';
     const _vFO    = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
     if (_vOn) {
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr})` : 'LOG-ONLY (no reject)';
+      const _veto = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''})` : 'LOG-ONLY (no reject)';
       console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
