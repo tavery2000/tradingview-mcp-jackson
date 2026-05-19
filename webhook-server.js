@@ -174,7 +174,12 @@ async function handlePineAlert(req, res) {
 
   // 2026-05-18: Pine now emits `timeframe` (e.g. "5", "1", "15") so we can
   // gate by TF. Older Pine versions without the field log as "—".
-  const timeframe = body.timeframe == null ? '—' : String(body.timeframe);
+  // 2026-05-19: Pine `payloadJSON` switched to emitting `tf` (minutes int) —
+  // prefer that, fall back to legacy `timeframe` field for back-compat with
+  // any TV alerts still using the older Pine version.
+  const timeframe = body.tf != null ? String(body.tf)
+                  : body.timeframe != null ? String(body.timeframe)
+                  : '—';
   console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | tf ${timeframe} | ${etTimeString()} ET`);
 
   // Journal every inbound Pine alert at receipt — BEFORE any gate or
@@ -230,6 +235,46 @@ async function handlePineAlert(req, res) {
     // body.high and body.low already present from Pine's alertcondition template
     console.log(`  ⚡ FADE_PROMOTED ${instrument} ${direction} @ ${price} — news age=${body.fadeEventAgeS}s "${newsEvent.headline.slice(0,80)}"`);
     try { jAlert('INFO', 'FADE_PROMOTED', { instrument, direction, price, newsEventId, headline: body.fadeHeadline, eventAgeS: body.fadeEventAgeS }); } catch {}
+  }
+
+  // 2026-05-19 — Multi-TF divergence detection (Commit B).
+  // Always records this alert in the multi-TF state map BEFORE any gate
+  // that might short-circuit return — divergence detection needs to see
+  // every alert across both timeframes. Logging-only, no gate.
+  const _tfDiv = _checkTfDivergence(instrument, direction, timeframe);
+  if (_tfDiv) {
+    try {
+      jAlert('INFO', 'TF_' + _tfDiv.kind, {
+        instrument, direction, tf: timeframe,
+        otherTf: _tfDiv.otherTf, otherDirection: _tfDiv.otherDirection,
+        ageMs: _tfDiv.ageMs, engine, confidence, etTime: etTimeString(),
+        note: _tfDiv.kind === 'DIVERGENCE'
+          ? 'Multi-TF disagreement — signals on different TFs oppose each other within 5min window.'
+          : 'Multi-TF agreement — both timeframes show same direction.',
+      });
+      if (_tfDiv.kind === 'DIVERGENCE') {
+        console.log(`  ⚠ TF_DIVERGENCE  ${instrument} ${direction}@${timeframe}m  vs  ${_tfDiv.otherDirection}@${_tfDiv.otherTf}m  (${Math.round(_tfDiv.ageMs/1000)}s ago)`);
+      }
+    } catch {}
+  }
+
+  // 2026-05-19 — Chop-mode bias-flip suppression (Item #10).
+  // Pairs with the 3M-primary deploy as the safety net for whipsaw tape.
+  // Reads monitor.js TREND-engine SIGNAL history for this instrument;
+  // if direction flipped >N times in 15min, suppress until 10min of
+  // stable bias. Validated this morning's 10:32-10:37 SPY whipsaw
+  // episode would have triggered (3 flips inside 5 min).
+  const _chop = _checkChopMode(instrument);
+  if (_chop.chop) {
+    jGateBlock(engine, instrument, direction, 'CHOP_MODE_ACTIVE', {
+      flips: _chop.flips, signalsInWindow: _chop.signalsInWindow,
+      flipsWindowMs: _chop.flipsWindowMs, stableHoldMs: _chop.stableHoldMs,
+      sinceLastFlipMs: _chop.sinceLastFlipMs, lastFlipAt: _chop.lastFlipAt,
+      etTime: etTimeString(),
+      note: `Bias whipsawed ${_chop.flips} times in ${Math.round(_chop.flipsWindowMs/60000)} min; require ${Math.round(_chop.stableHoldMs/60000)} min of stable bias before re-enabling alerts.`,
+    });
+    console.log(`  🛑 CHOP_MODE_ACTIVE  ${instrument}  flips=${_chop.flips}  sinceLastFlip=${Math.round(_chop.sinceLastFlipMs/1000)}s`);
+    return send(res, 200, { ok: false, reason: 'CHOP_MODE_ACTIVE', flips: _chop.flips, sinceLastFlipMs: _chop.sinceLastFlipMs });
   }
 
   // 2026-05-19 — Stretched-from-extreme gate (interim until Vision live).
@@ -729,6 +774,129 @@ const _stackDedupMap = new Map();   // key → { firstEngine, ts }
 function _stackedDedupKey(instrument, direction, nowMs) {
   const bar5m = Math.floor(nowMs / _STACK_DEDUP_BUCKET_MS) * _STACK_DEDUP_BUCKET_MS;
   return `${instrument}|${direction}|${bar5m}`;
+}
+
+// ─── Multi-TF divergence detection (2026-05-19, Commit B) ──────────────────
+// Operator deploys 3M primary + 5M context per Tuesday afternoon spec.
+// When alerts arrive on BOTH timeframes for the same instrument within a
+// short window, check whether they AGREE or DISAGREE. We don't block on
+// divergence here — just journal it so operator can correlate divergence
+// frequency with downstream outcomes. If validation says divergence
+// predicts losers, a future deploy can turn TF_DIVERGENCE into a gate.
+//
+// State: per-(instrument, tf) → { direction, ts }. Lookup the OTHER tf's
+// recent direction on each inbound; classify.
+const _recentTfAlerts = new Map();   // key=`${inst}|${tf}` → {direction, ts}
+const _TF_DIVERGENCE_WINDOW_MS = 5 * 60 * 1000;  // 5 min
+
+function _checkTfDivergence(instrument, direction, tf) {
+  if (!tf || tf === '—') return null;
+  const now = Date.now();
+  const acceptedTfs = (process.env.ACCEPTED_TIMEFRAMES || '3,5')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  // Only meaningful when ≥2 TFs are accepted
+  if (acceptedTfs.length < 2) return null;
+
+  // Record this alert
+  _recentTfAlerts.set(`${instrument}|${tf}`, { direction, ts: now });
+
+  // Check every OTHER accepted TF for a recent alert
+  for (const otherTf of acceptedTfs) {
+    if (otherTf === tf) continue;
+    const other = _recentTfAlerts.get(`${instrument}|${otherTf}`);
+    if (!other) continue;
+    if (now - other.ts > _TF_DIVERGENCE_WINDOW_MS) continue;
+    const ageMs = now - other.ts;
+    if (other.direction === direction) {
+      return { kind: 'CONFLUENCE', otherTf, otherDirection: other.direction, ageMs };
+    } else {
+      return { kind: 'DIVERGENCE', otherTf, otherDirection: other.direction, ageMs };
+    }
+  }
+  return null;
+}
+
+// ─── Chop-mode bias-flip suppression (2026-05-19, Item #10) ────────────────
+// Pairs with the 3M-primary deploy as the safety net for whipsaw tape.
+// monitor.js emits SIGNAL events with engine='TREND' and a direction read.
+// When TREND direction flips >N times in M minutes for a given instrument,
+// mark that instrument as CHOP_MODE and suppress engine alerts until the
+// direction holds steady for K minutes.
+//
+// IMPORTANT: only count flips on the TREND engine subtype. monitor.js
+// emits multiple SIGNAL records per tick (TREND/STRUCTURE/MAG6/RATIO/FADE)
+// with independent direction reads. Counting all of them produces 8-12
+// "flips" per minute even when actual bias is steady (validated this
+// morning during 10:32-10:37 SPY whipsaw episode).
+function _checkChopMode(instrument) {
+  if ((process.env.CHOP_MODE_ENABLED || 'true').toLowerCase() === 'false') {
+    return { chop: false };
+  }
+  const flipsWindowMs = parseInt(process.env.CHOP_FLIPS_WINDOW_MS || '900000', 10);  // 15 min
+  const stableHoldMs  = parseInt(process.env.CHOP_STABLE_HOLD_MS  || '600000', 10);  // 10 min
+  const flipThreshold = parseInt(process.env.CHOP_FLIP_THRESHOLD  || '2', 10);
+  const trendEngine   = process.env.CHOP_TREND_ENGINE || 'TREND';
+
+  const file = join(__dirname, 'logs', 'journal', `journal-${etDateString()}.jsonl`);
+  if (!existsSync(file)) return { chop: false };
+  const cutoff = Date.now() - flipsWindowMs;
+
+  let trendDirs = [];
+  try {
+    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    // Walk newest→oldest, stop early once we're past the window
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let j;
+      try { j = JSON.parse(lines[i]); } catch { continue; }
+      if (!j.ts || j.ts < cutoff) break;
+      if (j.type !== 'SIGNAL') continue;
+      if (j.engine !== trendEngine) continue;
+      if (j.instrument !== instrument) continue;
+      if (!j.direction) continue;
+      trendDirs.push({ ts: j.ts, dir: j.direction });
+    }
+  } catch { return { chop: false }; }
+
+  if (trendDirs.length < 2) return { chop: false };
+  // Reverse to chronological (we walked backward)
+  trendDirs.reverse();
+
+  // Count direction CHANGES (flips, not raw signal count)
+  let flips = 0;
+  let lastDir = trendDirs[0].dir;
+  let lastFlipTs = trendDirs[0].ts;
+  for (let i = 1; i < trendDirs.length; i++) {
+    if (trendDirs[i].dir !== lastDir) {
+      flips++;
+      lastFlipTs = trendDirs[i].ts;
+      lastDir = trendDirs[i].dir;
+    }
+  }
+
+  if (flips > flipThreshold) {
+    // Check stability: only suppress if last flip was recent (less than stableHold ago).
+    // Once we have stableHoldMs of quiet, bias is stable again → release suppression.
+    const sinceLastFlip = Date.now() - lastFlipTs;
+    if (sinceLastFlip < stableHoldMs) {
+      return {
+        chop: true, flips,
+        flipsWindowMs, stableHoldMs,
+        sinceLastFlipMs: sinceLastFlip,
+        firstSampleAt: trendDirs[0].ts,
+        lastFlipAt:    lastFlipTs,
+        signalsInWindow: trendDirs.length,
+      };
+    }
+  }
+  return { chop: false, flips, signalsInWindow: trendDirs.length };
+}
+
+function etDateString() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}-${parts.find(p=>p.type==='day').value}`;
 }
 
 // ─── Stretched-from-extreme gate (2026-05-19, interim until Vision live) ───
@@ -1308,6 +1476,22 @@ server.listen(PORT, () => {
     const _sgPd   = (process.env.STRETCHED_PD_ENABLED   || 'true').toLowerCase() === 'true';
     const _mult   = parseFloat(process.env.STRETCHED_VWAP_ATR_MULT || '2.0');
     console.log(`  [WEBHOOK] stretched-from-extreme gate: ${_sgOn ? `ENABLED (VWAP=${_sgVwap}@${_mult}×ATR, PD=${_sgPd}) — blocks late-fire pivots at PDL/PDH/VWAP extremes (SPY/QQQ/IWM only)` : 'disabled'}`);
+  }
+  {
+    const _acceptedTfs = (process.env.ACCEPTED_TIMEFRAMES || '3,5').split(',').map(s=>s.trim()).filter(Boolean);
+    if (_acceptedTfs.length >= 2) {
+      console.log(`  [WEBHOOK] multi-TF Commit B: ENABLED — primary=${_acceptedTfs[0]}m, context=${_acceptedTfs.slice(1).join('+')}m; TF_DIVERGENCE/CONFLUENCE logged (5min window)`);
+    } else {
+      console.log(`  [WEBHOOK] multi-TF: single-TF mode (ACCEPTED_TIMEFRAMES=${_acceptedTfs[0] || '5'})`);
+    }
+  }
+  {
+    const _chopOn = (process.env.CHOP_MODE_ENABLED || 'true').toLowerCase() === 'true';
+    const _flipWin = parseInt(process.env.CHOP_FLIPS_WINDOW_MS || '900000', 10);
+    const _stable  = parseInt(process.env.CHOP_STABLE_HOLD_MS  || '600000', 10);
+    const _thresh  = parseInt(process.env.CHOP_FLIP_THRESHOLD  || '2', 10);
+    const _eng     = process.env.CHOP_TREND_ENGINE || 'TREND';
+    console.log(`  [WEBHOOK] chop-mode suppression: ${_chopOn ? `ENABLED (>${_thresh} ${_eng}-flips in ${Math.round(_flipWin/60000)}min → suppress until ${Math.round(_stable/60000)}min stable)` : 'disabled'}`);
   }
   {
     const _vOn = (process.env.VISION_ENABLED || 'true').toLowerCase() === 'true';

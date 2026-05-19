@@ -867,9 +867,14 @@ payloadJSON(direction, engine, confidence) =>
     invalLevel = direction == "CALLS" ? prevSwingLow : prevSwingHigh
     structType = direction == "CALLS" ? "HL" : "LH"
     invalStr   = na(invalLevel) ? "null" : str.tostring(invalLevel, "#.####")
+    // 2026-05-19 — include chart timeframe so webhook can route by TF
+    // (3M primary + 5M context per operator spec). Pine sends the bar
+    // period in seconds; webhook normalizes to minutes for matching.
+    tfStr      = str.tostring(timeframe.in_seconds() / 60, "#")
     '{"instrument":"' + instStr + '","direction":"' + direction +
       '","engine":"' + engine + '","confidence":"' + confidence +
       '","price":' + str.tostring(close, "#.##") +
+      ',"tf":"' + tfStr + '"' +
       ',"invalidation_level":' + invalStr +
       ',"structure_type":"' + structType + '"' +
       ',"alertName":"' + engine + ' ' + direction + '"}'
