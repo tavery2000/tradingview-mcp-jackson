@@ -669,6 +669,28 @@ async function handlePineAlert(req, res) {
     jGateBlock(engine, instrument, direction, 'WEBULL_INTEGRATION_HALT', { etTime: etTimeString() });
     return send(res, 200, { ok: false, reason: 'WEBULL_INTEGRATION_HALT' });
   }
+
+  // 2026-05-19 — Vision Phase 5 sync gate. Last gate before dispatch.
+  // Awaits screenshot + Haiku 4.5 score (~2s). REJECT below threshold
+  // (default 3.5). LIVE engine bypasses (intra-bar). API error fails open
+  // by default (don't block trade on infra hiccup).
+  const _vis = await _evaluateVisionGate(consensus);
+  if (_vis.action === 'reject') {
+    jGateBlock(engine, instrument, direction, 'VISION_REJECT_LOW_SCORE', {
+      composite: _vis.score?.composite,
+      tier: _vis.score?.tier,
+      rejectThreshold: _vis.rejectThreshold,
+      reasoning: _vis.score?.reasoning,
+      latencyMs: _vis.totalLatencyMs,
+      etTime: etTimeString(),
+      note: `Composite ${_vis.score?.composite} < ${_vis.rejectThreshold} — entry blocked. Reasoning: ${_vis.score?.reasoning || '(none)'}`,
+    });
+    return send(res, 200, {
+      ok: false, reason: 'VISION_REJECT_LOW_SCORE',
+      composite: _vis.score?.composite, tier: _vis.score?.tier,
+      rejectThreshold: _vis.rejectThreshold,
+    });
+  }
   // WEBULL_MCP_DISABLED check intentionally removed from the dispatch chain
   // — MCP is parked, Path 2 doesn't depend on it. Re-add when MCP becomes
   // primary again at the 6/1 production flip.
@@ -688,8 +710,6 @@ async function handlePineAlert(req, res) {
       return send(res, 200, { ok: false, reason: 'FUT_VETOED', detail: futTrade.reason });
     }
     console.log(`  [PATH2] futures entry ${instrument} ${direction} ${engine}  tier=${futTrade?.tier}  ${futTrade?.contracts}c`);
-    // 2026-05-19 — Vision DRY-RUN score (fire-and-forget, doesn't block response)
-    _kickOffVisionScoring(consensus, { dispatch: 'futures-path2', requestId: futReqId, tier: futTrade?.tier, contracts: futTrade?.contracts });
     return send(res, 200, { ok: true, dispatch: 'futures-path2', requestId: futReqId, tier: futTrade?.tier, contracts: futTrade?.contracts });
   }
 
@@ -722,8 +742,6 @@ async function handlePineAlert(req, res) {
   }
 
   console.log(`  [PINE-FILL] ${instrument} ${direction} @ $${optEst} — reqId ${reqId}`);
-  // 2026-05-19 — Vision DRY-RUN score (fire-and-forget, doesn't block response)
-  _kickOffVisionScoring(consensus, { dispatch: 'equity-paper', reqId, fill });
   return send(res, 200, { ok: true, reqId, fill });
 }
 
@@ -996,16 +1014,32 @@ function _checkStretchedFromExtreme(instrument, direction, price) {
   return { block: false };
 }
 
-// ─── Vision Phase 5 — fire-and-forget DRY-RUN scoring (2026-05-19) ──────────
-// After every successful entry dispatch, capture a screenshot of the
-// corresponding TV chart and ask Claude Haiku 4.5 to score it on a
-// 5-dimension rubric. The score is journaled + appended to a cache file
-// but does NOT affect sizing (DRY-RUN). Operator validates scores-vs-
-// outcomes across a few days, then enables VISION_SIZING_ENABLED=true.
+// ─── Vision Phase 5 — sync gate (2026-05-19, post-validation refactor) ─────
+// 2026-05-19 13:48-13:51 validation: 3 SPY PUTS trades scored composite
+// 2.8-3.4 by Haiku 4.5; all 3 lost (-$13.87, -$31.34, -$26.71). Reasoning
+// independently identified PDL proximity, exhausted move, counter-trend
+// structure. Reject threshold 3.5 would have saved -$71.92 today.
 //
-// Async fire-and-forget: caller does not await. Errors swallowed +
-// journaled as VISION_SCORE_ERROR so a vision-side hiccup never affects
-// the trade dispatch path.
+// Architecture: SYNCHRONOUS gate. Webhook awaits screenshot + scoring
+// BEFORE dispatch. If composite < VISION_REJECT_THRESHOLD → block as
+// GATE_BLOCK reason=VISION_REJECT_LOW_SCORE. Otherwise pass through to
+// dispatch with the score journaled.
+//
+// Latency: ~2s per entry (screenshot ~200ms + Haiku 1.8s). Acceptable for
+// bar-close engines (BUY/SELL/HTF/ZONE/HL/LH/RBO/FADE). LIVE engine
+// bypasses entirely — intra-bar trigger, can't afford the lag, and the
+// chart at LIVE trigger time isn't bar-confirmed anyway (vision works
+// best on completed bars).
+//
+// Env knobs (defaults baked in):
+//   VISION_ENABLED                  true     master toggle
+//   VISION_GATE_ENABLED             true     enables hard REJECT (set false
+//                                            to log-only without blocking)
+//   VISION_REJECT_THRESHOLD         3.5      composite below this → REJECT
+//   VISION_BYPASS_ENGINES           LIVE     comma-sep engines to skip
+//   VISION_MODEL                    claude-haiku-4-5-20251001
+//   VISION_FAIL_OPEN                true     vision API error → pass through
+//                                            (don't block trade on infra hiccup)
 const _VISION_SCORES_FILE = join(__dirname, 'data', 'vision-scores.json');
 
 function _readLevelsForVision(instrument) {
@@ -1018,96 +1052,120 @@ function _readLevelsForVision(instrument) {
   } catch { return null; }
 }
 
-function _kickOffVisionScoring(consensus, dispatchMeta) {
-  // Default true — env opt-out by setting VISION_ENABLED=false
-  if ((process.env.VISION_ENABLED || 'true').toLowerCase() === 'false') return;
+async function _evaluateVisionGate(consensus) {
+  // Returns {action, score?, reason?}
+  //   action = 'pass'       — vision disabled / bypass engine / passed gate
+  //   action = 'reject'     — composite below REJECT_THRESHOLD
+  //   action = 'fail_open'  — vision errored, fail-open enabled, pass with no score
 
-  const { instrument, direction, engine, price } = consensus;
-  // Fire async, don't return the promise — caller continues immediately.
-  (async () => {
-    const t0 = Date.now();
-    try {
-      const [{ captureChartImage }, { scoreChart }] = await Promise.all([
-        import('./chartScreenshot.js'),
-        import('./visionScorer.js'),
-      ]);
-      const tag = `entry-${(engine || 'X').toUpperCase()}-${(direction || 'X').toUpperCase()}`;
-      const shot = await captureChartImage(instrument, { tag, persist: true });
-      const levels = _readLevelsForVision(instrument);
-      const result = await scoreChart(
-        { instrument, direction, engine, price, levels: levels || undefined },
-        shot.buffer
-      );
+  if ((process.env.VISION_ENABLED || 'true').toLowerCase() === 'false') {
+    return { action: 'pass', reason: 'disabled' };
+  }
 
-      // Journal the score
-      try {
-        jAlert('INFO', 'VISION_SCORE', {
-          instrument, direction, engine, price,
-          dispatch: dispatchMeta?.dispatch,
-          requestId: dispatchMeta?.requestId || dispatchMeta?.reqId,
-          composite: result.composite,
-          multiplier: result.multiplier,
-          tier: result.tier,
-          dims: {
-            trend_alignment:   result.trend_alignment,
-            momentum:          result.momentum,
-            sr_headroom:       result.sr_headroom,
-            volume_confirm:    result.volume_confirm,
-            exhaustion_safety: result.exhaustion_safety,
-          },
-          reasoning: result.reasoning,
-          screenshotPath: shot.path,
-          modelLatencyMs: result.modelLatencyMs,
-          totalLatencyMs: Date.now() - t0,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          costEstimateUsd: result.costEstimateUsd,
-          dryRun: (process.env.VISION_SIZING_ENABLED || 'false').toLowerCase() !== 'true',
-          etTime: etTimeString(),
-        });
-      } catch {}
+  // Read fields off consensus (note: consensus uses `signal` for direction,
+  // not `direction` — older fire-and-forget code had a bug here).
+  const instrument = consensus.instrument;
+  const direction  = consensus.signal || consensus.direction;
+  const engine     = consensus.engine;
+  const price      = consensus.underlyingPrice || consensus.price;
 
-      // Append to vision-scores.json (small file, rewrite is fine)
-      try {
-        const dir = dirname(_VISION_SCORES_FILE);
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        let cache = { version: 1, entries: [] };
-        if (existsSync(_VISION_SCORES_FILE)) {
-          try { cache = JSON.parse(readFileSync(_VISION_SCORES_FILE, 'utf8')); } catch {}
-        }
-        cache.entries = cache.entries || [];
-        cache.entries.push({
-          ts: t0,
-          etTime: etTimeString(),
-          instrument, direction, engine, price,
-          dispatch: dispatchMeta?.dispatch,
-          composite: result.composite,
-          multiplier: result.multiplier,
-          tier: result.tier,
-          dims: {
-            trend_alignment:   result.trend_alignment,
-            momentum:          result.momentum,
-            sr_headroom:       result.sr_headroom,
-            volume_confirm:    result.volume_confirm,
-            exhaustion_safety: result.exhaustion_safety,
-          },
-          reasoning: result.reasoning,
-          screenshotPath: shot.path,
-          costEstimateUsd: result.costEstimateUsd,
-        });
-        // Cap entries at 5000 (FIFO drop) to avoid runaway growth
-        if (cache.entries.length > 5000) cache.entries = cache.entries.slice(-5000);
-        writeFileSync(_VISION_SCORES_FILE, JSON.stringify(cache, null, 2));
-      } catch (e) {
-        try { jError('WEBHOOK', 'VISION_CACHE_WRITE_ERR', { message: e.message }); } catch {}
-      }
+  // Engine bypass list — LIVE by default (intra-bar, no time for vision)
+  const bypassList = (process.env.VISION_BYPASS_ENGINES || 'LIVE')
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+  if (bypassList.includes((engine || '').toUpperCase())) {
+    return { action: 'pass', reason: `engine_bypass(${engine})` };
+  }
 
-      console.log(`  [VISION] ${instrument} ${direction} ${engine}  composite=${result.composite}  tier=${result.tier}  mult=${result.multiplier}  (${Date.now()-t0}ms, $${result.costEstimateUsd})`);
-    } catch (e) {
-      try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine }); } catch {}
-      console.error(`  [VISION] error: ${e.message}`);
+  const t0 = Date.now();
+  let shot, result;
+  try {
+    const [{ captureChartImage }, { scoreChart }] = await Promise.all([
+      import('./chartScreenshot.js'),
+      import('./visionScorer.js'),
+    ]);
+    const tag = `entry-${(engine || 'X').toUpperCase()}-${(direction || 'X').toUpperCase()}`;
+    shot = await captureChartImage(instrument, { tag, persist: true });
+    const levels = _readLevelsForVision(instrument);
+    result = await scoreChart(
+      { instrument, direction, engine, price, levels: levels || undefined },
+      shot.buffer
+    );
+  } catch (e) {
+    try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine }); } catch {}
+    console.error(`  [VISION] error: ${e.message}`);
+    const failOpen = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
+    return { action: failOpen ? 'fail_open' : 'reject', reason: 'api_error', error: e.message };
+  }
+
+  const totalLatencyMs = Date.now() - t0;
+  const composite = result.composite;
+  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '3.5');
+  const gateEnabled = (process.env.VISION_GATE_ENABLED || 'true').toLowerCase() === 'true';
+  const shouldReject = gateEnabled && composite != null && composite < rejectThr;
+
+  // Journal the score (success path)
+  try {
+    jAlert('INFO', 'VISION_SCORE', {
+      instrument, direction, engine, price,
+      composite, multiplier: result.multiplier, tier: result.tier,
+      dims: {
+        trend_alignment:   result.trend_alignment,
+        momentum:          result.momentum,
+        sr_headroom:       result.sr_headroom,
+        volume_confirm:    result.volume_confirm,
+        exhaustion_safety: result.exhaustion_safety,
+      },
+      reasoning: result.reasoning,
+      screenshotPath: shot.path,
+      modelLatencyMs: result.modelLatencyMs,
+      totalLatencyMs,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      costEstimateUsd: result.costEstimateUsd,
+      rejectThreshold: rejectThr,
+      action: shouldReject ? 'reject' : 'pass',
+      etTime: etTimeString(),
+    });
+  } catch {}
+
+  // Append to vision-scores.json cache
+  try {
+    const dir = dirname(_VISION_SCORES_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    let cache = { version: 1, entries: [] };
+    if (existsSync(_VISION_SCORES_FILE)) {
+      try { cache = JSON.parse(readFileSync(_VISION_SCORES_FILE, 'utf8')); } catch {}
     }
-  })();
+    cache.entries = cache.entries || [];
+    cache.entries.push({
+      ts: t0, etTime: etTimeString(),
+      instrument, direction, engine, price,
+      composite, multiplier: result.multiplier, tier: result.tier,
+      dims: {
+        trend_alignment:   result.trend_alignment,
+        momentum:          result.momentum,
+        sr_headroom:       result.sr_headroom,
+        volume_confirm:    result.volume_confirm,
+        exhaustion_safety: result.exhaustion_safety,
+      },
+      reasoning: result.reasoning,
+      screenshotPath: shot.path,
+      costEstimateUsd: result.costEstimateUsd,
+      rejectThreshold: rejectThr,
+      action: shouldReject ? 'reject' : 'pass',
+    });
+    if (cache.entries.length > 5000) cache.entries = cache.entries.slice(-5000);
+    writeFileSync(_VISION_SCORES_FILE, JSON.stringify(cache, null, 2));
+  } catch (e) {
+    try { jError('WEBHOOK', 'VISION_CACHE_WRITE_ERR', { message: e.message }); } catch {}
+  }
+
+  if (shouldReject) {
+    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (threshold ${rejectThr}, ${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    return { action: 'reject', reason: 'low_score', score: result, rejectThreshold: rejectThr, totalLatencyMs };
+  }
+  console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+  return { action: 'pass', score: result, totalLatencyMs };
 }
 
 // 2026-05-19 — PASSTHROUGH fix for STACKED_ENTRY_DEDUP.
@@ -1494,11 +1552,15 @@ server.listen(PORT, () => {
     console.log(`  [WEBHOOK] chop-mode suppression: ${_chopOn ? `ENABLED (>${_thresh} ${_eng}-flips in ${Math.round(_flipWin/60000)}min → suppress until ${Math.round(_stable/60000)}min stable)` : 'disabled'}`);
   }
   {
-    const _vOn = (process.env.VISION_ENABLED || 'true').toLowerCase() === 'true';
-    const _vSize = (process.env.VISION_SIZING_ENABLED || 'false').toLowerCase() === 'true';
+    const _vOn    = (process.env.VISION_ENABLED || 'true').toLowerCase() === 'true';
+    const _vGate  = (process.env.VISION_GATE_ENABLED || 'true').toLowerCase() === 'true';
+    const _vThr   = parseFloat(process.env.VISION_REJECT_THRESHOLD || '3.5');
+    const _vBypass= (process.env.VISION_BYPASS_ENGINES || 'LIVE');
     const _vModel = process.env.VISION_MODEL || 'claude-haiku-4-5-20251001';
+    const _vFO    = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
     if (_vOn) {
-      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED ${_vSize ? '+ SIZING APPLIED' : '(DRY-RUN — logs only, no sizing impact)'} — model=${_vModel}, 5-dim rubric, fire-and-forget after entry dispatch`);
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr})` : 'LOG-ONLY (no reject)';
+      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
     }
