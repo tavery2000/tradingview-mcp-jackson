@@ -1111,20 +1111,37 @@ async function _evaluateVisionGate(consensus) {
 
   const t0 = Date.now();
   let shot, result;
+  // 2026-05-19 18:04 ET — hard timeout on Vision pipeline. Pre-timeout,
+  // a single hung CDP probe (chartScreenshot tab discovery) would block
+  // the trade indefinitely with no error log. Two MES1!/ES1! CALLS BUY
+  // alerts at 18:02:59-03:00 sat in limbo for 90+ sec post-CME-resume.
+  // Now bounded — anything beyond VISION_TIMEOUT_MS throws and fails open.
+  const visionTimeoutMs = parseInt(process.env.VISION_TIMEOUT_MS || '8000', 10);
   try {
-    const [{ captureChartImage }, { scoreChart }] = await Promise.all([
-      import('./chartScreenshot.js'),
-      import('./visionScorer.js'),
-    ]);
-    const tag = `entry-${(engine || 'X').toUpperCase()}-${(direction || 'X').toUpperCase()}`;
-    shot = await captureChartImage(instrument, { tag, persist: true });
-    const levels = _readLevelsForVision(instrument);
-    result = await scoreChart(
-      { instrument, direction, engine, price, levels: levels || undefined },
-      shot.buffer
-    );
+    const visionPipeline = (async () => {
+      const [{ captureChartImage }, { scoreChart }] = await Promise.all([
+        import('./chartScreenshot.js'),
+        import('./visionScorer.js'),
+      ]);
+      const tag = `entry-${(engine || 'X').toUpperCase()}-${(direction || 'X').toUpperCase()}`;
+      shot = await captureChartImage(instrument, { tag, persist: true });
+      const levels = _readLevelsForVision(instrument);
+      result = await scoreChart(
+        { instrument, direction, engine, price, levels: levels || undefined },
+        shot.buffer
+      );
+    })();
+    let timeoutHandle;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error(`VISION_TIMEOUT (>${visionTimeoutMs}ms)`)), visionTimeoutMs);
+    });
+    try {
+      await Promise.race([visionPipeline, timeoutPromise]);
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
   } catch (e) {
-    try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine }); } catch {}
+    try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine, latencyMs: Date.now() - t0 }); } catch {}
     console.error(`  [VISION] error: ${e.message}`);
     const failOpen = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
     return { action: failOpen ? 'fail_open' : 'reject', reason: 'api_error', error: e.message };
