@@ -646,9 +646,11 @@ if enableRBO and barstate.isconfirmed
     rboEffVolMult   = isRBORTH ? rboVolMult : rboVolMultOff
     rboVol          = not na(avgVol20) and volume >= avgVol20 * rboEffVolMult
     // ATR-distance gate only applies OFF-RTH (overnight). Set rboAtrDistMult=0 to disable.
-    rboAtrOk        = isRBORTH or rboAtrDistMult <= 0 or na(atr14) or
-                       (close > rollingHigh ? (close - rollingHigh) >= atr14 * rboAtrDistMult :
-                        close < rollingLow  ? (rollingLow - close) >= atr14 * rboAtrDistMult : true)
+    // Broken into separate vars to satisfy Pine's no-line-continuation rule.
+    rboAtrSkip      = isRBORTH or rboAtrDistMult <= 0 or na(atr14)
+    rboBullAtrPass  = close > rollingHigh and (close - rollingHigh) >= atr14 * rboAtrDistMult
+    rboBearAtrPass  = close < rollingLow  and (rollingLow - close)  >= atr14 * rboAtrDistMult
+    rboAtrOk        = rboAtrSkip or rboBullAtrPass or rboBearAtrPass
 
     if close > rollingHigh and close[1] <= rollingHigh[1] and rboVol and rboAtrOk
         rollingBullBO := true
