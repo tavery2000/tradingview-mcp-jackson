@@ -1049,6 +1049,53 @@ function _checkStretchedFromExtreme(instrument, direction, price) {
   return { block: false };
 }
 
+// ─── Session-band helper (2026-05-19 EOD) ────────────────────────────────
+// Operator's session-volume map (saved in memory project_overnight_session_map).
+// Returns one of: RTH | PRE_MARKET | ASIA_OPEN | ASIA_MID | DEAD_ZONE
+//                 | EUROPE_OPEN | FLANKS_PM
+// Used by Vision threshold tuning (DEAD_ZONE stricter, ASIA_OPEN current),
+// and available for future stale-detect / RBO band tuning.
+function _sessionBand(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  if (m.weekday === 'Sat' || m.weekday === 'Sun') return 'WEEKEND';
+  const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
+  // ET minute-of-day bands
+  if (totalMin >= 9*60+30 && totalMin < 16*60)   return 'RTH';
+  if (totalMin >= 7*60    && totalMin < 9*60+30) return 'PRE_MARKET';
+  if (totalMin >= 16*60   && totalMin < 18*60)   return 'FLANKS_PM';
+  if (totalMin >= 18*60   && totalMin < 21*60+30) return 'ASIA_OPEN';   // 18:00-21:30
+  if (totalMin >= 21*60+30 && totalMin < 23*60)  return 'ASIA_MID';     // 21:30-23:00
+  if (totalMin >= 23*60   || totalMin < 2*60)    return 'DEAD_ZONE';    // 23:00-02:00
+  if (totalMin >= 2*60    && totalMin < 7*60)    return 'EUROPE_OPEN';  // 02:00-07:00
+  return 'UNKNOWN';
+}
+
+// ─── Vision sibling-consistency cache (2026-05-19 EOD) ────────────────────
+// Operator flagged: 19:12 ET NQ1! veto'd correctly but MES1! sibling
+// silently passed with no Vision record. Inconsistent verdicts on
+// correlated instruments.
+//
+// Cache: family|direction|barBucket → { verdict, ts, primary }
+//   family: 'ES_FAM' for ES1!/MES1!  |  'NQ_FAM' for NQ1!/MNQ1!
+//   verdict: full result object (composite, veto, zone, action, etc)
+//   ts: when scored
+//   primary: which instrument actually called Vision
+// TTL: 60s (within same bar typically)
+const _visionFamilyCache = new Map();
+const _VISION_CACHE_TTL_MS = 60 * 1000;
+function _visionFamilyKey(instrument, direction) {
+  const inst = (instrument || '').toUpperCase();
+  let fam = inst;
+  if (inst === 'ES1!' || inst === 'MES1!') fam = 'ES_FAM';
+  else if (inst === 'NQ1!' || inst === 'MNQ1!') fam = 'NQ_FAM';
+  const barBucket = Math.floor(Date.now() / 60000);  // per-minute bucket
+  return `${fam}|${(direction||'').toUpperCase()}|${barBucket}`;
+}
+
 // ─── Vision Phase 5 — sync gate (2026-05-19, post-validation refactor) ─────
 // 2026-05-19 13:48-13:51 validation: 3 SPY PUTS trades scored composite
 // 2.8-3.4 by Haiku 4.5; all 3 lost (-$13.87, -$31.34, -$26.71). Reasoning
@@ -1093,10 +1140,6 @@ async function _evaluateVisionGate(consensus) {
   //   action = 'reject'     — composite below REJECT_THRESHOLD
   //   action = 'fail_open'  — vision errored, fail-open enabled, pass with no score
 
-  if ((process.env.VISION_ENABLED || 'true').toLowerCase() === 'false') {
-    return { action: 'pass', reason: 'disabled' };
-  }
-
   // Read fields off consensus (note: consensus uses `signal` for direction,
   // not `direction` — older fire-and-forget code had a bug here).
   const instrument = consensus.instrument;
@@ -1104,11 +1147,57 @@ async function _evaluateVisionGate(consensus) {
   const engine     = consensus.engine;
   const price      = consensus.underlyingPrice || consensus.price;
 
+  // 2026-05-19 EOD — DEFENSIVE: always journal the verdict, even on early
+  // returns (disabled, bypass, cache-hit). Catches the 19:12 MES1! silent-
+  // bypass anomaly where Vision had no journal record despite trade entering.
+  const _journalVerdict = (action, reason, extra = {}) => {
+    try {
+      jAlert('INFO', 'VISION_VERDICT_FOR_ENTRY', {
+        instrument, direction, engine, price,
+        action, reason,
+        sessionBand: _sessionBand(),
+        ...extra,
+        etTime: etTimeString(),
+      });
+    } catch {}
+  };
+
+  if ((process.env.VISION_ENABLED || 'true').toLowerCase() === 'false') {
+    _journalVerdict('pass', 'disabled');
+    return { action: 'pass', reason: 'disabled' };
+  }
+
   // Engine bypass list — LIVE by default (intra-bar, no time for vision)
   const bypassList = (process.env.VISION_BYPASS_ENGINES || 'LIVE')
     .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
   if (bypassList.includes((engine || '').toUpperCase())) {
+    _journalVerdict('pass', `engine_bypass(${engine})`);
     return { action: 'pass', reason: `engine_bypass(${engine})` };
+  }
+
+  // 2026-05-19 EOD — Sibling-consistency cache lookup. If a sibling (ES1!↔
+  // MES1!, NQ1!↔MNQ1!) already scored in the last 60s for same direction,
+  // reuse that verdict. Eliminates the 19:12 MES1! gap where NQ1! veto'd
+  // but MES1! silently passed. Also halves API costs on confluence bars.
+  const siblingCacheEnabled = (process.env.VISION_SIBLING_CACHE_ENABLED || 'true').toLowerCase() === 'true';
+  if (siblingCacheEnabled) {
+    const famKey = _visionFamilyKey(instrument, direction);
+    const cached = _visionFamilyCache.get(famKey);
+    if (cached && (Date.now() - cached.ts) < _VISION_CACHE_TTL_MS) {
+      // GC any stale entries while we're here
+      for (const [k, v] of _visionFamilyCache.entries()) {
+        if (Date.now() - v.ts > _VISION_CACHE_TTL_MS * 2) _visionFamilyCache.delete(k);
+      }
+      _journalVerdict(cached.verdict.action, `sibling_cache_hit (primary=${cached.primary})`, {
+        composite: cached.verdict.score?.composite,
+        lateFireVeto: cached.verdict.score?.lateFireVeto,
+        zoneSetupQuality: cached.verdict.score?.zoneSetupQuality,
+        rejectCause: cached.verdict.rejectCause,
+        cacheAgeMs: Date.now() - cached.ts,
+      });
+      console.log(`  ♻ VISION_SIBLING_CACHE_HIT  ${instrument} ${direction} ${engine}  → ${cached.verdict.action} (from ${cached.primary})`);
+      return cached.verdict;
+    }
   }
 
   const t0 = Date.now();
@@ -1146,6 +1235,7 @@ async function _evaluateVisionGate(consensus) {
     try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine, latencyMs: Date.now() - t0 }); } catch {}
     console.error(`  [VISION] error: ${e.message}`);
     const failOpen = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
+    _journalVerdict(failOpen ? 'fail_open' : 'reject', 'api_error', { error: e.message, latencyMs: Date.now() - t0 });
     return { action: failOpen ? 'fail_open' : 'reject', reason: 'api_error', error: e.message };
   }
 
@@ -1156,7 +1246,14 @@ async function _evaluateVisionGate(consensus) {
   // The 3.8 reasoning explicitly called "limited downside room, stretched
   // conditions" but composite math is too forgiving. Threshold lifted to
   // 4.0 (top of WEAK band; anything below NEUTRAL is rejected).
-  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '4.0');
+  //
+  // 2026-05-19 EOD — DEAD_ZONE band override. 23:00-02:00 ET is Tokyo
+  // lunch + pre-London gap — thinnest tape, most setups bad. Tighten
+  // threshold to 5.0 (mid-NEUTRAL). Other bands keep 4.0 default.
+  const _band = _sessionBand();
+  const _deadZoneThr = parseFloat(process.env.VISION_REJECT_THRESHOLD_DEAD_ZONE || '5.0');
+  const _defaultThr  = parseFloat(process.env.VISION_REJECT_THRESHOLD || '4.0');
+  const rejectThr = _band === 'DEAD_ZONE' ? _deadZoneThr : _defaultThr;
   const gateEnabled = (process.env.VISION_GATE_ENABLED || 'true').toLowerCase() === 'true';
 
   // 2026-05-19 — late_fire_veto: binary model override. Catches the
@@ -1285,19 +1382,32 @@ async function _evaluateVisionGate(consensus) {
     try { jError('WEBHOOK', 'VISION_CACHE_WRITE_ERR', { message: e.message }); } catch {}
   }
 
+  let verdict;
   if (shouldReject) {
-    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  cause=${rejectCause}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    console.log(`  🛑 VISION_REJECT  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  cause=${rejectCause}  band=${_band}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
     const reason = shouldRejectByZone ? 'zone_invalid_setup'
                  : shouldRejectByVeto ? 'late_fire_veto'
                  : 'low_score';
-    return { action: 'reject', reason, score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
-  }
-  if (offRthBypass) {
-    console.log(`  ⏰ VISION_OFFRTH_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (would-reject: ${rejectCause}, but off-RTH bypass — data-collection mode)  (${totalLatencyMs}ms)`);
+    verdict = { action: 'reject', reason, score: result, rejectThreshold: rejectThr, rejectCause, totalLatencyMs };
   } else {
-    console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    if (offRthBypass) {
+      console.log(`  ⏰ VISION_OFFRTH_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  (would-reject: ${rejectCause}, but off-RTH bypass — data-collection mode)  band=${_band}  (${totalLatencyMs}ms)`);
+    } else {
+      console.log(`  ✓ VISION_PASS  ${instrument} ${direction} ${engine}  composite=${composite}  tier=${result.tier}  veto=${result.lateFireVeto}  zoneQ=${result.zoneSetupQuality}  band=${_band}  (${totalLatencyMs}ms, $${result.costEstimateUsd})`);
+    }
+    verdict = { action: 'pass', score: result, totalLatencyMs, offRthBypass };
   }
-  return { action: 'pass', score: result, totalLatencyMs, offRthBypass };
+
+  // Cache the verdict for siblings + always journal it.
+  if ((process.env.VISION_SIBLING_CACHE_ENABLED || 'true').toLowerCase() === 'true') {
+    const famKey = _visionFamilyKey(instrument, direction);
+    _visionFamilyCache.set(famKey, { verdict, ts: Date.now(), primary: instrument });
+  }
+  _journalVerdict(verdict.action, verdict.reason || (offRthBypass ? 'off_rth_bypass' : 'scored'), {
+    composite, lateFireVeto: result.lateFireVeto, zoneSetupQuality: result.zoneSetupQuality,
+    rejectThreshold: rejectThr, rejectCause, sessionBand: _band, totalLatencyMs,
+  });
+  return verdict;
 }
 
 // 2026-05-19 — PASSTHROUGH fix for STACKED_ENTRY_DEDUP.
@@ -1822,10 +1932,14 @@ server.listen(PORT, () => {
       const _respVeto = (process.env.VISION_OFFRTH_RESPECT_VETO || 'true').toLowerCase() === 'true';
       const _zoneRej = (process.env.VISION_ZONE_REJECT_ENABLED || 'true').toLowerCase() === 'true';
       const _zoneThr = parseFloat(process.env.VISION_ZONE_REJECT_THRESHOLD || '4');
+      const _sibCache = (process.env.VISION_SIBLING_CACHE_ENABLED || 'true').toLowerCase() === 'true';
+      const _dzThr   = parseFloat(process.env.VISION_REJECT_THRESHOLD_DEAD_ZONE || '5.0');
       const offRthMode = _offRth ? `; OFF-RTH bypass composite${(_respVeto && _veto) || _zoneRej ? ' (veto+zone still reject)' : ' + veto'}` : '';
       const zoneMode = _zoneRej ? ` OR (ZONE engine AND zone_setup_quality < ${_zoneThr})` : '';
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${zoneMode}${offRthMode})` : 'LOG-ONLY (no reject)';
-      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr} [DEAD_ZONE < ${_dzThr}]${_veto ? ' OR late_fire_veto=yes' : ''}${zoneMode}${offRthMode})` : 'LOG-ONLY (no reject)';
+      console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}`);
+      console.log(`  [WEBHOOK]   bypass=[${_vBypass}], fail-open=${_vFO}, sibling-cache=${_sibCache ? 'on (60s TTL, ES_FAM/NQ_FAM)' : 'off'}, model=${_vModel}`);
+      console.log(`  [WEBHOOK]   current session band: ${_sessionBand()}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
     }
