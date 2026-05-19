@@ -164,6 +164,12 @@ const WHIPSAW_PROTECTION = (process.env.WHIPSAW_PROTECTION || 'true').toLowerCas
 // after STOP→MARKET conversion, ~1 tick slippage).
 const STOP_CONFIRMATION  = (process.env.STOP_CONFIRMATION  || 'tick').toLowerCase();
 const FUT_STOP_SLIPPAGE_POINTS = parseFloat(process.env.FUT_STOP_SLIPPAGE_POINTS || '0.25');
+// 2026-05-18 Phase 1.5: peak-percentage hard floor. Locks (PEAK_PCT_FLOOR)
+// of peak favorable underlying-move-from-entry as a stop floor. Tonight's
+// MNQ1! PUTS SELL trade: peaked at +$21, exited at +$11 (50% giveback).
+// With 0.70 default: peak +$21 → floor at +$14.70 (max 30% giveback).
+// 0 disables; 0.80 = aggressive (20% giveback); 0.60 = looser (40%).
+const PEAK_PCT_FLOOR = parseFloat(process.env.PEAK_PCT_FLOOR || '0.70');
 const TRAIL_PCT          = parseFloat(process.env.TRAIL_PCT || '0.03');
 
 // Eval poll interval
@@ -1137,6 +1143,23 @@ function _updateStage3(requestId, liveU) {
     if (isFavorable) {
       trade.peakFavorablePrice = liveU;
       dirty = true;
+      // 2026-05-18 Phase 1.5: log peak update + new peak-floor level for
+      // post-session forensics ("how much was on the table vs how much
+      // we locked").
+      if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1) {
+        const _peakDist = isCalls
+          ? trade.peakFavorablePrice - trade.entryPrice
+          : trade.entryPrice - trade.peakFavorablePrice;
+        if (_peakDist > 0) {
+          const _peakDollars  = _peakDist * (trade.pointValue || 0) * (trade.contracts || 0);
+          const _floorDist    = _peakDist * PEAK_PCT_FLOOR;
+          const _floorDollars = _floorDist * (trade.pointValue || 0) * (trade.contracts || 0);
+          const _floorPrice   = isCalls
+            ? trade.entryPrice + _floorDist
+            : trade.entryPrice - _floorDist;
+          console.log(`  📈 PEAK $${_peakDollars.toFixed(2)} (${trade.instrument} ${trade.signal}) — floor now $${_floorDollars.toFixed(2)} @ ${_floorPrice.toFixed(2)} (${(PEAK_PCT_FLOOR * 100).toFixed(0)}% lock)`);
+        }
+      }
     }
 
     // R-progression check (R = stopPoints).
@@ -1190,27 +1213,37 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // Compute final stop = max(lockFloor, trail) for CALLS / min for PUTS.
-    // Lock acts as a hard floor; trail can tighten further once it crosses
-    // the lock level. Without this, the stop would freeze at the lock and
-    // not capture additional gains as price kept moving.
+    // Compute final stop = best (tightest) of three floors:
+    //   1. R-lock floor (BE/1R/2R/3R from the staged-progression)
+    //   2. %-of-peak trail (dynamic, tightens per locked level)
+    //   3. Peak-pct hard floor (locks PEAK_PCT_FLOOR% of peak gain — 2026-05-18 Phase 1.5)
+    // "Best" = closest to current price in our favor = highest for CALLS,
+    // lowest for PUTS. Lock acts as a hard floor; trail and peak-floor can
+    // tighten further as peak grows.
     let lockFloor = null;
     switch (trade.lockedStopLevel) {
       case '3R': lockFloor = isCalls ? trade.entryPrice + 3*R : trade.entryPrice - 3*R; break;
       case '2R': lockFloor = isCalls ? trade.entryPrice + 2*R : trade.entryPrice - 2*R; break;
       case '1R': lockFloor = isCalls ? trade.entryPrice + 1*R : trade.entryPrice - 1*R; break;
       case 'BE': lockFloor = trade.entryPrice; break;
-      default:   lockFloor = null;   // NONE — trail alone governs
+      default:   lockFloor = null;   // NONE — trail/peak alone govern
     }
-    let bestStop;
-    if (lockFloor == null) {
-      bestStop = trade.trailStopPrice;
-    } else if (trade.trailStopPrice == null) {
-      bestStop = lockFloor;
-    } else {
-      bestStop = isCalls
-        ? Math.max(lockFloor, trade.trailStopPrice)
-        : Math.min(lockFloor, trade.trailStopPrice);
+    let peakFloor = null;
+    if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1 && trade.peakFavorablePrice != null) {
+      const _peakDist = isCalls
+        ? trade.peakFavorablePrice - trade.entryPrice
+        : trade.entryPrice - trade.peakFavorablePrice;
+      if (_peakDist > 0) {
+        const _floorDist = _peakDist * PEAK_PCT_FLOOR;
+        peakFloor = isCalls
+          ? trade.entryPrice + _floorDist
+          : trade.entryPrice - _floorDist;
+      }
+    }
+    const _floors = [lockFloor, trade.trailStopPrice, peakFloor].filter(v => v != null);
+    let bestStop = null;
+    if (_floors.length) {
+      bestStop = isCalls ? Math.max(..._floors) : Math.min(..._floors);
     }
     if (bestStop != null && bestStop !== trade.stopPrice) {
       trade.stopPrice = parseFloat(bestStop.toFixed(4));
@@ -1292,6 +1325,21 @@ export function evaluateOpenFutures() {
         const fillPrice = (STOP_CONFIRMATION === 'tick')
           ? parseFloat((t.stopPrice + (isCalls ? -slip : slip)).toFixed(4))
           : liveU;
+        // 2026-05-18 Phase 1.5: detect peak-pct floor as binding constraint
+        // at exit time and log it specifically. Helps post-session forensics
+        // distinguish "stopped on R-lock" from "stopped on peak-pct floor".
+        if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1 && t.peakFavorablePrice != null) {
+          const _peakDist = isCalls ? t.peakFavorablePrice - t.entryPrice : t.entryPrice - t.peakFavorablePrice;
+          if (_peakDist > 0) {
+            const _peakFloorPrice = isCalls ? t.entryPrice + _peakDist * PEAK_PCT_FLOOR : t.entryPrice - _peakDist * PEAK_PCT_FLOOR;
+            if (Math.abs(t.stopPrice - _peakFloorPrice) < 0.01) {
+              const _peakDollars = _peakDist * (t.pointValue || 0) * (t.contracts || 0);
+              const _exitDist    = isCalls ? fillPrice - t.entryPrice : t.entryPrice - fillPrice;
+              const _exitDollars = _exitDist * (t.pointValue || 0) * (t.contracts || 0);
+              console.log(`  🔒 PEAK_FLOOR_HIT  ${t.instrument} ${t.signal}  exit @ ${fillPrice}  (peak $${_peakDollars.toFixed(2)} → locked ${(PEAK_PCT_FLOOR*100).toFixed(0)}% = $${_exitDollars.toFixed(2)})`);
+            }
+          }
+        }
         try { closeFuturesPosition(t.requestId, fillPrice, exitReason); } catch (e) { jError('FUT_EXIT_FIRE', e.message); }
         continue;
       }
@@ -1354,6 +1402,7 @@ console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPo
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day${MAX_TRADES_PER_DAY > 50 ? ' (data-collection mode)' : ''}`);
 console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | whipsaw=${WHIPSAW_PROTECTION}`);
 console.log(`  [futuresTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail (${TRAIL_PCT}% → 0.015% as locks fire) — Phase 1 (1c)`);
+console.log(`  [futuresTrading] peak-pct floor: ${PEAK_PCT_FLOOR > 0 ? `${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock (max ${((1-PEAK_PCT_FLOOR)*100).toFixed(0)}% giveback from peak)` : 'disabled'}`);
 if ((ledger.balance ?? 0) > 15000) {
   console.log(`  [futuresTrading] ⚠ BALANCE >$15K ($${ledger.balance.toFixed(0)}) — Phase 2 ELIGIBLE (tier B 2c + scaleOut). Operator review required before flip; no auto-promote.`);
 }

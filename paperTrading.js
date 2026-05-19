@@ -160,6 +160,11 @@ function _getTargetDistance(instrument) {
   return null;
 }
 const TRAIL_PCT = parseFloat(process.env.TRAIL_PCT || '0.03');   // % of peak underlying
+// 2026-05-18 Phase 1.5: peak-percentage hard floor (operator standard:
+// max 30% giveback from peak). Locks (PEAK_PCT_FLOOR) of peak favorable
+// underlying-distance as a stop floor. Equity tracks underlying space
+// (option-pnl mapping via delta-approximation downstream).
+const PEAK_PCT_FLOOR = parseFloat(process.env.PEAK_PCT_FLOOR || '0.70');
 // P1-11 (2026-05-14 EOD): per-trade capital cap. tradeCapital = entryPremium
 // × contracts × 100 (options); reject if > cap. Default $1,000 for the $1k
 // account discipline. Set 0 to disable cap (back-compat for $25k account).
@@ -277,6 +282,7 @@ function getContractMultiplier(instrument) {
     `SPY=$${TARGET_DOLLARS['SPY']} QQQ=$${TARGET_DOLLARS['QQQ']} IWM=$${TARGET_DOLLARS['IWM']}`);
   console.log(`  [paperTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail — Phase 1 (1c skip-scaleOut)`);
   console.log(`  [paperTrading] trail base: 0DTE=${parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015')}% / 1DTE+=${parseFloat(process.env.TRAIL_PCT_OPTIONS_1DTE_PLUS || '0.030')}% (tightens 25% per R-lock)`);
+  console.log(`  [paperTrading] peak-pct floor: ${PEAK_PCT_FLOOR > 0 ? `${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock (max ${((1-PEAK_PCT_FLOOR)*100).toFixed(0)}% giveback from peak)` : 'disabled'}`);
   console.log(`  [paperTrading] Structure stop (P1-5-B): ${STRUCTURE_STOP_ENABLED ? `ENABLED on ${[...STRUCTURE_STOP_INSTRUMENTS].join(',')} (priority above point-based)` : 'disabled'}`);
   console.log(`  [paperTrading] Capital cap per trade: equity=$${CAPITAL_CAP_EQUITY.toLocaleString()}  futures=$${CAPITAL_CAP_FUTURES.toLocaleString()} (HOTFIX 2026-05-15)`);
   console.log(`  [paperTrading] Daily target: ${DAILY_TARGET > 0 ? `+$${DAILY_TARGET.toLocaleString()} (TARGET_REACHED alert, trading continues)` : 'disabled (DAILY_TARGET=0)'}`);
@@ -1367,6 +1373,21 @@ function _updateStage3(requestId, liveU) {
     if (isFavorable) {
       trade.peakFavorablePrice = liveU;
       dirty = true;
+      // 2026-05-18 Phase 1.5: peak-pct floor log on each peak update.
+      // Equity peak is in UNDERLYING dollars; option-pnl mapping is
+      // delta-approximated downstream so the locked-% is approximate.
+      if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1) {
+        const _peakDistU = isCalls
+          ? trade.peakFavorablePrice - trade.entryUnderlyingPrice
+          : trade.entryUnderlyingPrice - trade.peakFavorablePrice;
+        if (_peakDistU > 0) {
+          const _floorDistU = _peakDistU * PEAK_PCT_FLOOR;
+          const _floorPrice = isCalls
+            ? trade.entryUnderlyingPrice + _floorDistU
+            : trade.entryUnderlyingPrice - _floorDistU;
+          console.log(`  ${C.green}📈 PEAK underlying $${_peakDistU.toFixed(2)} (${trade.instrument} ${trade.signal}) — floor underlying $${_floorDistU.toFixed(2)} @ ${_floorPrice.toFixed(2)} (${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock)${C.reset}`);
+        }
+      }
     }
 
     // R-multiple math: R = stop_distance. New ladder (2026-05-18 Phase 1):
@@ -1424,7 +1445,10 @@ function _updateStage3(requestId, liveU) {
       dirty = true;
     }
 
-    // Final stop = max(lockFloor, trail) for CALLS / min for PUTS.
+    // Final stop = best of three floors (Phase 1.5):
+    //   1. R-lock (BE/1R/2R/3R)
+    //   2. %-of-peak trail (dynamic)
+    //   3. Peak-pct hard floor (PEAK_PCT_FLOOR% of peak)
     let lockFloor = null;
     switch (trade.lockedStopLevel) {
       case '3R': lockFloor = isCalls ? trade.entryUnderlyingPrice + 3*R : trade.entryUnderlyingPrice - 3*R; break;
@@ -1433,15 +1457,22 @@ function _updateStage3(requestId, liveU) {
       case 'BE': lockFloor = trade.entryUnderlyingPrice; break;
       default:   lockFloor = null;
     }
-    let bestStop;
-    if (lockFloor == null) {
-      bestStop = trade.trailStopPrice;
-    } else if (trade.trailStopPrice == null) {
-      bestStop = lockFloor;
-    } else {
-      bestStop = isCalls
-        ? Math.max(lockFloor, trade.trailStopPrice)
-        : Math.min(lockFloor, trade.trailStopPrice);
+    let peakFloor = null;
+    if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1 && trade.peakFavorablePrice != null) {
+      const _peakDistU = isCalls
+        ? trade.peakFavorablePrice - trade.entryUnderlyingPrice
+        : trade.entryUnderlyingPrice - trade.peakFavorablePrice;
+      if (_peakDistU > 0) {
+        const _floorDistU = _peakDistU * PEAK_PCT_FLOOR;
+        peakFloor = isCalls
+          ? trade.entryUnderlyingPrice + _floorDistU
+          : trade.entryUnderlyingPrice - _floorDistU;
+      }
+    }
+    const _floors = [lockFloor, trade.trailStopPrice, peakFloor].filter(v => v != null);
+    let bestStop = null;
+    if (_floors.length) {
+      bestStop = isCalls ? Math.max(..._floors) : Math.min(..._floors);
     }
     if (bestStop != null && bestStop !== trade.stopUnderlyingPrice) {
       trade.stopUnderlyingPrice = parseFloat(bestStop.toFixed(4));
@@ -1973,6 +2004,18 @@ export function evaluateOpenPositions(priceFeeder) {
         }
 
         if (shouldFire) {
+          // 2026-05-18 Phase 1.5: detect peak-pct floor as binding constraint
+          // at exit time (informational log alongside the standard exit).
+          if (PEAK_PCT_FLOOR > 0 && PEAK_PCT_FLOOR < 1 && t.peakFavorablePrice != null && t.entryUnderlyingPrice != null) {
+            const _peakDistU = isCalls ? t.peakFavorablePrice - t.entryUnderlyingPrice : t.entryUnderlyingPrice - t.peakFavorablePrice;
+            if (_peakDistU > 0) {
+              const _peakFloorPrice = isCalls ? t.entryUnderlyingPrice + _peakDistU * PEAK_PCT_FLOOR : t.entryUnderlyingPrice - _peakDistU * PEAK_PCT_FLOOR;
+              if (Math.abs(t.stopUnderlyingPrice - _peakFloorPrice) < 0.01) {
+                const _exitDistU = isCalls ? liveU - t.entryUnderlyingPrice : t.entryUnderlyingPrice - liveU;
+                console.log(`  ${C.green}🔒 PEAK_FLOOR_HIT  ${t.instrument} ${t.signal}  exit underlying @ ${liveU.toFixed(2)}  (peak underlying $${_peakDistU.toFixed(2)} → locked ${(PEAK_PCT_FLOOR*100).toFixed(0)}% = $${_exitDistU.toFixed(2)})${C.reset}`);
+              }
+            }
+          }
           exitsToFire.push({ requestId: t.requestId, exitPrice: fed.optionPrice, reason: exitReason });
           pushVoiceAlert(`stop-loss-${t.requestId}`, 'critical',
             `${exitReason} on ${t.instrument} ${t.signal}. Underlying ${liveU.toFixed(2)} confirmed beyond ${t.stopUnderlyingPrice.toFixed(2)}.`);
