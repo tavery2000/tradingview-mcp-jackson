@@ -1099,7 +1099,14 @@ async function _evaluateVisionGate(consensus) {
 
   const totalLatencyMs = Date.now() - t0;
   const composite = result.composite;
-  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '3.5');
+  // 2026-05-19 14:35 ET: tuned 3.5 → 3.0 after computing today's score-vs-
+  // outcome matrix across 10 trades. At 3.5 we block all 2.8-3.4 → captures
+  // more losers but misses $60 of winners (MES 2.8 PUTS + SPY 3.2-3.4 ZONE/
+  // SELL that won via R-lock trail). At 3.0 we block only the 2.8 trades:
+  // catches all 5 clearest losers, misses $25.50 of MES winners, but the
+  // SPY 3.2-3.4 winners pass through. Net P&L impact: +$47.58 at 3.0 vs
+  // +$44.42 at 3.5. Small edge to 3.0; revisit after Wed's RTH data.
+  const rejectThr = parseFloat(process.env.VISION_REJECT_THRESHOLD || '3.0');
   const gateEnabled = (process.env.VISION_GATE_ENABLED || 'true').toLowerCase() === 'true';
   const shouldReject = gateEnabled && composite != null && composite < rejectThr;
 

@@ -284,7 +284,9 @@ function getContractMultiplier(instrument) {
   {
     const _partialThr = parseFloat(process.env.EARLY_ARM_PARTIAL_THRESHOLD || '0.5');
     const _beThr      = parseFloat(process.env.EARLY_ARM_BE_THRESHOLD      || '0.7');
-    console.log(`  [paperTrading] early-arm: ${_partialThr}R=PARTIAL_LOCK(-0.5R stop) / ${_beThr}R=BE_EARLY(entry stop) / 1R=STAGE_3 — protects unrealized profits before +1R promote`);
+    const _optPart    = parseFloat(process.env.EARLY_ARM_OPTION_PARTIAL_PCT|| '25');
+    const _optBe      = parseFloat(process.env.EARLY_ARM_OPTION_BE_PCT     || '40');
+    console.log(`  [paperTrading] early-arm: underlying ${_partialThr}R/${_beThr}R OR option-pnl ${_optPart}%/${_optBe}% — whichever fires first arms PARTIAL_LOCK/BE_EARLY before +1R STAGE_3`);
   }
   console.log(`  [paperTrading] trail base: 0DTE=${parseFloat(process.env.TRAIL_PCT_OPTIONS_0DTE || '0.015')}% / 1DTE+=${parseFloat(process.env.TRAIL_PCT_OPTIONS_1DTE_PLUS || '0.030')}% (tightens 25% per R-lock)`);
   console.log(`  [paperTrading] peak-pct floor: ${PEAK_PCT_FLOOR > 0 ? `${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock (max ${((1-PEAK_PCT_FLOOR)*100).toFixed(0)}% giveback from peak)` : 'disabled'}`);
@@ -1219,12 +1221,25 @@ export async function sendOrder(consensus, requestId, lastQuote = null) {
 // Phase 2 (balance > $15K → 2c tier B) will route back through
 // _executeScaleOut for the 50/50 partial.
 // ─── Early-arm stops (2026-05-19, operator-spec'd before +1R) ──────────
-// Equity-options mirror of futuresTrading._updateStage1Arm. Same three
-// thresholds (0.5R PARTIAL, 0.7R BE, 1R STAGE_3). Operates in underlying
-// space (R = stopDistance in underlying $). Tracks peakFavorablePrice
-// inside STAGE_1_ARMED so brief favorable spikes lock in protection
-// even if the trade never reaches +1R.
-function _updateStage1Arm(requestId, liveU) {
+// Equity-options mirror of futuresTrading._updateStage1Arm. THREE
+// thresholds (0.5R PARTIAL, 0.7R BE, 1R STAGE_3) on UNDERLYING R.
+//
+// PLUS: parallel option-P&L peak tracker (2026-05-19 14:35 ET, operator's
+// 14:24 SPY PUTS pattern). Premium rallied $1.47 → $1.85-2.10 = +25-43%
+// while underlying barely moved 0.08%. Operator equates +25% premium ≈
+// +0.5R, +43% premium ≈ +0.7R. Underlying-only peak tracker misses these
+// option spikes (gamma kicks, IV expansion). Option-P&L parallel trigger
+// catches them.
+//
+// Whichever trigger fires first (underlying R OR option-P&L pct) arms
+// the corresponding stage. One-way ratchet — never relaxes.
+//
+// Env knobs:
+//   EARLY_ARM_PARTIAL_THRESHOLD        0.5     underlying R for PARTIAL
+//   EARLY_ARM_BE_THRESHOLD             0.7     underlying R for BE
+//   EARLY_ARM_OPTION_PARTIAL_PCT       25      option premium % up for PARTIAL
+//   EARLY_ARM_OPTION_BE_PCT            40      option premium % up for BE
+function _updateStage1Arm(requestId, liveU, optionPrice) {
   const locked = acquireLock();
   try {
     const fresh = loadLedger();
@@ -1234,24 +1249,47 @@ function _updateStage1Arm(requestId, liveU) {
     if (!trade.stopDistance || trade.stopDistance <= 0) return null;
 
     const isCalls = trade.signal === 'CALLS';
+
+    // Underlying peak update
     const peakWas = trade.peakFavorablePrice ?? trade.entryUnderlyingPrice;
     const liveBetter = isCalls ? liveU > peakWas : liveU < peakWas;
     if (liveBetter) trade.peakFavorablePrice = liveU;
-
     const peakDelta = isCalls
       ? (trade.peakFavorablePrice - trade.entryUnderlyingPrice)
       : (trade.entryUnderlyingPrice - trade.peakFavorablePrice);
     const peakFavR = peakDelta / trade.stopDistance;
 
-    const BE_THR      = parseFloat(process.env.EARLY_ARM_BE_THRESHOLD      || '0.7');
-    const PARTIAL_THR = parseFloat(process.env.EARLY_ARM_PARTIAL_THRESHOLD || '0.5');
-    let armed = null;
+    // Option-P&L peak update (favorable = premium up regardless of direction)
+    let optionPeakPct = trade.peakFavorableOptionPnlPct ?? 0;
+    let optionDirty = false;
+    if (optionPrice && trade.fillPrice > 0) {
+      const curPct = ((optionPrice - trade.fillPrice) / trade.fillPrice) * 100;
+      if (curPct > optionPeakPct) {
+        optionPeakPct = curPct;
+        trade.peakFavorableOptionPnlPct = parseFloat(curPct.toFixed(2));
+        optionDirty = true;
+      }
+    }
 
-    if (peakFavR >= BE_THR && trade.lockedStopLevel !== 'BE_EARLY' && trade.lockedStopLevel !== 'BE') {
+    const BE_THR_R     = parseFloat(process.env.EARLY_ARM_BE_THRESHOLD          || '0.7');
+    const PARTIAL_THR_R= parseFloat(process.env.EARLY_ARM_PARTIAL_THRESHOLD     || '0.5');
+    const BE_THR_OPT   = parseFloat(process.env.EARLY_ARM_OPTION_BE_PCT         || '40');
+    const PARTIAL_OPT  = parseFloat(process.env.EARLY_ARM_OPTION_PARTIAL_PCT    || '25');
+
+    const beUnderlying  = peakFavR     >= BE_THR_R;
+    const beOption      = optionPeakPct >= BE_THR_OPT;
+    const partUnderlying = peakFavR     >= PARTIAL_THR_R;
+    const partOption     = optionPeakPct >= PARTIAL_OPT;
+
+    let armed = null;
+    let trigger = null;
+
+    if ((beUnderlying || beOption) && trade.lockedStopLevel !== 'BE_EARLY' && trade.lockedStopLevel !== 'BE') {
       trade.stopUnderlyingPrice = trade.entryUnderlyingPrice;
       trade.lockedStopLevel = 'BE_EARLY';
       armed = 'BE_EARLY';
-    } else if (peakFavR >= PARTIAL_THR && trade.lockedStopLevel === 'NONE') {
+      trigger = beUnderlying ? `peakFavR=${peakFavR.toFixed(2)}` : `optionPeakPct=${optionPeakPct.toFixed(1)}%`;
+    } else if ((partUnderlying || partOption) && trade.lockedStopLevel === 'NONE') {
       const halfR = trade.stopDistance * 0.5;
       trade.stopUnderlyingPrice = parseFloat((isCalls
         ? trade.entryUnderlyingPrice - halfR
@@ -1259,8 +1297,10 @@ function _updateStage1Arm(requestId, liveU) {
       ).toFixed(4));
       trade.lockedStopLevel = 'PARTIAL_LOCK';
       armed = 'PARTIAL_LOCK';
+      trigger = partUnderlying ? `peakFavR=${peakFavR.toFixed(2)}` : `optionPeakPct=${optionPeakPct.toFixed(1)}%`;
     } else {
-      if (liveBetter) {
+      // No arm — persist peak updates if any
+      if (liveBetter || optionDirty) {
         saveLedger(fresh);
         const local = ledger.trades.find(t => t.requestId === requestId);
         if (local) Object.assign(local, trade);
@@ -1273,12 +1313,14 @@ function _updateStage1Arm(requestId, liveU) {
     if (local) Object.assign(local, trade);
 
     const sym = armed === 'BE_EARLY' ? '🔒 BE_EARLY' : '🔒 PARTIAL_LOCK';
-    console.log(`  ${sym}  EQ ${trade.instrument} ${trade.signal}  peakFavR=${peakFavR.toFixed(2)}  stopU=${trade.stopUnderlyingPrice}  (R=$${trade.stopDistance})`);
+    console.log(`  ${sym}  EQ ${trade.instrument} ${trade.signal}  trigger=${trigger}  peakFavR=${peakFavR.toFixed(2)} optPeak=${optionPeakPct.toFixed(1)}%  stopU=${trade.stopUnderlyingPrice}`);
     try {
       jAlert('info', `EQ_EARLY_${armed}`, {
         requestId, instrument: trade.instrument, signal: trade.signal,
+        trigger,
         peakFavR: parseFloat(peakFavR.toFixed(3)),
         peakFavorablePrice: trade.peakFavorablePrice,
+        peakFavorableOptionPnlPct: parseFloat(optionPeakPct.toFixed(2)),
         newStopUnderlying: trade.stopUnderlyingPrice,
         stopDistance: trade.stopDistance, entryUnderlyingPrice: trade.entryUnderlyingPrice, liveU,
       });
@@ -2109,7 +2151,7 @@ export function evaluateOpenPositions(priceFeeder) {
       // SPY PUTS pair pattern that hit +0.7R favorable but never reached +1R
       // and gave back unrealized profits on reversal.
       if (t.stage === 'STAGE_1_ARMED' && liveU != null && t.entryUnderlyingPrice != null && t.stopDistance != null) {
-        try { _updateStage1Arm(t.requestId, liveU); } catch (e) { jError('eq-early-arm', e.message, { requestId: t.requestId }); }
+        try { _updateStage1Arm(t.requestId, liveU, fed.optionPrice); } catch (e) { jError('eq-early-arm', e.message, { requestId: t.requestId }); }
       }
 
       if (t.stage === 'STAGE_1_ARMED' && liveU != null) {
