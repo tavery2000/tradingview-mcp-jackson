@@ -81,34 +81,81 @@ function _extractSymbolFromUrl(url) {
   } catch { return null; }
 }
 
+// Per-CDP-operation timeout. Without this, a single hung tab probe blocks
+// the whole captureChartImage. 2026-05-19 18:36 — operator's futures
+// alerts saw 8s VISION_TIMEOUT on every call because chartScreenshot
+// iterated 6 tabs with no per-tab budget.
+const _CDP_PROBE_TIMEOUT_MS = parseInt(process.env.CDP_PROBE_TIMEOUT_MS || '1500', 10);
+
+function _withTimeout(promise, ms, label) {
+  let handle;
+  const timeout = new Promise((_, reject) => {
+    handle = setTimeout(() => reject(new Error(`TIMEOUT_${label}`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (handle) clearTimeout(handle);
+  });
+}
+
+// 2026-05-19 18:36 — fallback chains so vision can score futures even
+// when the operator's TV layout has the futures charts in a different
+// debug-target window. Falls back to the correlated equity chart for
+// the same market (Nasdaq → QQQ, S&P → SPY) — same price-action shape,
+// vision can still read structural extremes / exhaustion.
+const _FALLBACK_CHAIN = {
+  'NQ1!':  ['NQ1!',  'MNQ1!', 'QQQ'],
+  'MNQ1!': ['MNQ1!', 'NQ1!',  'QQQ'],
+  'ES1!':  ['ES1!',  'MES1!', 'SPY'],
+  'MES1!': ['MES1!', 'ES1!',  'SPY'],
+};
+
 async function _findTargetForSymbol(symbol) {
   const want = (symbol || '').toUpperCase();
   const targets = await _listChartTargets();
   if (!targets.length) throw new Error('NO_TV_CHART_TARGETS — is TradingView Desktop running?');
 
-  // Try URL match first (cheap)
-  for (const t of targets) {
-    const urlSym = (_extractSymbolFromUrl(t.url) || '').toUpperCase();
-    if (urlSym === want) return t;
+  // Build the chain of acceptable symbols (primary + fallbacks).
+  const chain = _FALLBACK_CHAIN[want] || [want];
+
+  // Phase 1 — URL match against each chain symbol (cheapest, ~0ms)
+  for (const candidate of chain) {
+    for (const t of targets) {
+      const urlSym = (_extractSymbolFromUrl(t.url) || '').toUpperCase();
+      if (urlSym === candidate) return { target: t, matchedSymbol: candidate, viaFallback: candidate !== want };
+    }
   }
 
-  // Fallback: DOM probe each target
+  // Phase 2 — DOM probe each target ONCE, record which symbol it shows.
+  // Then walk the chain in order, return first match. This is more
+  // efficient than probing once per chain entry (avoids 3× probing all
+  // tabs for the same instrument family).
+  const tabSymbols = new Map();  // targetId → resolved symbol uppercase
   for (const t of targets) {
     let client;
     try {
-      client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: t.id });
-      await client.Runtime.enable();
-      const r = await client.Runtime.evaluate({ expression: _SYMBOL_PROBE_JS, returnByValue: true });
-      const sym = (r.result?.value?.symbol || '').toUpperCase();
-      if (sym.includes(want)) {
-        await client.close();
-        return t;
-      }
-      await client.close();
+      const work = (async () => {
+        client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: t.id });
+        await client.Runtime.enable();
+        const r = await client.Runtime.evaluate({ expression: _SYMBOL_PROBE_JS, returnByValue: true });
+        return (r.result?.value?.symbol || '').toUpperCase();
+      })();
+      const sym = await _withTimeout(work, _CDP_PROBE_TIMEOUT_MS, 'PROBE');
+      tabSymbols.set(t.id, sym);
     } catch {
+      // Probe failed/timed out — move on to next tab.
+    } finally {
       try { await client?.close(); } catch {}
     }
   }
+
+  // Now walk chain in priority order
+  for (const candidate of chain) {
+    for (const t of targets) {
+      const sym = tabSymbols.get(t.id);
+      if (sym && sym.includes(candidate)) return { target: t, matchedSymbol: candidate, viaFallback: candidate !== want };
+    }
+  }
+
   return null;
 }
 
@@ -133,15 +180,22 @@ export async function captureChartImage(symbol, opts = {}) {
   // have been navigated away in between calls).
   const cachedId = _targetCache.get(want);
   let target = null;
+  let matchedSymbol = want;
+  let viaFallback = false;
   if (cachedId) {
     const all = await _listChartTargets();
     const t = all.find(t => t.id === cachedId);
     if (t && (_extractSymbolFromUrl(t.url) || '').toUpperCase() === want) target = t;
   }
   if (!target) {
-    target = await _findTargetForSymbol(want);
-    if (!target) throw new Error(`NO_TV_TAB_FOR_${want}`);
-    _targetCache.set(want, target.id);
+    const found = await _findTargetForSymbol(want);
+    if (!found) throw new Error(`NO_TV_TAB_FOR_${want}`);
+    target = found.target;
+    matchedSymbol = found.matchedSymbol;
+    viaFallback = found.viaFallback;
+    if (!viaFallback) _targetCache.set(want, target.id);
+    // Don't cache fallback matches under the requested symbol —
+    // could prevent future direct matches if the primary tab opens later.
   }
 
   // Connect + enable Page domain + capture.
@@ -174,6 +228,10 @@ export async function captureChartImage(symbol, opts = {}) {
 
   return {
     buffer, dataUrl, path: outPath,
-    targetId: target.id, symbol: want, ts,
+    targetId: target.id,
+    symbol: want,           // what was requested
+    matchedSymbol,          // what we actually captured (may differ from `symbol` if fallback)
+    viaFallback,            // true if we captured a related chart (e.g. NQ1!→QQQ)
+    ts,
   };
 }

@@ -1208,6 +1208,8 @@ async function _evaluateVisionGate(consensus) {
   try {
     jAlert('INFO', 'VISION_SCORE', {
       instrument, direction, engine, price,
+      capturedSymbol: shot.matchedSymbol,
+      capturedViaFallback: shot.viaFallback,
       composite, multiplier: result.multiplier, tier: result.tier,
       lateFireVeto: result.lateFireVeto,
       dims: {
