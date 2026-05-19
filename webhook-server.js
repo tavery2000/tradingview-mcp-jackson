@@ -1183,14 +1183,26 @@ async function _evaluateVisionGate(consensus) {
 // Reads paper-ledger.json + futures-ledger.json on each call (small JSON
 // files, sub-ms read; paperTrading/futuresTrading write atomically after
 // each open/close so the read sees consistent state).
+// Futures micro-fallback pairs — ES1!↔MES1! and NQ1!↔MNQ1!. When operator
+// sends an ES1! alert and margin > cap, dispatch routes to MES1!. So an
+// open MES1! position should block subsequent ES1! alerts (and vice versa)
+// — they represent the same setup, dispatched to the smaller contract.
+const _RELATED_FUT = {
+  'ES1!':  ['MES1!'],
+  'MES1!': ['ES1!'],
+  'NQ1!':  ['MNQ1!'],
+  'MNQ1!': ['NQ1!'],
+};
+
 function _isAnyOpenPositionFor(instrument, direction) {
   const inst = (instrument || '').toUpperCase();
   const dir  = (direction  || '').toUpperCase();
+  const allSyms = new Set([inst, ...(_RELATED_FUT[inst] || [])]);
   try {
     const eqFile = join(__dirname, 'paper-ledger.json');
     if (existsSync(eqFile)) {
       const eq = JSON.parse(readFileSync(eqFile, 'utf8'));
-      if ((eq.trades || []).some(t => t.status === 'OPEN' && (t.instrument || '').toUpperCase() === inst && (t.signal || '').toUpperCase() === dir)) {
+      if ((eq.trades || []).some(t => t.status === 'OPEN' && allSyms.has((t.instrument || '').toUpperCase()) && (t.signal || '').toUpperCase() === dir)) {
         return true;
       }
     }
@@ -1199,7 +1211,7 @@ function _isAnyOpenPositionFor(instrument, direction) {
     const fuFile = join(__dirname, 'futures-ledger.json');
     if (existsSync(fuFile)) {
       const fu = JSON.parse(readFileSync(fuFile, 'utf8'));
-      if ((fu.trades || []).some(t => t.status === 'OPEN' && (t.instrument || '').toUpperCase() === inst && (t.signal || '').toUpperCase() === dir)) {
+      if ((fu.trades || []).some(t => t.status === 'OPEN' && allSyms.has((t.instrument || '').toUpperCase()) && (t.signal || '').toUpperCase() === dir)) {
         return true;
       }
     }
@@ -1213,6 +1225,24 @@ function _checkStackedDedup(instrument, direction, engine) {
   for (const [k, v] of _stackDedupMap.entries()) {
     if (now - v.ts > _STACK_DEDUP_GC_AFTER_MS) _stackDedupMap.delete(k);
   }
+
+  // 2026-05-19 — PRIMARY check: position-based dedup. Catches bar-boundary
+  // straddles where two engines fire 2-3 seconds apart across a 5m bar
+  // close (e.g., 14:09:59 HL + 14:10:01 BUY produced two MES1! CALLS
+  // positions despite being one setup; bucket math put them in different
+  // 5m buckets). If ANY open position matches (instrument, direction) —
+  // including the futures micro-fallback target — block immediately.
+  const positionOpenCheckEnabled = (process.env.STACKED_DEDUP_POSITION_CHECK_ENABLED || 'true').toLowerCase() === 'true';
+  if (positionOpenCheckEnabled && _isAnyOpenPositionFor(instrument, direction)) {
+    return {
+      duplicate: true,
+      firstEngine: 'OPEN_POSITION',
+      reason: 'OPEN_POSITION_EXISTS',
+      key: `${(instrument||'').toUpperCase()}|${(direction||'').toUpperCase()}|OPEN`,
+      ageMs: 0,
+    };
+  }
+
   const key = _stackedDedupKey(instrument, direction, now);
   const existing = _stackDedupMap.get(key);
   if (existing) {

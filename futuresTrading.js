@@ -1031,6 +1031,93 @@ export function closeFuturesPosition(requestId, exitPrice, exitReason = 'MANUAL'
 // Promote directly STAGE_1 → STAGE_3 with BE lock + trail active, no
 // scaleOut event, no partial pnl. Phase 2 (balance > $15K → 2c tier B)
 // will route back through _executeScaleOut.
+// ─── Early-arm stops (2026-05-19, operator-spec'd before +1R) ──────────
+// Operator evidence 14:23 ET: SPY PUTS pair filled @ 1.47; SPY dropped
+// 737.6 → 736 = ~+0.7R favorable on the option but never hit +1R for
+// STAGE_3 promote; full reversal → stops hit at original -1R level →
+// gave back unrealized profits.
+//
+// Three-tier early arming inside STAGE_1_ARMED, before +1R promote:
+//   +0.5R favorable  →  PARTIAL_LOCK   (stop from -1R to -0.5R, cuts max
+//                                       loss in half on reversal)
+//   +0.7R favorable  →  BE_EARLY       (stop to entry, position can't lose)
+//   +1R favorable    →  STAGE_3_TRAILING (existing R-lock-and-trail chain)
+//
+// Tracks peakFavorablePrice in STAGE_1_ARMED (was previously only in
+// STAGE_3). Arms based on peak (not live), so even brief favorable spikes
+// lock in protection.
+//
+// Env knobs (defaults baked in):
+//   EARLY_ARM_PARTIAL_THRESHOLD   0.5    R-multiple to trigger partial lock
+//   EARLY_ARM_BE_THRESHOLD        0.7    R-multiple to trigger BE arm
+function _updateStage1Arm(requestId, liveU) {
+  const locked = acquireLock();
+  try {
+    const fresh = loadLedger();
+    const trade = fresh.trades.find(t => t.requestId === requestId && t.status === 'OPEN');
+    if (!trade || trade.stage !== 'STAGE_1_ARMED') return null;
+    if (!_futIsSane(liveU, trade.entryPrice)) return null;
+    const R = trade.stopPoints;
+    if (!R || R <= 0) return null;
+
+    const isCalls = trade.signal === 'CALLS';
+    const peakWas = trade.peakFavorablePrice ?? trade.entryPrice;
+    const liveBetter = isCalls ? liveU > peakWas : liveU < peakWas;
+    if (liveBetter) trade.peakFavorablePrice = liveU;
+
+    const peakDelta = isCalls
+      ? (trade.peakFavorablePrice - trade.entryPrice)
+      : (trade.entryPrice - trade.peakFavorablePrice);
+    const peakFavR = peakDelta / R;
+
+    const BE_THR      = parseFloat(process.env.EARLY_ARM_BE_THRESHOLD      || '0.7');
+    const PARTIAL_THR = parseFloat(process.env.EARLY_ARM_PARTIAL_THRESHOLD || '0.5');
+    let armed = null;
+    let newStop = null;
+
+    // BE_EARLY supersedes PARTIAL_LOCK (one-way ratchet: once at BE, no going back)
+    if (peakFavR >= BE_THR && trade.lockedStopLevel !== 'BE_EARLY' && trade.lockedStopLevel !== 'BE') {
+      newStop = trade.entryPrice;
+      trade.stopPrice = newStop;
+      trade.lockedStopLevel = 'BE_EARLY';
+      armed = 'BE_EARLY';
+    } else if (peakFavR >= PARTIAL_THR && trade.lockedStopLevel === 'NONE') {
+      const halfR = R * 0.5;
+      newStop = parseFloat((isCalls ? trade.entryPrice - halfR : trade.entryPrice + halfR).toFixed(4));
+      trade.stopPrice = newStop;
+      trade.lockedStopLevel = 'PARTIAL_LOCK';
+      armed = 'PARTIAL_LOCK';
+    } else {
+      // Just persist the peak update if no arm transition
+      if (liveBetter) {
+        saveLedger(fresh);
+        const local = ledger.trades.find(t => t.requestId === requestId);
+        if (local) Object.assign(local, trade);
+      }
+      return trade;
+    }
+
+    saveLedger(fresh);
+    const local = ledger.trades.find(t => t.requestId === requestId);
+    if (local) Object.assign(local, trade);
+
+    const sym = armed === 'BE_EARLY' ? '🔒 BE_EARLY' : '🔒 PARTIAL_LOCK';
+    console.log(`  ${sym}  FUT ${trade.instrument} ${trade.signal}  peakFavR=${peakFavR.toFixed(2)}  stop=${trade.stopPrice}  (R=${R}pt)`);
+    try {
+      jAlert('info', `FUT_EARLY_${armed}`, {
+        requestId, instrument: trade.instrument, signal: trade.signal,
+        peakFavR: parseFloat(peakFavR.toFixed(3)),
+        peakFavorablePrice: trade.peakFavorablePrice,
+        newStop: trade.stopPrice,
+        R, entryPrice: trade.entryPrice, liveU,
+      });
+    } catch {}
+    return trade;
+  } finally {
+    if (locked) releaseLock();
+  }
+}
+
 function _promoteToStage3At1R(requestId, liveU) {
   const locked = acquireLock();
   try {
@@ -1348,7 +1435,15 @@ export function evaluateOpenFutures() {
     // 2. STAGE_1 → STAGE_3 promotion
     //    1c path (Phase 1 default): promote at +1R, no scale-out, BE lock + trail
     //    2c+ path (Phase 2, balance>$15K): promote at target, 50/50 scale-out + trail
+    //
+    // 2026-05-19: BEFORE the +1R check, run the early-arm pass so peakFav
+    // is tracked and partial/BE locks fire at +0.5R / +0.7R respectively.
+    // This catches the operator-flagged pattern where SPY/MES PUTS hit
+    // +0.7R favorable, never reached +1R, then reversed past the original
+    // -1R stop. Early arms protect the unrealized profit.
     if (t.stage === 'STAGE_1_ARMED') {
+      try { _updateStage1Arm(t.requestId, liveU); } catch (e) { jError('FUT_EARLY_ARM', e.message); }
+
       const origC = t.originalContracts ?? t.contracts ?? 1;
       if (origC === 1) {
         const R = t.stopPoints;
@@ -1402,6 +1497,11 @@ console.log(`  [futuresTrading] tiers A=${TIER.A.contracts}c stop${TIER.A.stopPo
 console.log(`  [futuresTrading] daily target +$${DAILY_TARGET} / hard stop -$${MAX_DAILY_LOSS} / Friday cap -$${FRIDAY_LOSS_CAP} / max ${MAX_TRADES_PER_DAY} trades/day${MAX_TRADES_PER_DAY > 50 ? ' (data-collection mode)' : ''}`);
 console.log(`  [futuresTrading] confluence window ${STACKING_WINDOW_MS/1000}s (same-dir 2nd+ → FUT_DUPLICATE_CONFLUENCE) | whipsaw=${WHIPSAW_PROTECTION}`);
 console.log(`  [futuresTrading] take-profit: R-LOCK (1R=BE / 2R=+1R / 3R=+2R / 4R=+3R) + dynamic trail (${TRAIL_PCT}% → 0.015% as locks fire) — Phase 1 (1c)`);
+{
+  const _partialThr = parseFloat(process.env.EARLY_ARM_PARTIAL_THRESHOLD || '0.5');
+  const _beThr      = parseFloat(process.env.EARLY_ARM_BE_THRESHOLD      || '0.7');
+  console.log(`  [futuresTrading] early-arm: ${_partialThr}R=PARTIAL_LOCK(-0.5R stop) / ${_beThr}R=BE_EARLY(entry stop) / 1R=STAGE_3 — protects unrealized profits before +1R promote`);
+}
 console.log(`  [futuresTrading] peak-pct floor: ${PEAK_PCT_FLOOR > 0 ? `${(PEAK_PCT_FLOOR*100).toFixed(0)}% lock (max ${((1-PEAK_PCT_FLOOR)*100).toFixed(0)}% giveback from peak)` : 'disabled'}`);
 if ((ledger.balance ?? 0) > 15000) {
   console.log(`  [futuresTrading] ⚠ BALANCE >$15K ($${ledger.balance.toFixed(0)}) — Phase 2 ELIGIBLE (tier B 2c + scaleOut). Operator review required before flip; no auto-promote.`);
