@@ -229,6 +229,24 @@ async function handlePineAlert(req, res) {
     try { jAlert('INFO', 'FADE_PROMOTED', { instrument, direction, price, newsEventId, headline: body.fadeHeadline, eventAgeS: body.fadeEventAgeS }); } catch {}
   }
 
+  // 2026-05-19 — Stretched-from-extreme gate (interim until Vision live).
+  // Pattern: pivot engines fire SELL/BUY at bottom/top of completed move and
+  // lose -$15-25 on the natural mean-revert bounce. Today's example: SPY LH
+  // PUTS fired at 733.16 (below PDL 733.39) after a 738→732 move was already
+  // done. Two legs: VWAP-stretch (price too far from VWAP for the signal
+  // direction) and PD-stretch (selling below PDL / buying above PDH).
+  // Runs BEFORE existing gates per operator spec. Applies to SPY/QQQ/IWM
+  // (instruments with a {sym}-levels.json on disk); futures fall through.
+  const _stretched = _checkStretchedFromExtreme(instrument, direction, price);
+  if (_stretched.block) {
+    jGateBlock(engine, instrument, direction, _stretched.reason, {
+      ..._stretched.details,
+      etTime: etTimeString(),
+      note: 'Interim late-fire mitigation — Vision API replaces this gate when live.',
+    });
+    return send(res, 200, { ok: false, reason: _stretched.reason, ..._stretched.details });
+  }
+
   // 2026-05-18 — Stacked-entry dedup. {instrument|direction|5m-bar-floor}
   // bucket; first engine wins. Multiple engines firing on the same Pine
   // bar are confluence on ONE setup, not N independent positions. Today's
@@ -704,6 +722,103 @@ const _stackDedupMap = new Map();   // key → { firstEngine, ts }
 function _stackedDedupKey(instrument, direction, nowMs) {
   const bar5m = Math.floor(nowMs / _STACK_DEDUP_BUCKET_MS) * _STACK_DEDUP_BUCKET_MS;
   return `${instrument}|${direction}|${bar5m}`;
+}
+
+// ─── Stretched-from-extreme gate (2026-05-19, interim until Vision live) ───
+// Operator pattern observed today: pivot engines (LH/HL/SELL/BUY/ZONE) fire
+// SELL/BUY at the bottom/top of a completed move and lose -$15-25 on the
+// natural mean-revert bounce. Example: 11:00:06 SPY PUTS LH @733.16 fired
+// AFTER a 738→732 move had already completed; trade stopped out within
+// minutes when price reverted toward VWAP/PDL.
+//
+// Two interim gates run BEFORE existing gates (operator spec 2026-05-19):
+//   (1) STRETCHED_FROM_VWAP — abs(price - vwap) > N × ATR_estimate
+//   (2) STRETCHED_FROM_PD   — PUTS below PDL OR CALLS above PDH
+//
+// Both gates apply only to instruments with a {sym}-levels.json on disk
+// (SPY/QQQ/IWM today). Futures (MES1!/ES1!/etc) have no levels file → gate
+// is a no-op for them and they fall through to PATH2_HALT/CB/etc as before.
+//
+// Env knobs:
+//   STRETCHED_GATE_ENABLED        (master toggle, default true)
+//   STRETCHED_VWAP_ENABLED        (vwap-leg toggle, default true)
+//   STRETCHED_PD_ENABLED          (pd-leg toggle, default true)
+//   STRETCHED_VWAP_ATR_MULT       (default 2.0)
+//   STRETCHED_ATR_FALLBACK_SPY    (default 1.5 — until monitor.js writes live ATR)
+//   STRETCHED_ATR_FALLBACK_QQQ    (default 1.8)
+//   STRETCHED_ATR_FALLBACK_IWM    (default 1.0)
+//
+// Replaced by Vision API continuous stretch-score when Phase 5 ships.
+const _STRETCHED_ATR_FALLBACK = { SPY: 1.5, QQQ: 1.8, IWM: 1.0 };
+
+function _readLevelsForGate(instrument) {
+  const sym = (instrument || '').toUpperCase();
+  if (!['SPY', 'QQQ', 'IWM'].includes(sym)) return null;
+  try {
+    const file = join(__dirname, sym.toLowerCase() + '-levels.json');
+    if (!existsSync(file)) return null;
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch { return null; }
+}
+
+function _checkStretchedFromExtreme(instrument, direction, price) {
+  if ((process.env.STRETCHED_GATE_ENABLED || 'true').toLowerCase() === 'false') {
+    return { block: false };
+  }
+  if (price == null || !isFinite(price)) return { block: false };
+  const sym = (instrument || '').toUpperCase();
+  const levels = _readLevelsForGate(sym);
+  if (!levels) return { block: false };
+  const vwap   = (typeof levels.vwap   === 'number') ? levels.vwap   : null;
+  const pdHigh = (typeof levels.pdHigh === 'number') ? levels.pdHigh : null;
+  const pdLow  = (typeof levels.pdLow  === 'number') ? levels.pdLow  : null;
+
+  // Leg 1 — VWAP stretch
+  const vwapEnabled = (process.env.STRETCHED_VWAP_ENABLED || 'true').toLowerCase() === 'true';
+  if (vwapEnabled && vwap != null) {
+    const atrEnv  = parseFloat(process.env['STRETCHED_ATR_FALLBACK_' + sym]);
+    const atrEst  = isFinite(atrEnv) && atrEnv > 0 ? atrEnv : (_STRETCHED_ATR_FALLBACK[sym] || 0);
+    const atrMult = parseFloat(process.env.STRETCHED_VWAP_ATR_MULT || '2.0');
+    if (atrEst > 0 && isFinite(atrMult) && atrMult > 0) {
+      const stretch = price - vwap;                       // +above / -below
+      const cutoff  = atrMult * atrEst;
+      if (direction === 'PUTS' && stretch < -cutoff) {
+        return {
+          block: true,
+          reason: 'STRETCHED_FROM_VWAP',
+          details: { side: 'BELOW_VWAP', price, vwap, stretch: +stretch.toFixed(3), cutoff: +cutoff.toFixed(3), atrEst, atrMult },
+        };
+      }
+      if (direction === 'CALLS' && stretch > cutoff) {
+        return {
+          block: true,
+          reason: 'STRETCHED_FROM_VWAP',
+          details: { side: 'ABOVE_VWAP', price, vwap, stretch: +stretch.toFixed(3), cutoff: +cutoff.toFixed(3), atrEst, atrMult },
+        };
+      }
+    }
+  }
+
+  // Leg 2 — PDH/PDL
+  const pdEnabled = (process.env.STRETCHED_PD_ENABLED || 'true').toLowerCase() === 'true';
+  if (pdEnabled) {
+    if (direction === 'PUTS' && pdLow != null && price < pdLow) {
+      return {
+        block: true,
+        reason: 'STRETCHED_FROM_PD',
+        details: { side: 'BELOW_PDL', price, pdLow, distance: +(pdLow - price).toFixed(3) },
+      };
+    }
+    if (direction === 'CALLS' && pdHigh != null && price > pdHigh) {
+      return {
+        block: true,
+        reason: 'STRETCHED_FROM_PD',
+        details: { side: 'ABOVE_PDH', price, pdHigh, distance: +(price - pdHigh).toFixed(3) },
+      };
+    }
+  }
+
+  return { block: false };
 }
 
 function _checkStackedDedup(instrument, direction, engine) {
