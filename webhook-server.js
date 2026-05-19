@@ -1172,7 +1172,15 @@ async function _evaluateVisionGate(consensus) {
   // Vision STILL scores + journals (data for future calibration) but
   // does NOT reject — every overnight trade dispatches regardless of
   // composite or veto. RTH stays under full gating.
-  const bypassOffRth = (process.env.VISION_BYPASS_OFFRTH || 'true').toLowerCase() === 'true';
+  //
+  // 2026-05-19 18:14 ET refinement — operator hit MNQ1! comp=2.2+veto=yes
+  // overnight that lost -$0.50 (BE_EARLY saved 91%, but the trade was a
+  // textbook late-fire model flagged correctly). VISION_OFFRTH_RESPECT_VETO
+  // keeps the veto reject path active even overnight; only composite-only
+  // rejects bypass to log-only. Binary model judgment is high-signal —
+  // respect it.
+  const bypassOffRth   = (process.env.VISION_BYPASS_OFFRTH         || 'true').toLowerCase() === 'true';
+  const respectVetoOff = (process.env.VISION_OFFRTH_RESPECT_VETO   || 'true').toLowerCase() === 'true';
   const _isRTH = (() => {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York',
@@ -1183,7 +1191,11 @@ async function _evaluateVisionGate(consensus) {
     const totalMin = parseInt(m.hour, 10) * 60 + parseInt(m.minute, 10);
     return totalMin >= 9 * 60 + 30 && totalMin < 16 * 60;
   })();
-  const offRthBypass = bypassOffRth && !_isRTH && wouldReject;
+  // off-RTH bypass fires when: bypass is enabled, we're off-RTH, would-reject
+  // is true, AND the would-reject reason is NOT veto (or respectVetoOff is false).
+  // Veto-rejections punch through the bypass when respectVetoOff is true.
+  const _vetoBreaksBypass = respectVetoOff && wouldRejectByVeto;
+  const offRthBypass = bypassOffRth && !_isRTH && wouldReject && !_vetoBreaksBypass;
   const shouldReject = wouldReject && !offRthBypass;
   const shouldRejectByComposite = shouldReject && wouldRejectByComposite;
   const shouldRejectByVeto      = shouldReject && wouldRejectByVeto;
@@ -1784,7 +1796,9 @@ server.listen(PORT, () => {
     if (_vOn) {
       const _veto = (process.env.VISION_VETO_ENABLED || 'true').toLowerCase() === 'true';
       const _offRth = (process.env.VISION_BYPASS_OFFRTH || 'true').toLowerCase() === 'true';
-      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${_offRth ? '; OFF-RTH = log-only pass' : ''})` : 'LOG-ONLY (no reject)';
+      const _respVeto = (process.env.VISION_OFFRTH_RESPECT_VETO || 'true').toLowerCase() === 'true';
+      const offRthMode = _offRth ? `; OFF-RTH bypass composite${_respVeto && _veto ? ' (veto still rejects)' : ' + veto'}` : '';
+      const mode = _vGate ? `SYNC GATE (reject < ${_vThr}${_veto ? ' OR late_fire_veto=yes' : ''}${offRthMode})` : 'LOG-ONLY (no reject)';
       console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — ${mode}, bypass=[${_vBypass}], fail-open=${_vFO}, model=${_vModel}`);
     } else {
       console.log(`  [WEBHOOK] VISION Phase 5: disabled`);
