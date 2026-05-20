@@ -743,7 +743,8 @@ async function handlePineAlert(req, res) {
   // by default (don't block trade on infra hiccup).
   const _vis = await _evaluateVisionGate(consensus);
   if (_vis.action === 'reject') {
-    const blockReason = _vis.reason === 'zone_math_block'    ? 'VISION_REJECT_ZONE_MATH'
+    const blockReason = _vis.reason === 'api_error_conservative_reject' ? 'VISION_REJECT_API_ERROR_CONSERVATIVE'
+                      : _vis.reason === 'zone_math_block'    ? 'VISION_REJECT_ZONE_MATH'
                       : _vis.reason === 'action_mult_zero'   ? 'VISION_REJECT_ACTION_ZERO'
                       : _vis.reason === 'zone_invalid_setup' ? 'VISION_REJECT_ZONE_INVALID'
                       : _vis.reason === 'late_fire_veto'     ? 'VISION_REJECT_VETO'
@@ -1300,6 +1301,30 @@ async function _evaluateVisionGate(consensus) {
     try { jError('WEBHOOK', 'VISION_SCORE_ERROR', { message: e.message, instrument, direction, engine, latencyMs: Date.now() - t0 }); } catch {}
     console.error(`  [VISION] error: ${e.message}`);
     const failOpen = (process.env.VISION_FAIL_OPEN || 'true').toLowerCase() === 'true';
+
+    // 2026-05-19 20:20 ET — Conservative fail-open (operator-spec'd).
+    // 20:15:17 ET evidence: NQ-family Vision errored → fail_open dispatched
+    // → MNQ1! won +$29.36 BY LUCK. If direction had been wrong, -$30 loss
+    // on Vision-infra failure. Architecture shouldn't be lottery on errors.
+    //
+    // Refined behavior (default on):
+    //   HIGH confidence (HTF) → pass (rare, operator-validated edge)
+    //   MEDIUM/LOW            → reject (block lottery dispatch)
+    //
+    // The upstream sibling-cache check (top of this function) already
+    // tried family fallback. If we're here, both siblings either errored
+    // or never scored — no consensus to rely on.
+    const conservative = (process.env.VISION_FAIL_OPEN_CONSERVATIVE || 'true').toLowerCase() === 'true';
+    if (failOpen && conservative) {
+      const conf = (consensus.confidence || '').toUpperCase();
+      const passOnError = conf === 'HIGH';
+      const action = passOnError ? 'fail_open' : 'reject';
+      const reason = passOnError ? 'api_error_high_conf_pass' : 'api_error_conservative_reject';
+      _journalVerdict(action, reason, { error: e.message, confidence: conf, latencyMs: Date.now() - t0 });
+      console.log(`  ${passOnError ? '⚠' : '🛑'} VISION ${action.toUpperCase()}  ${instrument} ${direction} ${engine}  conf=${conf}  ${reason}`);
+      return { action, reason, error: e.message };
+    }
+
     _journalVerdict(failOpen ? 'fail_open' : 'reject', 'api_error', { error: e.message, latencyMs: Date.now() - t0 });
     return { action: failOpen ? 'fail_open' : 'reject', reason: 'api_error', error: e.message };
   }
@@ -2069,7 +2094,8 @@ server.listen(PORT, () => {
       const _sibCache = (process.env.VISION_SIBLING_CACHE_ENABLED || 'true').toLowerCase() === 'true';
       const _dzThr   = parseFloat(process.env.VISION_REJECT_THRESHOLD_DEAD_ZONE || '5.0');
       console.log(`  [WEBHOOK] VISION Phase 5: ENABLED — model=${_vModel}, session=${_sessionBand()}`);
-      console.log(`  [WEBHOOK]   reject ladder: composite<${_vThr} [DEAD_ZONE<${_dzThr}]${_veto?' | veto=yes':''}${_zoneRej?` | ZONE-engine zone_setup_quality<${_zoneThr}`:''}${_actMult?' | action_mult=0.0':''}${_zoneMath?` | zone_math (toxic<${_toxic}pt)`:''}`);
+      const _conservativeFO = (process.env.VISION_FAIL_OPEN_CONSERVATIVE || 'true').toLowerCase() === 'true';
+      console.log(`  [WEBHOOK]   reject ladder: composite<${_vThr} [DEAD_ZONE<${_dzThr}]${_veto?' | veto=yes':''}${_zoneRej?` | ZONE-engine zone_setup_quality<${_zoneThr}`:''}${_actMult?' | action_mult=0.0':''}${_zoneMath?` | zone_math (toxic<${_toxic}pt)`:''}${_conservativeFO?' | api_error+conf<HIGH':''}`);
       console.log(`  [WEBHOOK]   OFF-RTH bypass: ${_offRth ? `composite-only (veto+zone+action+math punch through)` : 'disabled'}`);
       console.log(`  [WEBHOOK]   bypass-engines=[${_vBypass}], fail-open=${_vFO}, sibling-cache=${_sibCache ? 'on' : 'off'}`);
     } else {
