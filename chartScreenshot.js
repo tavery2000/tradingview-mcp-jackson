@@ -46,77 +46,28 @@ async function _listChartTargets() {
   return all.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
 }
 
-// Multi-strategy symbol probe. Older version only scraped
-// [class*="value-"] (status bar) which silently returned null whenever
-// that bar was collapsed or restyled. 2026-05-19 21:25 ET — operator's
-// NQ1!/MNQ1! tabs failed exactly this way after a TV reboot. Now we
-// try in priority order:
-//   1. TradingViewApi internal API (most reliable when exposed)
-//   2. tvWidget global (alternate TV embed API)
-//   3. [class*="symbolNameText"] (chart legend, present even when
-//      status bar is hidden — lists ALL symbols on the chart, so we
-//      filter against known instruments)
-//   4. [class*="value-"] (original status-bar scrape, kept as final
-//      fallback)
+// Returns the symbol the chart is currently showing. TV's DOM has the
+// active chart symbol in [class*="value-XXXXXX"] elements (status bar +
+// chart legend + small badge — typically 3 occurrences on a single-chart
+// tab). The watchlist panel uses [class*="symbolNameText"] which lists
+// ALL symbols on every tab — useless for identifying THIS chart.
+//
+// We frequency-count occurrences of known instrument names in value-
+// elements and return the dominant one. Filters out incidental matches
+// in nav menus, search results, etc.
 const _SYMBOL_PROBE_JS = `
 (function() {
   var instruments = ['SPY','QQQ','IWM','MES1!','MNQ1!','ES1!','NQ1!','GOOGL','AAPL','MSFT','NVDA','META','AMZN','TSLA'];
-  function normalize(s) {
-    if (!s) return null;
-    s = String(s).trim().toUpperCase();
-    if (s.indexOf(':') !== -1) s = s.split(':').pop();
-    return s || null;
+  var counts = {};
+  var nodes = document.querySelectorAll('[class*="value-"]');
+  for (var i = 0; i < nodes.length; i++) {
+    var t = (nodes[i].textContent || '').trim();
+    if (instruments.indexOf(t) === -1) continue;
+    counts[t] = (counts[t] || 0) + 1;
   }
-  function isKnown(s) {
-    return s && instruments.indexOf(s) !== -1;
-  }
-
-  // Strategy 1 — TradingViewApi.activeChart().symbol()
-  try {
-    var api = window.TradingViewApi;
-    if (api && typeof api.activeChart === 'function') {
-      var s = normalize(api.activeChart().symbol());
-      if (s) return { symbol: s, source: 'tv_api' };
-    }
-  } catch (e) {}
-
-  // Strategy 2 — tvWidget global
-  try {
-    if (window.tvWidget && typeof window.tvWidget.activeChart === 'function') {
-      var s2 = normalize(window.tvWidget.activeChart().symbol());
-      if (s2) return { symbol: s2, source: 'tv_widget' };
-    }
-  } catch (e) {}
-
-  // Strategy 3 — chart legend symbolNameText (present even when status bar is hidden)
-  try {
-    var legendNodes = document.querySelectorAll('[class*="symbolNameText"], [class*="symbol-"][class*="title"], [data-name*="legend-source-title"]');
-    var legendCounts = {};
-    for (var i = 0; i < legendNodes.length; i++) {
-      var t = normalize(legendNodes[i].textContent);
-      if (!isKnown(t)) continue;
-      legendCounts[t] = (legendCounts[t] || 0) + 1;
-    }
-    var bestLegend = null, maxLegend = 0;
-    for (var k in legendCounts) { if (legendCounts[k] > maxLegend) { maxLegend = legendCounts[k]; bestLegend = k; } }
-    if (bestLegend) return { symbol: bestLegend, source: 'legend' };
-  } catch (e) {}
-
-  // Strategy 4 — original [class*="value-"] status-bar scrape
-  try {
-    var counts = {};
-    var nodes = document.querySelectorAll('[class*="value-"]');
-    for (var i = 0; i < nodes.length; i++) {
-      var t = normalize(nodes[i].textContent);
-      if (!isKnown(t)) continue;
-      counts[t] = (counts[t] || 0) + 1;
-    }
-    var best = null, max = 0;
-    for (var k in counts) { if (counts[k] > max) { max = counts[k]; best = k; } }
-    if (best) return { symbol: best, source: 'status_bar' };
-  } catch (e) {}
-
-  return { symbol: null, source: 'none' };
+  var best = null, max = 0;
+  for (var k in counts) { if (counts[k] > max) { max = counts[k]; best = k; } }
+  return { symbol: best };
 })()
 `;
 
