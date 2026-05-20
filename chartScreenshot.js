@@ -275,28 +275,58 @@ async function _resolveChainCandidates(symbol) {
   return candidates;
 }
 
-// Wrap CDP connect + screenshot in a single timeout so a hung tab
-// can't burn the entire Vision budget. Returns { buffer, dataUrl }
-// or throws TIMEOUT_CAPTURE.
+// Per-tab screenshot cache + in-flight dedup. 2026-05-19 21:52 ET —
+// operator saw 4 alerts (ES1! BUY+ZONE, NQ1! BUY+ZONE) all routing to
+// the "Claude Futures" tab at 21:50:11 simultaneously time out. Same
+// TV renderer can't service parallel Page.captureScreenshot calls;
+// they queue and overflow the 12s outer budget. Coalescing collapses
+// the burst to a single capture and lets the other 3 reuse the buffer.
+const _screenshotCache = new Map();    // targetId → {buffer, dataUrl, ts}
+const _inflightCaptures = new Map();   // targetId → Promise<{buffer, dataUrl}>
+const _SCREENSHOT_CACHE_TTL_MS = parseInt(process.env.SCREENSHOT_CACHE_TTL_MS || '5000', 10);
+
 async function _captureFromTarget(target, fullPage) {
-  let client;
-  const work = (async () => {
-    client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
-    await client.Page.enable();
-    const shot = await client.Page.captureScreenshot({
-      format: 'png',
-      captureBeyondViewport: !!fullPage,
-    });
-    if (!shot?.data) throw new Error('CDP_SCREENSHOT_FAILED');
-    return {
-      buffer:  Buffer.from(shot.data, 'base64'),
-      dataUrl: `data:image/png;base64,${shot.data}`,
-    };
+  const now = Date.now();
+
+  // Cache hit — burst of alerts on the same tab within TTL share the buffer.
+  const cached = _screenshotCache.get(target.id);
+  if (cached && (now - cached.ts) < _SCREENSHOT_CACHE_TTL_MS) {
+    return { buffer: cached.buffer, dataUrl: cached.dataUrl };
+  }
+
+  // Coalesce concurrent captures for the same tab.
+  const inflight = _inflightCaptures.get(target.id);
+  if (inflight) return inflight;
+
+  const capture = (async () => {
+    let client;
+    const work = (async () => {
+      client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+      await client.Page.enable();
+      const shot = await client.Page.captureScreenshot({
+        format: 'png',
+        captureBeyondViewport: !!fullPage,
+      });
+      if (!shot?.data) throw new Error('CDP_SCREENSHOT_FAILED');
+      return {
+        buffer:  Buffer.from(shot.data, 'base64'),
+        dataUrl: `data:image/png;base64,${shot.data}`,
+      };
+    })();
+    try {
+      const result = await _withTimeout(work, _CDP_CAPTURE_TIMEOUT_MS, 'CAPTURE');
+      _screenshotCache.set(target.id, { ...result, ts: Date.now() });
+      return result;
+    } finally {
+      try { await client?.close(); } catch {}
+    }
   })();
+
+  _inflightCaptures.set(target.id, capture);
   try {
-    return await _withTimeout(work, _CDP_CAPTURE_TIMEOUT_MS, 'CAPTURE');
+    return await capture;
   } finally {
-    try { await client?.close(); } catch {}
+    _inflightCaptures.delete(target.id);
   }
 }
 
