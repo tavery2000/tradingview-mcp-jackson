@@ -158,7 +158,11 @@ const _TAB_INFO_CACHE_TTL_MS = parseInt(process.env.TAB_INFO_CACHE_TTL_MS || '30
 // tab repeatedly hangs Page.captureScreenshot long enough to blow the
 // 8s outer Vision budget even with sub-1s discovery. Bail at this
 // budget so captureChartImage can try the next chain candidate.
-const _CDP_CAPTURE_TIMEOUT_MS = parseInt(process.env.CDP_CAPTURE_TIMEOUT_MS || '5500', 10);
+const _CDP_CAPTURE_TIMEOUT_MS = parseInt(process.env.CDP_CAPTURE_TIMEOUT_MS || '9000', 10);
+// Cap chain fallback attempts. Without this, a hung primary tab burns
+// 3 × capture timeout before failing — blows the outer Vision budget
+// even though the first candidate was the right answer.
+const _MAX_CHAIN_CANDIDATES = parseInt(process.env.MAX_CHAIN_CANDIDATES || '2', 10);
 
 // Returns ordered list of candidates from the fallback chain that
 // resolved to a live tab. captureChartImage iterates this list and
@@ -370,7 +374,7 @@ export async function captureChartImage(symbol, opts = {}) {
   if (!candidates.length) throw new Error(`NO_TV_TAB_FOR_${want}`);
 
   const failures = [];
-  for (const c of candidates) {
+  for (const c of candidates.slice(0, _MAX_CHAIN_CANDIDATES)) {
     try {
       const { buffer, dataUrl } = await _captureFromTarget(c.target, fullPage);
       if (!c.viaFallback) _targetCache.set(want, c.target.id);
