@@ -1281,12 +1281,30 @@ async function _evaluateVisionGate(consensus) {
         import('./visionScorer.js'),
       ]);
       const tag = `entry-${(engine || 'X').toUpperCase()}-${(direction || 'X').toUpperCase()}`;
-      shot = await captureChartImage(instrument, { tag, persist: true });
+      console.log(`  [VISION] start ${instrument} ${direction} ${engine}`);
+      const tShot = Date.now();
+      console.log(`  [VISION] cdp_screenshot start`);
+      try {
+        shot = await captureChartImage(instrument, { tag, persist: true });
+        console.log(`  [VISION] cdp_screenshot OK ${Date.now() - tShot}ms`);
+      } catch (eShot) {
+        console.log(`  [VISION] cdp_screenshot FAIL ${Date.now() - tShot}ms (${eShot.message})`);
+        throw eShot;
+      }
       const levels = _readLevelsForVision(instrument);
-      result = await scoreChart(
-        { instrument, direction, engine, price, levels: levels || undefined },
-        shot.buffer
-      );
+      const tHaiku = Date.now();
+      console.log(`  [VISION] haiku_request start`);
+      try {
+        result = await scoreChart(
+          { instrument, direction, engine, price, levels: levels || undefined },
+          shot.buffer
+        );
+        console.log(`  [VISION] haiku_request OK ${Date.now() - tHaiku}ms`);
+      } catch (eHaiku) {
+        console.log(`  [VISION] haiku_request FAIL ${Date.now() - tHaiku}ms (${eHaiku.message})`);
+        throw eHaiku;
+      }
+      console.log(`  [VISION] total ${Date.now() - t0}ms`);
     })();
     let timeoutHandle;
     const timeoutPromise = new Promise((_, reject) => {
