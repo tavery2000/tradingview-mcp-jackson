@@ -46,18 +46,55 @@ async function _listChartTargets() {
   return all.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
 }
 
-// Returns the symbol the chart is currently showing. TV's DOM has the
-// active chart symbol in [class*="value-XXXXXX"] elements (status bar +
-// chart legend + small badge — typically 3 occurrences on a single-chart
-// tab). The watchlist panel uses [class*="symbolNameText"] which lists
-// ALL symbols on every tab — useless for identifying THIS chart.
-//
-// We frequency-count occurrences of known instrument names in value-
-// elements and return the dominant one. Filters out incidental matches
-// in nav menus, search results, etc.
+// Operator's TV layouts — primary path for tab→symbol resolution.
+// Each chart tab in TV is one named layout (dropdown top-right of the
+// chart). Layout names are stable across sessions/reboots, unlike the
+// layout-hash URLs and the brittle DOM symbol scrape. Maintain this
+// list when layouts are added or renamed.
+const _LAYOUT_TO_SYMBOLS = {
+  'Claude SPY':     ['SPY'],
+  'Claude 5M':      ['SPY','MES1!','ES1!','QQQ','NQ1!','MNQ1!'],
+  'Claude 6 Chart': ['NVDA','MSFT','AAPL','AMZN','META','GOOGL'],
+  'Claude QQQ':     ['QQQ','AMD','AVGO','TSLA','ARM','NVDA'],
+  'Claude Futures': ['ES1!','NQ1!','MNQ1!'],
+  'Cluade MES':     ['MES1!'],   // typo in TV layout name — match exactly
+};
+const _LAYOUT_NAMES_JSON = JSON.stringify(Object.keys(_LAYOUT_TO_SYMBOLS));
+
+// Combined probe — returns both the layout name (primary) and the
+// status-bar symbol scrape (fallback) in a single CDP roundtrip.
 const _SYMBOL_PROBE_JS = `
 (function() {
+  var layoutNames = ${_LAYOUT_NAMES_JSON};
   var instruments = ['SPY','QQQ','IWM','MES1!','MNQ1!','ES1!','NQ1!','GOOGL','AAPL','MSFT','NVDA','META','AMZN','TSLA'];
+
+  // === Layout name probe (primary) ===
+  var layout = null;
+  function checkLayout(s) {
+    if (!s) return null;
+    s = String(s).trim();
+    for (var i = 0; i < layoutNames.length; i++) if (s === layoutNames[i]) return layoutNames[i];
+    return null;
+  }
+  try {
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      layout = checkLayout(node.nodeValue);
+      if (layout) break;
+    }
+  } catch (e) {}
+  if (!layout) {
+    try {
+      var els = document.querySelectorAll('[title], [aria-label]');
+      for (var i = 0; i < els.length; i++) {
+        layout = checkLayout(els[i].getAttribute('title')) || checkLayout(els[i].getAttribute('aria-label'));
+        if (layout) break;
+      }
+    } catch (e) {}
+  }
+
+  // === Symbol probe (status bar — fallback) ===
   var counts = {};
   var nodes = document.querySelectorAll('[class*="value-"]');
   for (var i = 0; i < nodes.length; i++) {
@@ -67,7 +104,8 @@ const _SYMBOL_PROBE_JS = `
   }
   var best = null, max = 0;
   for (var k in counts) { if (counts[k] > max) { max = counts[k]; best = k; } }
-  return { symbol: best };
+
+  return { layout: layout, symbol: best };
 })()
 `;
 
@@ -109,13 +147,12 @@ const _FALLBACK_CHAIN = {
   'MES1!': ['MES1!', 'ES1!',  'SPY'],
 };
 
-// 2026-05-19 20:30 ET — tab-symbol cache. Operator's 8 NQ-family alerts
-// at 20:27:07-09 all hit VISION_TIMEOUT because sequential CDP probe of
-// 6 tabs (~1-2s each) exceeded the 8s outer Vision budget BEFORE
-// discovery completed. Cache the tab→symbol mapping for 30s so repeat
-// calls are sub-ms.
-const _tabSymbolCache = new Map();  // targetId → {symbol, ts}
-const _TAB_SYMBOL_CACHE_TTL_MS = parseInt(process.env.TAB_SYMBOL_CACHE_TTL_MS || '30000', 10);
+// 2026-05-19 20:30 ET — tab-info cache. Now caches {layout, symbol}
+// per tab to support both layout-name primary matching and the
+// legacy DOM symbol scrape. Layouts rarely change so we can hold for
+// longer; bump TTL accordingly.
+const _tabInfoCache = new Map();  // targetId → {info: {layout, symbol}, ts}
+const _TAB_INFO_CACHE_TTL_MS = parseInt(process.env.TAB_INFO_CACHE_TTL_MS || '300000', 10); // 5 min
 
 // 2026-05-19 20:42 ET — bound the CDP connect+capture. Operator's NQ1!
 // tab repeatedly hangs Page.captureScreenshot long enough to blow the
@@ -143,21 +180,21 @@ async function _resolveChainCandidates(symbol) {
     }
   }
 
-  // DOM probe — parallelized via Promise.all; cache hits skip the probe.
+  // Combined probe — parallelized via Promise.all; cache hits skip the probe.
   const now = Date.now();
-  const tabSymbols = new Map();
+  const tabInfo = new Map();    // targetId → {layout, symbol}
   const toProbe = [];
   for (const t of targets) {
-    const cached = _tabSymbolCache.get(t.id);
-    if (cached && (now - cached.ts) < _TAB_SYMBOL_CACHE_TTL_MS) {
-      tabSymbols.set(t.id, cached.symbol);
+    const cached = _tabInfoCache.get(t.id);
+    if (cached && (now - cached.ts) < _TAB_INFO_CACHE_TTL_MS) {
+      tabInfo.set(t.id, cached.info);
     } else {
       toProbe.push(t);
     }
   }
   const currentIds = new Set(targets.map(t => t.id));
-  for (const cachedId of _tabSymbolCache.keys()) {
-    if (!currentIds.has(cachedId)) _tabSymbolCache.delete(cachedId);
+  for (const cachedId of [..._tabInfoCache.keys()]) {
+    if (!currentIds.has(cachedId)) _tabInfoCache.delete(cachedId);
   }
   await Promise.all(toProbe.map(async (t) => {
     let client;
@@ -166,11 +203,15 @@ async function _resolveChainCandidates(symbol) {
         client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: t.id });
         await client.Runtime.enable();
         const r = await client.Runtime.evaluate({ expression: _SYMBOL_PROBE_JS, returnByValue: true });
-        return (r.result?.value?.symbol || '').toUpperCase();
+        const v = r.result?.value || {};
+        return {
+          layout: v.layout || null,
+          symbol: (v.symbol || '').toUpperCase() || null,
+        };
       })();
-      const sym = await _withTimeout(work, _CDP_PROBE_TIMEOUT_MS, 'PROBE');
-      tabSymbols.set(t.id, sym);
-      _tabSymbolCache.set(t.id, { symbol: sym, ts: Date.now() });
+      const info = await _withTimeout(work, _CDP_PROBE_TIMEOUT_MS, 'PROBE');
+      tabInfo.set(t.id, info);
+      _tabInfoCache.set(t.id, { info, ts: Date.now() });
     } catch {
       // Probe failed/timed out — move on; cache nothing for retry next call.
     } finally {
@@ -178,20 +219,53 @@ async function _resolveChainCandidates(symbol) {
     }
   }));
 
-  // Build ordered candidate list: for each chain symbol, prefer URL match,
-  // fall back to DOM match. Skip duplicates by target id.
+  // Build ordered candidate list. Priority per chain symbol:
+  //   1. URL match (exact ?symbol=… — rare in operator's TV setup)
+  //   2. Layout match — pick smallest layout (most focused chart) first
+  //   3. DOM symbol exact match (status-bar scrape)
+  //   4. DOM symbol substring match (legacy fallback)
   const seenIds = new Set();
   const candidates = [];
   for (const candidate of chain) {
     const viaFallback = candidate !== want;
+
+    // 1. URL
     const urlT = urlMatches.get(candidate);
     if (urlT && !seenIds.has(urlT.id)) {
       candidates.push({ target: urlT, matchedSymbol: candidate, viaFallback });
       seenIds.add(urlT.id);
     }
+
+    // 2. Layout — ordered by fewest symbols (most focused)
+    const layoutMatches = [];
     for (const t of targets) {
       if (seenIds.has(t.id)) continue;
-      const sym = tabSymbols.get(t.id);
+      const layout = tabInfo.get(t.id)?.layout;
+      const syms = layout ? (_LAYOUT_TO_SYMBOLS[layout] || []) : null;
+      if (syms && syms.includes(candidate)) {
+        layoutMatches.push({ target: t, precision: syms.length });
+      }
+    }
+    layoutMatches.sort((a, b) => a.precision - b.precision);
+    for (const m of layoutMatches) {
+      candidates.push({ target: m.target, matchedSymbol: candidate, viaFallback });
+      seenIds.add(m.target.id);
+    }
+
+    // 3. DOM symbol — exact match
+    for (const t of targets) {
+      if (seenIds.has(t.id)) continue;
+      const sym = tabInfo.get(t.id)?.symbol;
+      if (sym && sym === candidate) {
+        candidates.push({ target: t, matchedSymbol: candidate, viaFallback });
+        seenIds.add(t.id);
+      }
+    }
+
+    // 4. DOM symbol — substring fallback (legacy)
+    for (const t of targets) {
+      if (seenIds.has(t.id)) continue;
+      const sym = tabInfo.get(t.id)?.symbol;
       if (sym && sym.includes(candidate)) {
         candidates.push({ target: t, matchedSymbol: candidate, viaFallback });
         seenIds.add(t.id);
