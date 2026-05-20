@@ -1273,7 +1273,7 @@ async function _evaluateVisionGate(consensus) {
   // the trade indefinitely with no error log. Two MES1!/ES1! CALLS BUY
   // alerts at 18:02:59-03:00 sat in limbo for 90+ sec post-CME-resume.
   // Now bounded — anything beyond VISION_TIMEOUT_MS throws and fails open.
-  const visionTimeoutMs = parseInt(process.env.VISION_TIMEOUT_MS || '8000', 10);
+  const visionTimeoutMs = parseInt(process.env.VISION_TIMEOUT_MS || '12000', 10);
   try {
     const visionPipeline = (async () => {
       const [{ captureChartImage }, { scoreChart }] = await Promise.all([
