@@ -121,7 +121,7 @@ const _TAB_SYMBOL_CACHE_TTL_MS = parseInt(process.env.TAB_SYMBOL_CACHE_TTL_MS ||
 // tab repeatedly hangs Page.captureScreenshot long enough to blow the
 // 8s outer Vision budget even with sub-1s discovery. Bail at this
 // budget so captureChartImage can try the next chain candidate.
-const _CDP_CAPTURE_TIMEOUT_MS = parseInt(process.env.CDP_CAPTURE_TIMEOUT_MS || '3500', 10);
+const _CDP_CAPTURE_TIMEOUT_MS = parseInt(process.env.CDP_CAPTURE_TIMEOUT_MS || '5500', 10);
 
 // Returns ordered list of candidates from the fallback chain that
 // resolved to a live tab. captureChartImage iterates this list and
