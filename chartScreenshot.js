@@ -117,25 +117,33 @@ const _FALLBACK_CHAIN = {
 const _tabSymbolCache = new Map();  // targetId → {symbol, ts}
 const _TAB_SYMBOL_CACHE_TTL_MS = parseInt(process.env.TAB_SYMBOL_CACHE_TTL_MS || '30000', 10);
 
-async function _findTargetForSymbol(symbol) {
+// 2026-05-19 20:42 ET — bound the CDP connect+capture. Operator's NQ1!
+// tab repeatedly hangs Page.captureScreenshot long enough to blow the
+// 8s outer Vision budget even with sub-1s discovery. Bail at this
+// budget so captureChartImage can try the next chain candidate.
+const _CDP_CAPTURE_TIMEOUT_MS = parseInt(process.env.CDP_CAPTURE_TIMEOUT_MS || '3500', 10);
+
+// Returns ordered list of candidates from the fallback chain that
+// resolved to a live tab. captureChartImage iterates this list and
+// tries each one — letting us survive a single hung tab (e.g. frozen
+// NQ1! renderer) by falling through to MNQ1!/QQQ.
+async function _resolveChainCandidates(symbol) {
   const want = (symbol || '').toUpperCase();
   const targets = await _listChartTargets();
   if (!targets.length) throw new Error('NO_TV_CHART_TARGETS — is TradingView Desktop running?');
 
-  // Build the chain of acceptable symbols (primary + fallbacks).
   const chain = _FALLBACK_CHAIN[want] || [want];
 
-  // Phase 1 — URL match against each chain symbol (cheapest, ~0ms)
+  // URL match (cheapest, ~0ms) — index by candidate
+  const urlMatches = new Map();  // candidate → target
   for (const candidate of chain) {
     for (const t of targets) {
       const urlSym = (_extractSymbolFromUrl(t.url) || '').toUpperCase();
-      if (urlSym === candidate) return { target: t, matchedSymbol: candidate, viaFallback: candidate !== want };
+      if (urlSym === candidate && !urlMatches.has(candidate)) urlMatches.set(candidate, t);
     }
   }
 
-  // Phase 2 — DOM probe each target. Parallelized via Promise.all so
-  // 6 tabs probe in ~1.5s total instead of ~9s sequential. Cache hits
-  // skip the probe entirely.
+  // DOM probe — parallelized via Promise.all; cache hits skip the probe.
   const now = Date.now();
   const tabSymbols = new Map();
   const toProbe = [];
@@ -147,12 +155,10 @@ async function _findTargetForSymbol(symbol) {
       toProbe.push(t);
     }
   }
-  // GC stale cache entries (targets that no longer exist)
   const currentIds = new Set(targets.map(t => t.id));
   for (const cachedId of _tabSymbolCache.keys()) {
     if (!currentIds.has(cachedId)) _tabSymbolCache.delete(cachedId);
   }
-  // Parallel probe of uncached tabs
   await Promise.all(toProbe.map(async (t) => {
     let client;
     try {
@@ -172,15 +178,52 @@ async function _findTargetForSymbol(symbol) {
     }
   }));
 
-  // Now walk chain in priority order
+  // Build ordered candidate list: for each chain symbol, prefer URL match,
+  // fall back to DOM match. Skip duplicates by target id.
+  const seenIds = new Set();
+  const candidates = [];
   for (const candidate of chain) {
+    const viaFallback = candidate !== want;
+    const urlT = urlMatches.get(candidate);
+    if (urlT && !seenIds.has(urlT.id)) {
+      candidates.push({ target: urlT, matchedSymbol: candidate, viaFallback });
+      seenIds.add(urlT.id);
+    }
     for (const t of targets) {
+      if (seenIds.has(t.id)) continue;
       const sym = tabSymbols.get(t.id);
-      if (sym && sym.includes(candidate)) return { target: t, matchedSymbol: candidate, viaFallback: candidate !== want };
+      if (sym && sym.includes(candidate)) {
+        candidates.push({ target: t, matchedSymbol: candidate, viaFallback });
+        seenIds.add(t.id);
+      }
     }
   }
+  return candidates;
+}
 
-  return null;
+// Wrap CDP connect + screenshot in a single timeout so a hung tab
+// can't burn the entire Vision budget. Returns { buffer, dataUrl }
+// or throws TIMEOUT_CAPTURE.
+async function _captureFromTarget(target, fullPage) {
+  let client;
+  const work = (async () => {
+    client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+    await client.Page.enable();
+    const shot = await client.Page.captureScreenshot({
+      format: 'png',
+      captureBeyondViewport: !!fullPage,
+    });
+    if (!shot?.data) throw new Error('CDP_SCREENSHOT_FAILED');
+    return {
+      buffer:  Buffer.from(shot.data, 'base64'),
+      dataUrl: `data:image/png;base64,${shot.data}`,
+    };
+  })();
+  try {
+    return await _withTimeout(work, _CDP_CAPTURE_TIMEOUT_MS, 'CAPTURE');
+  } finally {
+    try { await client?.close(); } catch {}
+  }
 }
 
 /**
@@ -200,46 +243,43 @@ export async function captureChartImage(symbol, opts = {}) {
   const want = (symbol || '').toUpperCase();
   if (!want) throw new Error('captureChartImage: symbol required');
 
-  // Cache check — but always re-validate URL contains symbol (tab could
-  // have been navigated away in between calls).
+  // Try cached target first — validates URL still matches.
   const cachedId = _targetCache.get(want);
-  let target = null;
-  let matchedSymbol = want;
-  let viaFallback = false;
   if (cachedId) {
     const all = await _listChartTargets();
     const t = all.find(t => t.id === cachedId);
-    if (t && (_extractSymbolFromUrl(t.url) || '').toUpperCase() === want) target = t;
-  }
-  if (!target) {
-    const found = await _findTargetForSymbol(want);
-    if (!found) throw new Error(`NO_TV_TAB_FOR_${want}`);
-    target = found.target;
-    matchedSymbol = found.matchedSymbol;
-    viaFallback = found.viaFallback;
-    if (!viaFallback) _targetCache.set(want, target.id);
-    // Don't cache fallback matches under the requested symbol —
-    // could prevent future direct matches if the primary tab opens later.
-  }
-
-  // Connect + enable Page domain + capture.
-  let client;
-  let dataUrl, buffer;
-  try {
-    client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
-    await client.Page.enable();
-    // Brief settle in case the tab was just navigated.
-    const shot = await client.Page.captureScreenshot({
-      format: 'png',
-      captureBeyondViewport: !!fullPage,
-    });
-    if (!shot?.data) throw new Error('CDP_SCREENSHOT_FAILED');
-    buffer  = Buffer.from(shot.data, 'base64');
-    dataUrl = `data:image/png;base64,${shot.data}`;
-  } finally {
-    try { await client?.close(); } catch {}
+    if (t && (_extractSymbolFromUrl(t.url) || '').toUpperCase() === want) {
+      try {
+        const { buffer, dataUrl } = await _captureFromTarget(t, fullPage);
+        return _packageResult(buffer, dataUrl, t.id, want, want, false, persist, tag);
+      } catch (e) {
+        // Hung/dead tab — drop cache and fall through to chain discovery.
+        _targetCache.delete(want);
+      }
+    } else {
+      _targetCache.delete(want);
+    }
   }
 
+  // Resolve ordered chain candidates and try each until one captures.
+  const candidates = await _resolveChainCandidates(want);
+  if (!candidates.length) throw new Error(`NO_TV_TAB_FOR_${want}`);
+
+  const failures = [];
+  for (const c of candidates) {
+    try {
+      const { buffer, dataUrl } = await _captureFromTarget(c.target, fullPage);
+      if (!c.viaFallback) _targetCache.set(want, c.target.id);
+      return _packageResult(buffer, dataUrl, c.target.id, want, c.matchedSymbol, c.viaFallback, persist, tag);
+    } catch (e) {
+      failures.push(`${c.matchedSymbol}:${e.message}`);
+      // Try next candidate.
+    }
+  }
+  throw new Error(`CDP_SCREENSHOT_ALL_FAILED_${want} [${failures.join(', ')}]`);
+}
+
+function _packageResult(buffer, dataUrl, targetId, want, matchedSymbol, viaFallback, persist, tag) {
   const ts = Date.now();
   let outPath = null;
   if (persist) {
@@ -249,13 +289,12 @@ export async function captureChartImage(symbol, opts = {}) {
     outPath = join(dir, `${ts}-${safeSym}-${tag}.png`);
     writeFileSync(outPath, buffer);
   }
-
   return {
     buffer, dataUrl, path: outPath,
-    targetId: target.id,
-    symbol: want,           // what was requested
-    matchedSymbol,          // what we actually captured (may differ from `symbol` if fallback)
-    viaFallback,            // true if we captured a related chart (e.g. NQ1!→QQQ)
+    targetId,
+    symbol: want,
+    matchedSymbol,
+    viaFallback,
     ts,
   };
 }
