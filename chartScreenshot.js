@@ -109,6 +109,14 @@ const _FALLBACK_CHAIN = {
   'MES1!': ['MES1!', 'ES1!',  'SPY'],
 };
 
+// 2026-05-19 20:30 ET — tab-symbol cache. Operator's 8 NQ-family alerts
+// at 20:27:07-09 all hit VISION_TIMEOUT because sequential CDP probe of
+// 6 tabs (~1-2s each) exceeded the 8s outer Vision budget BEFORE
+// discovery completed. Cache the tab→symbol mapping for 30s so repeat
+// calls are sub-ms.
+const _tabSymbolCache = new Map();  // targetId → {symbol, ts}
+const _TAB_SYMBOL_CACHE_TTL_MS = parseInt(process.env.TAB_SYMBOL_CACHE_TTL_MS || '30000', 10);
+
 async function _findTargetForSymbol(symbol) {
   const want = (symbol || '').toUpperCase();
   const targets = await _listChartTargets();
@@ -125,12 +133,27 @@ async function _findTargetForSymbol(symbol) {
     }
   }
 
-  // Phase 2 — DOM probe each target ONCE, record which symbol it shows.
-  // Then walk the chain in order, return first match. This is more
-  // efficient than probing once per chain entry (avoids 3× probing all
-  // tabs for the same instrument family).
-  const tabSymbols = new Map();  // targetId → resolved symbol uppercase
+  // Phase 2 — DOM probe each target. Parallelized via Promise.all so
+  // 6 tabs probe in ~1.5s total instead of ~9s sequential. Cache hits
+  // skip the probe entirely.
+  const now = Date.now();
+  const tabSymbols = new Map();
+  const toProbe = [];
   for (const t of targets) {
+    const cached = _tabSymbolCache.get(t.id);
+    if (cached && (now - cached.ts) < _TAB_SYMBOL_CACHE_TTL_MS) {
+      tabSymbols.set(t.id, cached.symbol);
+    } else {
+      toProbe.push(t);
+    }
+  }
+  // GC stale cache entries (targets that no longer exist)
+  const currentIds = new Set(targets.map(t => t.id));
+  for (const cachedId of _tabSymbolCache.keys()) {
+    if (!currentIds.has(cachedId)) _tabSymbolCache.delete(cachedId);
+  }
+  // Parallel probe of uncached tabs
+  await Promise.all(toProbe.map(async (t) => {
     let client;
     try {
       const work = (async () => {
@@ -141,12 +164,13 @@ async function _findTargetForSymbol(symbol) {
       })();
       const sym = await _withTimeout(work, _CDP_PROBE_TIMEOUT_MS, 'PROBE');
       tabSymbols.set(t.id, sym);
+      _tabSymbolCache.set(t.id, { symbol: sym, ts: Date.now() });
     } catch {
-      // Probe failed/timed out — move on to next tab.
+      // Probe failed/timed out — move on; cache nothing for retry next call.
     } finally {
       try { await client?.close(); } catch {}
     }
-  }
+  }));
 
   // Now walk chain in priority order
   for (const candidate of chain) {
