@@ -182,14 +182,72 @@ async function handlePineAlert(req, res) {
                   : '—';
   console.log(`  [PINE-ALERT] ${instrument} ${direction} | engine ${engine} | conf ${confidence} | price ${price} | tf ${timeframe} | ${etTimeString()} ET`);
 
+  // §FIX12 (Pine 2026-05-19 EOD) — parse zone coords if Pine emitted them
+  function _numOrNullField(v) {
+    if (v == null || v === 'null' || v === '') return null;
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    return isFinite(n) ? n : null;
+  }
+  const pineSupLower = _numOrNullField(body.nearest_supply_lower);
+  const pineSupUpper = _numOrNullField(body.nearest_supply_upper);
+  const pineDemLower = _numOrNullField(body.nearest_demand_lower);
+  const pineDemUpper = _numOrNullField(body.nearest_demand_upper);
+
   // Journal every inbound Pine alert at receipt — BEFORE any gate or
   // downstream code path. Prevents the "[PINE-ALERT] logged to console but
   // no journal record" gap that hid today's webhook outages from the
   // post-mortem dataset. Subsequent records (GATE_BLOCK / SIGNAL / ERROR /
   // ENTRY) then narrate what happened to this specific alert.
   try {
-    jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, timeframe, et: etTimeString() });
+    jAlert('INFO', 'pine-alert.inbound', { instrument, direction, engine, confidence, price, vwap, alertName, timeframe,
+      nearest_supply_lower: pineSupLower, nearest_supply_upper: pineSupUpper,
+      nearest_demand_lower: pineDemLower, nearest_demand_upper: pineDemUpper,
+      et: etTimeString() });
   } catch {}
+
+  // 2026-05-19 20:02 ET — Pine-only zone math gate.
+  // Operator's 20:01:18 MES1! PUTS LIVE -$11.25 was LIVE-engine-bypass
+  // through Vision (intra-bar, no time for 2s API call). Vision protection
+  // missed it entirely. Now: when Pine §FIX12 emits nearest_supply/demand
+  // coords, run a mechanical R:R check FIRST — works on EVERY engine
+  // including LIVE, costs zero latency, no Vision dependency.
+  //
+  // Applies same toxic-proximity + negative-RR rules as Vision's
+  // zoneMathFilter, just sourced from Pine's box objects instead of
+  // model-extracted Y-axis labels. Pine is ground-truth.
+  //
+  // No-op when Pine coords absent (old Pine version OR zones not yet
+  // formed in the session). Operator must paste Pine §FIX12 for this
+  // gate to activate.
+  const pineZoneGateEnabled = (process.env.PINE_ZONE_MATH_FILTER_ENABLED || 'true').toLowerCase() === 'true';
+  if (pineZoneGateEnabled && price != null && (pineSupLower != null || pineDemUpper != null)) {
+    const toxicPts = parseFloat(process.env.PINE_ZONE_TOXIC_POINTS || '2.0');
+    const dir = (direction || '').toUpperCase();
+    let block = null;
+    if (dir === 'CALLS' && pineSupLower != null) {
+      const upside = pineSupLower - price;
+      const downside = pineDemUpper != null ? (price - pineDemUpper) : null;
+      if (upside <= 0) block = { reason: 'PINE_INSIDE_OR_ABOVE_SUPPLY', upside, downside };
+      else if (upside < toxicPts) block = { reason: 'PINE_TOXIC_PROXIMITY_SUPPLY', upside, downside, toxicPts };
+      else if (downside != null && downside > upside) block = { reason: 'PINE_NEGATIVE_RR_TO_DEMAND', upside, downside, rr: +(upside/downside).toFixed(2) };
+    } else if (dir === 'PUTS' && pineDemUpper != null) {
+      const downside = price - pineDemUpper;
+      const upside   = pineSupLower != null ? (pineSupLower - price) : null;
+      if (downside <= 0) block = { reason: 'PINE_INSIDE_OR_BELOW_DEMAND', upside, downside };
+      else if (downside < toxicPts) block = { reason: 'PINE_TOXIC_PROXIMITY_DEMAND', upside, downside, toxicPts };
+      else if (upside != null && upside > downside) block = { reason: 'PINE_NEGATIVE_RR_TO_SUPPLY', upside, downside, rr: +(downside/upside).toFixed(2) };
+    }
+    if (block) {
+      jGateBlock(engine, instrument, direction, 'PINE_ZONE_MATH_BLOCK', {
+        ...block,
+        pineSupLower, pineSupUpper, pineDemLower, pineDemUpper,
+        price, etTime: etTimeString(),
+        note: `Pine-emitted zone coords show ${block.reason} — entry blocked without Vision call (works on LIVE engine too).`,
+      });
+      console.log(`  🛑 PINE_ZONE_MATH_BLOCK  ${instrument} ${direction} ${engine}  ${block.reason}  upside=${block.upside?.toFixed(2)} downside=${block.downside?.toFixed(2)}`);
+      return send(res, 200, { ok: false, reason: 'PINE_ZONE_MATH_BLOCK', detail: block });
+    }
+  }
 
   // 2026-05-18 — FADE engine Phase 1. Pine emits engine=FADE_CANDIDATE on
   // vol/range/VWAP-extension reversal candles. Webhook joins with
@@ -1959,6 +2017,11 @@ server.listen(PORT, () => {
   console.log(`  [WEBHOOK] Signal timeframe: ${_acceptedTfsBanner.join('/')} (other TFs → IGNORED_TIMEFRAME)`);
   console.log(`  [WEBHOOK] FADE_ENGINE PHASE 1 ENABLED — vol/range/VWAP triggers; news join 60s HIGH-impact; FOMC/CPI/NFP/GDP/PCE ±15min blackout; per-event dedup 5min`);
   console.log(`  [WEBHOOK] stacked-entry dedup: ENABLED (5m bar window, first-engine wins) — applies to futures + equity`);
+  {
+    const _pzm = (process.env.PINE_ZONE_MATH_FILTER_ENABLED || 'true').toLowerCase() === 'true';
+    const _tx = parseFloat(process.env.PINE_ZONE_TOXIC_POINTS || '2.0');
+    console.log(`  [WEBHOOK] Pine zone-math gate: ${_pzm ? `ENABLED (toxic<${_tx}pt — runs on EVERY engine incl. LIVE, no Vision needed, requires Pine §FIX12)` : 'disabled'}`);
+  }
   {
     const _ptOn = (process.env.STACKED_DEDUP_PASSTHROUGH_ENABLED || 'true').toLowerCase() === 'true';
     const _ptAge = parseInt(process.env.STACKED_DEDUP_PASSTHROUGH_MIN_AGE_MS || '5000', 10);
